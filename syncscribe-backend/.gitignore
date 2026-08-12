@@ -1,0 +1,29 @@
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Логи и артефакты локальных прогонов/E2E-тестов
+*.log
+worker_logs.txt
+final*.txt
+test*.txt
+temp_*.py
+e2e_test*.py
+/tmp/
+
+# IDE
+.vscode/
+.idea/
+
+# Docker
+*.pid

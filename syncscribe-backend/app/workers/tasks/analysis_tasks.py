@@ -10,6 +10,8 @@ import logging
 import uuid
 
 from celery import chord
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
 from app.domain.exceptions import DocumentParseError, LLMInvalidResponseError, LLMTimeoutError
@@ -20,7 +22,6 @@ from app.infrastructure.db.repositories.analysis_job_repository import AnalysisJ
 from app.infrastructure.db.repositories.document_repository import DocumentRepository
 from app.infrastructure.db.repositories.source_repository import SourceRepository
 from app.infrastructure.db.repositories.suggestion_repository import SuggestionRepository
-from app.infrastructure.db.session import get_sessionmaker
 from app.infrastructure.llm.factory import get_llm_client
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 from app.infrastructure.queue.dead_letter_store import DeadLetterStore
@@ -37,8 +38,30 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+class _TaskDbSession:
+    """
+    Создаёт отдельный AsyncEngine + сессию строго на время одного Celery-вызова и
+    гарантированно закрывает движок при выходе — движок никогда не покидает event loop,
+    в котором был создан, поэтому проблема "attached to a different loop" структурно
+    невозможна: у каждого вызова свой изолированный движок.
+    """
+
+    def __init__(self):
+        settings = get_settings()
+        self._engine = create_async_engine(settings.database_url, poolclass=NullPool, echo=settings.debug)
+        self._sessionmaker = async_sessionmaker(self._engine, expire_on_commit=False, class_=AsyncSession)
+
+    async def __aenter__(self) -> AsyncSession:
+        self._session = self._sessionmaker()
+        return await self._session.__aenter__()
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self._session.__aexit__(exc_type, exc, tb)
+        await self._engine.dispose()
+
+
 async def _start_job(job_id: str) -> list[str]:
-    async with get_sessionmaker()() as session:
+    async with _TaskDbSession() as session:
         job_repo = AnalysisJobRepository(session)
         document_repo = DocumentRepository(session)
 
@@ -59,7 +82,7 @@ async def _process_source(job_id: str, source_id: str) -> dict:
     connector = ManualUploadConnector(storage, _parser_registry)
     llm_client = get_llm_client(settings)
 
-    async with get_sessionmaker()() as session:
+    async with _TaskDbSession() as session:
         job_repo = AnalysisJobRepository(session)
         document_repo = DocumentRepository(session)
         source_repo = SourceRepository(session)
@@ -108,7 +131,7 @@ def process_source_for_analysis_job(self, job_id: str, source_id: str) -> dict:
 
 
 async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
-    async with get_sessionmaker()() as session:
+    async with _TaskDbSession() as session:
         job_repo = AnalysisJobRepository(session)
         document_repo = DocumentRepository(session)
 
