@@ -1,0 +1,111 @@
+version: "3.9"
+
+networks:
+  syncscribe-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  minio-data:
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-syncscribe}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-syncscribe}
+      POSTGRES_DB: ${POSTGRES_DB:-syncscribe}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-syncscribe}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - syncscribe-net
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - syncscribe-net
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-syncscribe}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-syncscribe123}
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - syncscribe-net
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-syncscribe} ${MINIO_ROOT_PASSWORD:-syncscribe123} &&
+      mc mb -p local/${MINIO_BUCKET:-syncscribe-documents} &&
+      mc anonymous set none local/${MINIO_BUCKET:-syncscribe-documents} &&
+      exit 0
+      "
+    networks:
+      - syncscribe-net
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    networks:
+      - syncscribe-net
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - syncscribe-net
