@@ -4,7 +4,7 @@
 """
 import uuid
 
-from app.domain.exceptions import DocumentNotFoundError, SuggestionNotFoundError
+from app.domain.exceptions import DocumentNotFoundError, SuggestionAlreadyDecidedError, SuggestionNotFoundError
 from app.domain.interfaces.document_exporter import AppliedChange
 from app.infrastructure.db.models.enums import SuggestionStatus
 from app.infrastructure.db.models.suggestion import Suggestion
@@ -37,12 +37,15 @@ class SuggestionService:
         return suggestion
 
     async def decide(self, suggestion: Suggestion, user_id: uuid.UUID, status: SuggestionStatus) -> Suggestion:
-        return await self._suggestions.update_status(suggestion, status, user_id)
+        updated = await self._suggestions.update_status(suggestion, status, user_id)
+        if updated is None:
+            raise SuggestionAlreadyDecidedError(f"Правка {suggestion.id} уже была обработана другим запросом")
+        return updated
 
     async def bulk_accept(self, project_id: uuid.UUID, document_id: uuid.UUID, user_id: uuid.UUID) -> list[Suggestion]:
         suggestions = await self.list_suggestions_for_document(project_id, document_id)
-        pending = [s for s in suggestions if s.status == SuggestionStatus.PENDING]
-        return await self._suggestions.bulk_update_status(pending, SuggestionStatus.ACCEPTED, user_id)
+        pending_ids = [s.id for s in suggestions if s.status == SuggestionStatus.PENDING]
+        return await self._suggestions.bulk_update_status(pending_ids, SuggestionStatus.ACCEPTED, user_id)
 
     async def get_accepted_changes(self, document_id: uuid.UUID) -> list[AppliedChange]:
         document = await self._documents.get_by_id(document_id)

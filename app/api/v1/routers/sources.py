@@ -1,19 +1,19 @@
 """
 Источники истины внутри проекта: текстовая заметка/ссылка через JSON-эндпоинт,
-файл — через отдельный multipart-эндпоинт (разные типы контента запроса не смешиваем в одном роутере).
+файл — через отдельный multipart-эндпоинт.
 
 Путь в репозитории: app/api/v1/routers/sources.py
 
-ИСПРАВЛЕНО: upload_file_source не проверял file.filename перед использованием.
-Без проверки отсутствующее имя файла превращалось в буквальную подстроку "None"
-внутри storage_key ("projects/{id}/sources/{id}/None") вместо явной ошибки клиенту.
-Теперь отсутствие имени файла возвращает 400 Bad Request.
+ИСПРАВЛЕНО: upload_file_source теперь читает файл через read_upload_within_limit()
+чанками вместо полной буферизации через file.read().
 """
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 
 from app.api.deps import get_allowed_project
 from app.api.schemas.source import SourceCreateRequest, SourceResponse
+from app.api.upload_utils import read_upload_within_limit
+from app.core.config import Settings, get_settings
 from app.core.dependencies import get_source_service
 from app.domain.exceptions import FileTooLargeError
 from app.domain.services.source_service import SourceService
@@ -42,10 +42,14 @@ async def upload_file_source(
     file: UploadFile = File(...),
     project: Project = Depends(get_allowed_project),
     source_service: SourceService = Depends(get_source_service),
+    settings: Settings = Depends(get_settings),
 ) -> SourceResponse:
     if not file.filename:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Имя файла обязательно")
-    content = await file.read()
+    try:
+        content = await read_upload_within_limit(file, settings.max_upload_size_bytes)
+    except FileTooLargeError as exc:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
     try:
         source = await source_service.create_file_source(
             project, name, file.filename, content, file.content_type or "application/octet-stream"

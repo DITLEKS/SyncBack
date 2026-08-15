@@ -1,4 +1,9 @@
-"""Просмотр и точечное подтверждение/отклонение правок, bulk-accept."""
+"""Просмотр и точечное подтверждение/отклонение правок, bulk-accept.
+
+ИСПРАВЛЕНО: accept/reject теперь ловят SuggestionAlreadyDecidedError и возвращают
+409 Conflict, если правка уже была решена другим параллельным запросом (см.
+ SuggestionRepository.update_status).
+"""
 import logging
 import uuid
 
@@ -7,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.api.deps import get_allowed_project, get_current_user
 from app.api.schemas.suggestion import BulkAcceptResponse, SuggestionResponse
 from app.core.dependencies import get_audit_log_service, get_suggestion_service
-from app.domain.exceptions import DocumentNotFoundError, SuggestionNotFoundError
+from app.domain.exceptions import DocumentNotFoundError, SuggestionAlreadyDecidedError, SuggestionNotFoundError
 from app.domain.services.audit_log_service import AuditLogService
 from app.domain.services.suggestion_service import SuggestionService
 from app.infrastructure.db.models.enums import AuditAction, SuggestionStatus
@@ -52,7 +57,10 @@ async def accept_suggestion(
         suggestion = await suggestion_service.get_suggestion_for_document(project.id, document_id, suggestion_id)
     except (DocumentNotFoundError, SuggestionNotFoundError) as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    suggestion = await suggestion_service.decide(suggestion, current_user.id, SuggestionStatus.ACCEPTED)
+    try:
+        suggestion = await suggestion_service.decide(suggestion, current_user.id, SuggestionStatus.ACCEPTED)
+    except SuggestionAlreadyDecidedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     await _log_decision(audit_log_service, current_user.id, suggestion.id, AuditAction.ACCEPT)
     return SuggestionResponse.model_validate(suggestion)
 
@@ -70,7 +78,10 @@ async def reject_suggestion(
         suggestion = await suggestion_service.get_suggestion_for_document(project.id, document_id, suggestion_id)
     except (DocumentNotFoundError, SuggestionNotFoundError) as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    suggestion = await suggestion_service.decide(suggestion, current_user.id, SuggestionStatus.REJECTED)
+    try:
+        suggestion = await suggestion_service.decide(suggestion, current_user.id, SuggestionStatus.REJECTED)
+    except SuggestionAlreadyDecidedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     await _log_decision(audit_log_service, current_user.id, suggestion.id, AuditAction.REJECT)
     return SuggestionResponse.model_validate(suggestion)
 
