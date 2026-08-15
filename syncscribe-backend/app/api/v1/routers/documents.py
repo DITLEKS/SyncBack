@@ -2,6 +2,14 @@
 Загрузка и просмотр документов внутри проекта, привязка источников к документу.
 Скачивание исходного файла — через presigned URL; экспорт финального документа (с учётом
 принятых правок) — потоково через backend.
+
+Путь в репозитории: app/api/v1/routers/documents.py
+
+ИСПРАВЛЕНО: upload_document не проверял file.filename перед использованием. Если
+клиент отправлял multipart без имени файла (или с пустой строкой), FastAPI мог
+передать file.filename как None или "", и Path(None).suffix в
+DocumentService._resolve_format() падал с TypeError вместо понятного 4xx-ответа.
+Теперь отсутствие имени файла возвращает 400 Bad Request на уровне роутера.
 """
 import logging
 import uuid
@@ -45,6 +53,8 @@ async def upload_document(
     project: Project = Depends(get_allowed_project),
     document_service: DocumentService = Depends(get_document_service),
 ) -> DocumentResponse:
+    if not file.filename:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Имя файла обязательно")
     content = await file.read()
     try:
         document = await document_service.upload_document(project, file.filename, content, file.content_type or "application/octet-stream")

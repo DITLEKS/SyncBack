@@ -1,6 +1,13 @@
 """
 Источники истины внутри проекта: текстовая заметка/ссылка через JSON-эндпоинт,
 файл — через отдельный multipart-эндпоинт (разные типы контента запроса не смешиваем в одном роутере).
+
+Путь в репозитории: app/api/v1/routers/sources.py
+
+ИСПРАВЛЕНО: upload_file_source не проверял file.filename перед использованием.
+Без проверки отсутствующее имя файла превращалось в буквальную подстроку "None"
+внутри storage_key ("projects/{id}/sources/{id}/None") вместо явной ошибки клиенту.
+Теперь отсутствие имени файла возвращает 400 Bad Request.
 """
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
@@ -36,6 +43,8 @@ async def upload_file_source(
     project: Project = Depends(get_allowed_project),
     source_service: SourceService = Depends(get_source_service),
 ) -> SourceResponse:
+    if not file.filename:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Имя файла обязательно")
     content = await file.read()
     try:
         source = await source_service.create_file_source(

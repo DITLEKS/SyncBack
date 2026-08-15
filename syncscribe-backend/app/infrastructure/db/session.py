@@ -1,5 +1,7 @@
 """
 Асинхронный движок и фабрика сессий SQLAlchemy.
+
+Путь в репозитории: app/infrastructure/db/session.py
 """
 
 from collections.abc import AsyncGenerator
@@ -29,6 +31,22 @@ def _init_engine() -> None:
 
 
 def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    """Единый sessionmaker для FastAPI request-scoped использования.
+
+    FastAPI/Uvicorn гарантированно работает на одном и том же event loop весь
+    жизненный цикл процесса, поэтому кешировать движок здесь безопасно.
+
+    ВАЖНО — НЕ использовать эту фабрику:
+    - из Celery-задач (каждый вызов таска может исполняться в новом event loop,
+      т.к. `asyncio.run()` создаёт новый loop на каждый вызов);
+    - из тестов на pytest-asyncio (по умолчанию — новый event loop на каждый тест);
+    - из любого другого кода, для которого нет гарантии одного и того же event loop
+      на всё время жизни процесса.
+
+    Движок, созданный на одном event loop, нельзя использовать на другом —
+    это приводит к RuntimeError ("... attached to a different loop"). Для таких
+    случаев используйте isolated_db_session().
+    """
     if AsyncSessionLocal is None:
         _init_engine()
     return AsyncSessionLocal  # type: ignore[return-value]
@@ -43,15 +61,46 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 @asynccontextmanager
+async def isolated_db_session() -> AsyncGenerator[AsyncSession, None]:
+    """Async context manager, создающий отдельный AsyncEngine + сессию строго на время
+    одного вызова и гарантированно закрывающий движок при выходе.
+
+    Используется везде, где нет гарантии одного и того же event loop на всё время
+    жизни процесса: Celery-задачи, integration-тесты на pytest-asyncio (по умолчанию —
+    новый event loop на каждый тест) и одноразовые скрипты. Движок никогда не покидает
+    event loop, в котором был создан, поэтому ошибка "attached to a different loop"
+    структурно невозможна: у каждого вызова свой изолированный движок.
+
+    Пример:
+        async with isolated_db_session() as session:
+            ...
+    """
+    local_settings = get_settings()
+    local_engine = create_async_engine(
+        local_settings.database_url, poolclass=NullPool, echo=local_settings.debug
+    )
+    local_sessionmaker = async_sessionmaker(local_engine, expire_on_commit=False, class_=AsyncSession)
+    try:
+        async with local_sessionmaker() as session:
+            yield session
+    finally:
+        await local_engine.dispose()
+
+
+@asynccontextmanager
 async def db_session_context() -> AsyncGenerator[AsyncSession, None]:
-    """Async context manager для использования вне FastAPI DI: тесты, скрипты,
-    Celery-воркер. Использует ту же фабрику сессий (get_sessionmaker), что и
-    get_db_session, поэтому поведение пула соединений (NullPool) остаётся консистентным.
+    """Тонкая обёртка над isolated_db_session() для использования вне FastAPI DI:
+    тесты, скрипты, Celery-воркер.
+
+    ИСПРАВЛЕНО: раньше эта функция ошибочно переиспользовала общий request-scoped
+    sessionmaker (get_sessionmaker()), что при вызове из Celery-задач или
+    pytest-asyncio тестов с per-test event loop приводило к RuntimeError
+    "attached to a different loop". Теперь она всегда создаёт изолированный движок
+    и безопасна для использования на любом event loop.
 
     Пример:
         async with db_session_context() as session:
             ...
     """
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
+    async with isolated_db_session() as session:
         yield session

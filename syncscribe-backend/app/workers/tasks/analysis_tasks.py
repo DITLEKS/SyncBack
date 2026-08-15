@@ -3,6 +3,13 @@ Celery-задачи пайплайна анализа. LLM вызывается 
 retry/dead-letter логика работает по каждому источнику независимо: сбой по одному не
 блокирует остальные и не валит весь job. run_analysis_job запускает group через chord
 и агрегирует финальный статус в finalize_analysis_job.
+
+Путь в репозитории: app/workers/tasks/analysis_tasks.py
+
+ИСПРАВЛЕНО: локальный класс _TaskDbSession удалён — используется общая
+isolated_db_session() из app.infrastructure.db.session, чтобы не дублировать логику
+изоляции движка между воркером и остальным кодом (integration-тесты используют ту же
+функцию через db_session_context()).
 """
 
 import asyncio
@@ -10,8 +17,6 @@ import logging
 import uuid
 
 from celery import chord
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
 from app.domain.exceptions import DocumentParseError, LLMInvalidResponseError, LLMTimeoutError
@@ -22,6 +27,7 @@ from app.infrastructure.db.repositories.analysis_job_repository import AnalysisJ
 from app.infrastructure.db.repositories.document_repository import DocumentRepository
 from app.infrastructure.db.repositories.source_repository import SourceRepository
 from app.infrastructure.db.repositories.suggestion_repository import SuggestionRepository
+from app.infrastructure.db.session import isolated_db_session
 from app.infrastructure.llm.factory import get_llm_client
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 from app.infrastructure.queue.dead_letter_store import DeadLetterStore
@@ -38,37 +44,27 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-class _TaskDbSession:
-    """
-    Создаёт отдельный AsyncEngine + сессию строго на время одного Celery-вызова и
-    гарантированно закрывает движок при выходе — движок никогда не покидает event loop,
-    в котором был создан, поэтому проблема "attached to a different loop" структурно
-    невозможна: у каждого вызова свой изолированный движок.
-    """
-
-    def __init__(self):
-        settings = get_settings()
-        self._engine = create_async_engine(settings.database_url, poolclass=NullPool, echo=settings.debug)
-        self._sessionmaker = async_sessionmaker(self._engine, expire_on_commit=False, class_=AsyncSession)
-
-    async def __aenter__(self) -> AsyncSession:
-        self._session = self._sessionmaker()
-        return await self._session.__aenter__()
-
-    async def __aexit__(self, exc_type, exc, tb) -> None:
-        await self._session.__aexit__(exc_type, exc, tb)
-        await self._engine.dispose()
-
-
 async def _start_job(job_id: str) -> list[str]:
-    async with _TaskDbSession() as session:
+    async with isolated_db_session() as session:
         job_repo = AnalysisJobRepository(session)
         document_repo = DocumentRepository(session)
 
         job = await job_repo.get_by_id(uuid.UUID(job_id))
+        if job is None:
+            logger.error("run_analysis_job вызван для несуществующего job_id", extra={"job_id": job_id})
+            return []
         await job_repo.update_status(job, AnalysisJobStatus.PROCESSING)
 
         document = await document_repo.get_by_id(job.document_id)
+        if document is None:
+            logger.error(
+                "AnalysisJob ссылается на несуществующий документ",
+                extra={"job_id": job_id, "document_id": str(job.document_id)},
+            )
+            await job_repo.update_status(
+                job, AnalysisJobStatus.FAILED, error_code="DOCUMENT_NOT_FOUND", error_message="Документ не найден"
+            )
+            return []
         document.status = DocumentStatus.ANALYZING
         await session.commit()
 
@@ -82,7 +78,7 @@ async def _process_source(job_id: str, source_id: str) -> dict:
     connector = ManualUploadConnector(storage, _parser_registry)
     llm_client = get_llm_client(settings)
 
-    async with _TaskDbSession() as session:
+    async with isolated_db_session() as session:
         job_repo = AnalysisJobRepository(session)
         document_repo = DocumentRepository(session)
         source_repo = SourceRepository(session)
@@ -131,12 +127,24 @@ def process_source_for_analysis_job(self, job_id: str, source_id: str) -> dict:
 
 
 async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
-    async with _TaskDbSession() as session:
+    async with isolated_db_session() as session:
         job_repo = AnalysisJobRepository(session)
         document_repo = DocumentRepository(session)
 
         job = await job_repo.get_by_id(uuid.UUID(job_id))
+        if job is None:
+            logger.error("finalize_analysis_job вызван для несуществующего job_id", extra={"job_id": job_id})
+            return
         document = await document_repo.get_by_id(job.document_id)
+        if document is None:
+            logger.error(
+                "AnalysisJob ссылается на несуществующий документ при финализации",
+                extra={"job_id": job_id, "document_id": str(job.document_id)},
+            )
+            await job_repo.update_status(
+                job, AnalysisJobStatus.FAILED, error_code="DOCUMENT_NOT_FOUND", error_message="Документ не найден"
+            )
+            return
 
         succeeded = [r for r in source_results if r.get("status") == "success"]
         failed = [r for r in source_results if r.get("status") == "failed"]
