@@ -11,6 +11,7 @@ import io
 from datetime import timedelta
 
 from minio import Minio
+from minio.error import S3Error
 
 from app.core.config import Settings, get_settings
 
@@ -57,3 +58,13 @@ class MinioStorage:
 
     async def delete(self, key: str) -> None:
         await asyncio.to_thread(self._client.remove_object, self._bucket, key)
+
+    async def exists(self, key: str) -> bool:
+        def _exists() -> bool:
+            try:
+                self._client.stat_object(self._bucket, key)
+                return True
+            except S3Error:
+                return False
+
+        return await asyncio.to_thread(_exists)

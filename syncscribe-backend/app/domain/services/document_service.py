@@ -64,7 +64,11 @@ class DocumentService:
             format=document_format,
             storage_key=storage_key,
         )
-        return await self._documents.create(document)
+        try:
+            return await self._documents.create(document)
+        except Exception:
+            await self._storage.delete(storage_key)
+            raise
 
     async def list_documents(self, project_id: uuid.UUID) -> list[Document]:
         return await self._documents.list_by_project(project_id)

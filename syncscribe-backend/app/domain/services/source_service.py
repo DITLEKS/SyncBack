@@ -43,7 +43,11 @@ class SourceService:
         await self._storage.upload(storage_key, content, content_type)
 
         source = Source(id=source_id, project_id=project.id, name=name, type=SourceType.FILE, storage_key=storage_key)
-        return await self._sources.create(source)
+        try:
+            return await self._sources.create(source)
+        except Exception:
+            await self._storage.delete(storage_key)
+            raise
 
     async def list_sources(self, project_id: uuid.UUID) -> list[Source]:
         return await self._sources.list_by_project(project_id)

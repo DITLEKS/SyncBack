@@ -3,6 +3,7 @@
 """
 
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
@@ -34,6 +35,23 @@ def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
 
 
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
+    """Generator-зависимость для FastAPI Depends(). Не использовать напрямую вне DI —
+    FastAPI сам разворачивает генератор через __anext__, а не async with."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        yield session
+
+
+@asynccontextmanager
+async def db_session_context() -> AsyncGenerator[AsyncSession, None]:
+    """Async context manager для использования вне FastAPI DI: тесты, скрипты,
+    Celery-воркер. Использует ту же фабрику сессий (get_sessionmaker), что и
+    get_db_session, поэтому поведение пула соединений (NullPool) остаётся консистентным.
+
+    Пример:
+        async with db_session_context() as session:
+            ...
+    """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         yield session

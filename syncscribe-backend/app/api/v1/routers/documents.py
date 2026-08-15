@@ -33,7 +33,10 @@ async def _log_download(audit_log_service: AuditLogService, user_id: uuid.UUID, 
     try:
         await audit_log_service.log_download(user_id, document_id)
     except Exception:
-        logger.warning("Не удалось записать audit_log для скачивания документа", extra={"document_id": str(document_id), "user_id": str(user_id)})
+        logger.exception(
+            "Failed to write audit_log for document download",
+            extra={"document_id": str(document_id), "user_id": str(user_id)},
+        )
 
 
 @router.post("", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)

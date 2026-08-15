@@ -18,6 +18,15 @@ class AnalysisJobRepository:
         await self._session.refresh(job)
         return job
 
+    async def update_celery_task_id(self, job: AnalysisJob, celery_task_id: str) -> AnalysisJob:
+        job.celery_task_id = celery_task_id
+        await self._session.commit()
+        await self._session.refresh(job)
+        return job
+
+    async def mark_failed_queue_unavailable(self, job: AnalysisJob, error_message: str | None = None) -> AnalysisJob:
+        return await self.update_status(job, AnalysisJobStatus.FAILED, error_code="QUEUE_UNAVAILABLE", error_message=error_message)
+
     async def update_status(self, job: AnalysisJob, status: AnalysisJobStatus, error_code: str | None = None, error_message: str | None = None) -> AnalysisJob:
         job.status = status
         job.error_code = error_code

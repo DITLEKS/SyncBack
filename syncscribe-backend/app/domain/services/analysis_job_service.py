@@ -17,6 +17,12 @@ class AnalysisJobService:
         job = AnalysisJob(document_id=document.id)
         return await self._jobs.create(job)
 
+    async def set_celery_task_id(self, job: AnalysisJob, celery_task_id: str) -> AnalysisJob:
+        return await self._jobs.update_celery_task_id(job, celery_task_id)
+
+    async def mark_job_queue_unavailable(self, job: AnalysisJob, error_message: str | None = None) -> AnalysisJob:
+        return await self._jobs.mark_failed_queue_unavailable(job, error_message)
+
     async def get_job(self, project_id: uuid.UUID, document_id: uuid.UUID, job_id: uuid.UUID) -> AnalysisJob:
         job = await self._jobs.get_by_id(job_id)
         if job is None or job.document_id != document_id:

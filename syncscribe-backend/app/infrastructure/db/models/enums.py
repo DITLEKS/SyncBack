@@ -52,3 +52,4 @@ class SuggestionStatus(str, enum.Enum):
 class AuditAction(str, enum.Enum):
     ACCEPT = "accept"
     REJECT = "reject"
+    DOWNLOAD = "download"

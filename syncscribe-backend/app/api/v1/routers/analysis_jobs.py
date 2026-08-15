@@ -24,7 +24,16 @@ async def start_analysis_job(
         job = await analysis_job_service.create_job(project.id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    run_analysis_job.delay(str(job.id))
+
+    # NOTE: for production-grade reliability, a transactional outbox or queue write-ahead
+    # pattern is recommended to avoid the window where the job exists in the DB but dispatch fails.
+    try:
+        result = run_analysis_job.delay(str(job.id))
+    except Exception as exc:
+        await analysis_job_service.mark_job_queue_unavailable(job, str(exc))
+        return AnalysisJobResponse.model_validate(job)
+
+    await analysis_job_service.set_celery_task_id(job, result.id)
     return AnalysisJobResponse.model_validate(job)
 
 
