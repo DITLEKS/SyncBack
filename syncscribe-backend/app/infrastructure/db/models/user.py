@@ -9,6 +9,7 @@ InvalidTextRepresentationError, так как тип user_role в Postgres со�
 
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
 from sqlalchemy import DateTime, String, func
@@ -17,6 +18,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.models.enums import UserRole
+
+if TYPE_CHECKING:
+    # ИСПРАВЛЕНО (F821): импорт только для статического анализа типов.
+    from app.infrastructure.db.models.project import Project
 
 
 class User(Base):

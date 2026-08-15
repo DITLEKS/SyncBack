@@ -6,6 +6,7 @@
 
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
@@ -14,6 +15,15 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.models.enums import AnalysisJobStatus
+
+if TYPE_CHECKING:
+    # ИСПРАВЛЕНО (F821): связанные модели импортируются только для статического
+    # анализа типов (mypy/ruff), а не во время выполнения — иначе получили бы
+    # циклический импорт между document.py, suggestion.py и analysis_job.py. Раньше эти
+    # имена использовались только как строковые forward-references в Mapped["..."],
+    # которые ruff не мог разрешить и помечал как undefined name.
+    from app.infrastructure.db.models.document import Document
+    from app.infrastructure.db.models.suggestion import Suggestion
 
 
 class AnalysisJob(Base):

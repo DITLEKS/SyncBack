@@ -4,12 +4,19 @@
 
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.infrastructure.db.base import Base
+
+if TYPE_CHECKING:
+    # ИСПРАВЛЕНО (F821): импорт только для статического анализа типов.
+    from app.infrastructure.db.models.document import Document
+    from app.infrastructure.db.models.source import Source
+    from app.infrastructure.db.models.user import User
 
 
 class Project(Base):
