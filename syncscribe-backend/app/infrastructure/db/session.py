@@ -13,15 +13,25 @@ from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
 
-settings = get_settings()
-
 engine: Optional[AsyncEngine] = None
 AsyncSessionLocal: Optional[async_sessionmaker[AsyncSession]] = None
 
 
 def _init_engine() -> None:
+    """Лениво создаёт движок и sessionmaker при первом обращении.
+
+    ИСПРАВЛЕНО: раньше `settings = get_settings()` вызывался на уровне модуля, т.е.
+    простой импорт этого файла (например, транзитивно через app.main -> ... ->
+    app.core.dependencies -> app.infrastructure.db.session) требовал наличия всех обязательных полей
+    конфигурации (DATABASE_URL, REDIS_URL, MINIO_*, JWT_SECRET) без какого-либо реального
+    обращения к БД. В CI, где нет .env и явных переменных окружения, это
+    приводило к pydantic.ValidationError уже на этапе сбора тестов — падал даже безобидный
+    health-check тест, которому БД не нужна. Теперь настройки читаются только в момент, когда
+    движок действительно нужен.
+    """
     global engine, AsyncSessionLocal
     if AsyncSessionLocal is None:
+        settings = get_settings()
         engine = create_async_engine(
             settings.database_url,
             poolclass=NullPool,
