@@ -16,6 +16,16 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Prepare test environment
+        run: |
+          # ИСПРАВЛЕНО: Settings() требует обязательные поля (DATABASE_URL,
+          # REDIS_URL, MINIO_*, JWT_SECRET) без дефолтов. Без .env простой импорт app.main
+          # (через test_app_startup.py) падал с pydantic.ValidationError ещё до запуска
+          # тестов. Значения из .env.example — безопасные заглушки (LLM_PROVIDER=stub и т.д.),
+          # реального подключения к Postgres/Redis/MinIO для unit-тестов не требуется —
+          # асинхронный движок создаётся лениво и не подключается при импорте.
+          cp .env.example .env
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
