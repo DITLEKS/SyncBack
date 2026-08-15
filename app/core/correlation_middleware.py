@@ -13,6 +13,8 @@ X-Request-ID превращал ответ сервера в 500 без ауте
 Теперь входящее значение валидируется по безопасному шаблону и ограничивается по
 длине; при несоответствии генерируется новый UUID, как и раньше при отсутствии
 заголовка.
+
+UP031: регулярное выражение собирается f-строкой вместо %-форматирования.
 """
 
 import re
@@ -26,7 +28,7 @@ from app.core.logging_setup import request_id_var
 
 REQUEST_ID_HEADER = "X-Request-ID"
 _MAX_REQUEST_ID_LENGTH = 128
-_SAFE_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,%d}$" % _MAX_REQUEST_ID_LENGTH)
+_SAFE_REQUEST_ID_RE = re.compile(rf"^[A-Za-z0-9._-]{{1,{_MAX_REQUEST_ID_LENGTH}}}$")
 
 
 def _sanitize_request_id(incoming_id: str | None) -> str:

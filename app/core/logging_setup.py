@@ -9,6 +9,8 @@ extra={"payload": {"api_key": "..."}} проходило в лог без изм
 "payload" не входит в _SENSITIVE_KEYS, а вложенный "api_key" никогда не проверялся.
 Теперь редактирование рекурсивно обходит вложенные dict/list и маскирует значения
 по совпадению ключа на любом уровне вложенности.
+
+SIM108: выбор форматтера в configure_logging записан через тернарный оператор вместо if/else.
 """
 
 import contextvars
@@ -94,11 +96,9 @@ def configure_logging() -> None:
     settings = get_settings()
 
     handler = logging.StreamHandler(sys.stdout)
-    formatter: logging.Formatter
-    if settings.log_format == "json":
-        formatter = CorrelationJsonFormatter()
-    else:
-        formatter = PlainCorrelationFormatter()
+    formatter: logging.Formatter = (
+        CorrelationJsonFormatter() if settings.log_format == "json" else PlainCorrelationFormatter()
+    )
     handler.setFormatter(formatter)
 
     root_logger = logging.getLogger()

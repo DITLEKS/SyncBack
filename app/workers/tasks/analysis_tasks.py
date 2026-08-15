@@ -8,8 +8,8 @@ retry/dead-letter логика работает по каждому источн
 
 ИСПРАВЛЕНО: локальный класс _TaskDbSession удалён — используется общая
 isolated_db_session() из app.infrastructure.db.session, чтобы не дублировать логику
-изоляции движка между воркером и остальным кодом (integration-тесты используют ту же
-функцию через db_session_context()).
+изоляции движка между воркером и остальным кодом. Также добавлен `from exc` к `raise
+self.retry(...)` (B904) — чтобы трассировка исходного исключения не терялась при retry.
 """
 
 import asyncio
@@ -116,7 +116,7 @@ def process_source_for_analysis_job(self, job_id: str, source_id: str) -> dict:
     except (LLMTimeoutError, LLMInvalidResponseError, DocumentParseError) as exc:
         if self.request.retries < settings.llm_max_retries:
             backoff_seconds = settings.llm_timeout_seconds * (2 ** self.request.retries)
-            raise self.retry(exc=exc, countdown=backoff_seconds)
+            raise self.retry(exc=exc, countdown=backoff_seconds) from exc
         dead_letter_store = DeadLetterStore(get_sync_redis_client())
         dead_letter_store.push(job_id, source_id, error_code=type(exc).__name__, error_message=str(exc))
         logger.error(

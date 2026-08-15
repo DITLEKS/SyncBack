@@ -6,6 +6,7 @@
 
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
 from sqlalchemy import DateTime, ForeignKey, String, func
@@ -15,6 +16,13 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.models.document_source import document_sources
 from app.infrastructure.db.models.enums import DocumentFormat, DocumentStatus
+
+if TYPE_CHECKING:
+    # ИСПРАВЛЕНО (F821): см. комментарий в analysis_job.py — импорт только для
+    # статического анализа типов, без риска циклического импорта в рантайме.
+    from app.infrastructure.db.models.analysis_job import AnalysisJob
+    from app.infrastructure.db.models.project import Project
+    from app.infrastructure.db.models.source import Source
 
 _values = lambda enum_cls: [member.value for member in enum_cls]  # noqa: E731
 

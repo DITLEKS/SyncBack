@@ -6,6 +6,7 @@
 
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
 from sqlalchemy import DateTime, ForeignKey, String, Text, func
@@ -15,6 +16,11 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.models.document_source import document_sources
 from app.infrastructure.db.models.enums import SourceType
+
+if TYPE_CHECKING:
+    # ИСПРАВЛЕНО (F821): импорт только для статического анализа типов.
+    from app.infrastructure.db.models.document import Document
+    from app.infrastructure.db.models.project import Project
 
 
 class Source(Base):
