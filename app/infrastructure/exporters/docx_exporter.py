@@ -4,7 +4,9 @@
 изменённого абзаца не сохраняется, это упрощение MVP).
 """
 import io
+
 from docx import Document as DocxDocument
+
 from app.domain.interfaces.document_exporter import AppliedChange
 
 

@@ -1,7 +1,7 @@
 """Репозиторий правок."""
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,7 +31,7 @@ class SuggestionRepository:
     async def update_status(self, suggestion: Suggestion, status: SuggestionStatus, decided_by: uuid.UUID) -> Suggestion:
         suggestion.status = status
         suggestion.decided_by = decided_by
-        suggestion.decided_at = datetime.now(timezone.utc)
+        suggestion.decided_at = datetime.now(UTC)
         await self._session.commit()
         await self._session.refresh(suggestion)
         return suggestion
@@ -39,7 +39,7 @@ class SuggestionRepository:
     async def bulk_update_status(self, suggestions: list[Suggestion], status: SuggestionStatus, decided_by: uuid.UUID) -> list[Suggestion]:
         if not suggestions:
             return []
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for suggestion in suggestions:
             suggestion.status = status
             suggestion.decided_by = decided_by

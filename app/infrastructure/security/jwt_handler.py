@@ -3,7 +3,7 @@
 """
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jwt
 
@@ -16,7 +16,7 @@ class JWTHandler:
         self._settings = settings or get_settings()
 
     def create_access_token(self, user_id: uuid.UUID, role: str) -> tuple[str, int]:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expires_in = self._settings.jwt_access_token_expire_minutes * 60
         payload = {
             "sub": str(user_id),

@@ -1,4 +1,5 @@
 import uuid
+
 from app.domain.interfaces.llm_client import LLMSuggestionBatch
 from app.infrastructure.db.models.enums import ChangeType
 from app.infrastructure.db.models.suggestion import Suggestion

@@ -1,4 +1,5 @@
 from redis import Redis
+
 from app.core.config import get_settings
 
 _sync_redis_client: Redis | None = None

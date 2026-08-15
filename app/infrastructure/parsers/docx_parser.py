@@ -1,5 +1,7 @@
 import io
+
 from docx import Document as DocxDocument
+
 from app.domain.interfaces.document_parser import DocumentSection, ParsedDocument
 
 

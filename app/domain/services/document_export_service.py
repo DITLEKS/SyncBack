@@ -3,10 +3,10 @@
 через нужный DocumentExporter и возвращает готовые байты + имя файла + media type.
 """
 from app.domain.interfaces.file_storage import FileStorage
+from app.domain.services.suggestion_service import SuggestionService
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.enums import DocumentFormat
 from app.infrastructure.exporters.exporter_registry import DocumentExporterRegistry
-from app.domain.services.suggestion_service import SuggestionService
 
 _MEDIA_TYPES: dict[DocumentFormat, str] = {
     DocumentFormat.DOCX: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",

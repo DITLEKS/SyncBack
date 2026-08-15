@@ -1,4 +1,5 @@
 from pathlib import Path
+
 from app.domain.interfaces.document_parser import ParsedDocument
 from app.infrastructure.parsers.docx_parser import DocxParser
 from app.infrastructure.parsers.markdown_parser import MarkdownParser

@@ -24,7 +24,12 @@ from app.core.dependencies import (
     get_document_service,
     get_source_service,
 )
-from app.domain.exceptions import DocumentNotFoundError, FileTooLargeError, SourceNotFoundError, UnsupportedFileFormatError
+from app.domain.exceptions import (
+    DocumentNotFoundError,
+    FileTooLargeError,
+    SourceNotFoundError,
+    UnsupportedFileFormatError,
+)
 from app.domain.services.audit_log_service import AuditLogService
 from app.domain.services.document_export_service import DocumentExportService
 from app.domain.services.document_service import DocumentService

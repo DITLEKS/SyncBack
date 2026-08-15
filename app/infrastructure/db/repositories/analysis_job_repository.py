@@ -1,6 +1,8 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.models.enums import AnalysisJobStatus
 
@@ -31,7 +33,7 @@ class AnalysisJobRepository:
         job.status = status
         job.error_code = error_code
         job.error_message = error_message
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if status == AnalysisJobStatus.PROCESSING and job.started_at is None:
             job.started_at = now
         if status in (AnalysisJobStatus.SUCCESS, AnalysisJobStatus.FAILED):

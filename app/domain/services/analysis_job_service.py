@@ -1,4 +1,5 @@
 import uuid
+
 from app.domain.exceptions import DocumentNotFoundError
 from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.repositories.analysis_job_repository import AnalysisJobRepository

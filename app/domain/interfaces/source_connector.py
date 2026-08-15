@@ -2,6 +2,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
+
 from app.infrastructure.db.models.enums import SourceType
 
 

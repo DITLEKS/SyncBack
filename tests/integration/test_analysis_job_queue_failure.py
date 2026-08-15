@@ -7,11 +7,11 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.main import app
 from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.models.audit_log import AuditLog
 from app.infrastructure.db.models.enums import AnalysisJobStatus, AuditAction, ChangeType, SuggestionStatus
 from app.infrastructure.db.models.suggestion import Suggestion
+from app.main import app
 
 # ИСПРАВЛЕНО: AsyncClient(app=app, ...) — устаревший шорткат, убранный в httpx 0.28+.
 # Так как pyproject.toml требует только httpx>=0.27 без верхней границы, в CI может

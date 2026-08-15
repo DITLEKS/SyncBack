@@ -1,4 +1,5 @@
 import re
+
 from app.domain.interfaces.document_parser import DocumentSection, ParsedDocument
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)

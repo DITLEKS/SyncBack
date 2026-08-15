@@ -3,7 +3,9 @@
 бизнес-логики формата запроса/ответа — только быстрый повтор POST при обрыве соединения.
 """
 import asyncio
+
 import httpx
+
 from app.domain.exceptions import LLMInvalidResponseError, LLMTimeoutError
 
 CONNECTION_RETRY_ATTEMPTS = 2
