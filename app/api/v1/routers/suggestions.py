@@ -12,7 +12,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.api.deps import get_allowed_project, get_current_user
 from app.api.schemas.suggestion import BulkAcceptResponse, SuggestionResponse
 from app.core.dependencies import get_audit_log_service, get_suggestion_service
-from app.domain.exceptions import DocumentNotFoundError, SuggestionAlreadyDecidedError, SuggestionNotFoundError
+from app.domain.exceptions import (
+    DocumentNotFoundError,
+    SuggestionAlreadyDecidedError,
+    SuggestionNotFoundError,
+)
 from app.domain.services.audit_log_service import AuditLogService
 from app.domain.services.suggestion_service import SuggestionService
 from app.infrastructure.db.models.enums import AuditAction, SuggestionStatus

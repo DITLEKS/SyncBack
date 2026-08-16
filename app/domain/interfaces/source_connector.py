@@ -3,20 +3,20 @@
 
 ИСПРАВЛЕНО: раньше этот порт импортировал `SourceType` напрямую из
 `app.infrastructure.db.models.enums`, из-за чего domain-слой формально зависел от
-инфраструктуры (нарушение направления зависимостей hexagonal architecture). Теперь
-порт определяет собственный SourceKind, не зависящий от SQLAlchemy/infrastructure.
-Конвертация infrastructure.SourceType -> SourceKind теперь происходит на границе
-(ManualUploadConnector, analysis_tasks.py), а не внутри domain-порта.
+инфраструктуры. Теперь порт определяет собственный SourceKind (enum.StrEnum,
+как и все другие enum в проекте после миграции UP042), не зависящий от
+ SQLAlchemy/infrastructure. Конвертация infrastructure.SourceType -> SourceKind происходит
+на границе (ManualUploadConnector, analysis_tasks.py), а не внутри domain-порта.
 """
 
+import enum
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
 from typing import Protocol
 
 
-class SourceKind(str, Enum):
+class SourceKind(enum.StrEnum):
     FILE = "file"
     NOTE = "note"
     LINK = "link"

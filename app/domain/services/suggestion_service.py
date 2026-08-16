@@ -4,7 +4,11 @@
 """
 import uuid
 
-from app.domain.exceptions import DocumentNotFoundError, SuggestionAlreadyDecidedError, SuggestionNotFoundError
+from app.domain.exceptions import (
+    DocumentNotFoundError,
+    SuggestionAlreadyDecidedError,
+    SuggestionNotFoundError,
+)
 from app.domain.interfaces.document_exporter import AppliedChange
 from app.infrastructure.db.models.enums import SuggestionStatus
 from app.infrastructure.db.models.suggestion import Suggestion

@@ -1,3 +1,14 @@
+"""
+ИСПРАВЛЕНО: test_source_upload_deletes_orphan_file_on_db_failure вызывал
+`create_file_source(project, "upload.txt", b"hello world", "text/plain")` — всего 4
+позиционных аргумента, хотя реальная сигнатура —
+`create_file_source(self, project, name, filename, content, content_type)` (5 аргументов
+после self). Тест падал с `TypeError: missing 1 required positional argument:
+'content_type'` ещё до того, как успевал проверить то, что должен был
+проверять (откат файла из MinIO при сбое записи в БД). Добавлен пропущенный
+аргумент name ("Test source") перед filename.
+"""
+
 import uuid
 from unittest.mock import AsyncMock
 
@@ -45,7 +56,7 @@ async def test_source_upload_deletes_orphan_file_on_db_failure(db_session, minio
     repo.create = AsyncMock(side_effect=Exception("DB create failed"))
 
     with pytest.raises(Exception, match="DB create failed"):
-        await service.create_file_source(project, "upload.txt", b"hello world", "text/plain")
+        await service.create_file_source(project, "Test source", "upload.txt", b"hello world", "text/plain")
 
     storage_key = f"projects/{project.id}/sources/{expected_source_id}/upload.txt"
     assert not await minio_storage.exists(storage_key)
