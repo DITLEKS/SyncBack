@@ -44,6 +44,13 @@ class SuggestionNotFoundError(DomainError):
     pass
 
 
+class SuggestionAlreadyDecidedError(DomainError):
+    """ИСПРАВЛЕНО: новое исключение для защиты от гонки при двойном accept/reject одной
+    и той же правки — выбрасывается, когда атомарный UPDATE в SuggestionRepository не нашёл
+    строку в статусе PENDING (значит, её уже успел обработать другой запрос).
+    """
+
+
 class UnsupportedFileFormatError(DomainError):
     pass
 

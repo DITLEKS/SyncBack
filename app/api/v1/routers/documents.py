@@ -1,15 +1,10 @@
 """
 Загрузка и просмотр документов внутри проекта, привязка источников к документу.
-Скачивание исходного файла — через presigned URL; экспорт финального документа (с учётом
-принятых правок) — потоково через backend.
 
 Путь в репозитории: app/api/v1/routers/documents.py
 
-ИСПРАВЛЕНО: upload_document не проверял file.filename перед использованием. Если
-клиент отправлял multipart без имени файла (или с пустой строкой), FastAPI мог
-передать file.filename как None или "", и Path(None).suffix в
-DocumentService._resolve_format() падал с TypeError вместо понятного 4xx-ответа.
-Теперь отсутствие имени файла возвращает 400 Bad Request на уровне роутера.
+ИСПРАВЛЕНО: upload_document теперь читает файл через read_upload_within_limit()
+чанками вместо полной буферизации через file.read() — см. app/api/upload_utils.py.
 """
 import logging
 import uuid
@@ -18,6 +13,8 @@ from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFil
 
 from app.api.deps import get_allowed_project, get_current_user
 from app.api.schemas.document import AttachSourcesRequest, DocumentDownloadResponse, DocumentResponse
+from app.api.upload_utils import read_upload_within_limit
+from app.core.config import Settings, get_settings
 from app.core.dependencies import (
     get_audit_log_service,
     get_document_export_service,
@@ -57,10 +54,14 @@ async def upload_document(
     file: UploadFile = File(...),
     project: Project = Depends(get_allowed_project),
     document_service: DocumentService = Depends(get_document_service),
+    settings: Settings = Depends(get_settings),
 ) -> DocumentResponse:
     if not file.filename:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Имя файла обязательно")
-    content = await file.read()
+    try:
+        content = await read_upload_within_limit(file, settings.max_upload_size_bytes)
+    except FileTooLargeError as exc:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
     try:
         document = await document_service.upload_document(project, file.filename, content, file.content_type or "application/octet-stream")
     except UnsupportedFileFormatError as exc:

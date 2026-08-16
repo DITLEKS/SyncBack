@@ -1,15 +1,18 @@
 """
 Celery-задачи пайплайна анализа. LLM вызывается отдельно на каждый источник —
-retry/dead-letter логика работает по каждому источнику независимо: сбой по одному не
-блокирует остальные и не валит весь job. run_analysis_job запускает group через chord
-и агрегирует финальный статус в finalize_analysis_job.
+retry/dead-letter логика работает по каждому источнику независимо.
 
 Путь в репозитории: app/workers/tasks/analysis_tasks.py
 
-ИСПРАВЛЕНО: локальный класс _TaskDbSession удалён — используется общая
-isolated_db_session() из app.infrastructure.db.session, чтобы не дублировать логику
-изоляции движка между воркером и остальным кодом. Также добавлен `from exc` к `raise
-self.retry(...)` (B904) — чтобы трассировка исходного исключения не терялась при retry.
+ИСПРАВЛЕНО (этот раунд):
+1. SourceRef теперь строится с доменным SourceKind (конвертация из
+   infrastructure.SourceType.value), а не с инфраструктурным enum напрямую.
+2. Гонка при параллельных analysis_jobs на одном документе: раньше
+   document.current_analysis_job_id безусловно перезаписывался при финализации
+   любого job'а — если более старый job завершался позже более нового (вполне
+   возможно при разной длительности обработки разных источников), его результат
+   мог затереть уже актуальные suggestions. Теперь обновляем "текущий" job только
+   если он действительно новее (по created_at) уже сохранённого текущего job'а.
 """
 
 import asyncio
@@ -20,7 +23,7 @@ from celery import chord
 
 from app.core.config import get_settings
 from app.domain.exceptions import DocumentParseError, LLMInvalidResponseError, LLMTimeoutError
-from app.domain.interfaces.source_connector import SourceRef
+from app.domain.interfaces.source_connector import SourceKind, SourceRef
 from app.infrastructure.cache.sync_redis_client import get_sync_redis_client
 from app.infrastructure.db.models.enums import AnalysisJobStatus, DocumentStatus
 from app.infrastructure.db.repositories.analysis_job_repository import AnalysisJobRepository
@@ -89,7 +92,7 @@ async def _process_source(job_id: str, source_id: str) -> dict:
         source = await source_repo.get_by_id(uuid.UUID(source_id))
 
         source_ref = SourceRef(
-            id=source.id, name=source.name, type=source.type, storage_key=source.storage_key,
+            id=source.id, name=source.name, type=SourceKind(source.type.value), storage_key=source.storage_key,
             text_content=source.text_content, url=source.url, uploaded_at=source.uploaded_at,
         )
 
@@ -163,7 +166,14 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
             await job_repo.update_status(job, AnalysisJobStatus.FAILED, error_code="NO_SOURCES_ATTACHED", error_message="К документу не привязано ни одного источника")
             document.status = DocumentStatus.ERROR
 
-        document.current_analysis_job_id = job.id
+        current_job_id = document.current_analysis_job_id
+        should_update_current = current_job_id is None or current_job_id == job.id
+        if not should_update_current:
+            current_job = await job_repo.get_by_id(current_job_id)
+            should_update_current = current_job is None or job.created_at >= current_job.created_at
+        if should_update_current:
+            document.current_analysis_job_id = job.id
+
         await session.commit()
 
 

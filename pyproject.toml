@@ -67,15 +67,6 @@ extend-immutable-calls = [
     "fastapi.Form",
 ]
 
-[tool.ruff.lint.per-file-ignores]
-# UP042 предлагает заменить `class X(str, enum.Enum)` на `enum.StrEnum`. Формально
-# доступно с Python 3.12, но меняет поведение str(member): было "X.ADMIN", станет
-# "admin". Это может незаметно изменить сериализацию в логах и местах, где enum
-# приводится к строке через str()/f-string, а не через .value. Осознанно откладываем
-# эту миграцию как отдельную задачу с ревью всех мест использования, а не делаем
-# вслепую в рамках чистки линтера.
-"app/infrastructure/db/models/enums.py" = ["UP042"]
-
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
