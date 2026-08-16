@@ -1,5 +1,14 @@
 """
 Конфигурация Alembic для асинхронного SQLAlchemy-движка.
+
+ИСПРАВЛЕНО: по умолчанию Alembic выполняет все накопившиеся миграции в одной команде
+`upgrade head` в ОДНОЙ транзакции. Миграция 0002 делает
+`ALTER TYPE audit_action ADD VALUE 'download'`, а миграция 0003 сразу же использует
+это значение в CHECK CONSTRAINT. PostgreSQL требует, чтобы новое значение enum было
+закоммичено, прежде чем его можно использовать — без этого Postgres падает с
+`UnsafeNewEnumValueUsageError`, что делало `alembic upgrade head` на любой чистой БД
+полностью нерабочим. Теперь `transaction_per_migration=True` заставляет каждую
+миграцию коммититься отдельно, прежде чем начнётся следующая.
 """
 
 import asyncio
@@ -32,13 +41,18 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        transaction_per_migration=True,
     )
     with context.begin_transaction():
         context.run_migrations()
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        transaction_per_migration=True,
+    )
     with context.begin_transaction():
         context.run_migrations()
 
