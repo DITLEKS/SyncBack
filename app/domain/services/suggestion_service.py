@@ -1,6 +1,14 @@
 """
 Бизнес-логика работы с правками: точечный accept/reject, bulk-accept и сборка списка
 принятых изменений для последующего экспорта документа.
+
+ИСПРАВЛЕНО:
+1. list_suggestions_for_document теперь принимает limit/offset и возвращает (items, total).
+2. bulk_accept() раньше тянул из БД ВСЕ suggestions документа (любого статуса) и фильтровал
+   PENDING в Python — лишний трафик и память на документах с большим количеством правок. Теперь
+   фильтр по status перенесён на уровень SQL (list_ids_by_analysis_job_and_status).
+3. get_accepted_changes() — аналогично: раньше тянул все suggestions и фильтровал ACCEPTED в
+   Python, теперь фильтр по status в SQL (list_by_analysis_job_and_status).
 """
 import uuid
 
@@ -27,11 +35,15 @@ class SuggestionService:
             raise DocumentNotFoundError(f"Документ {document_id} не найден в проекте {project_id}")
         return document
 
-    async def list_suggestions_for_document(self, project_id: uuid.UUID, document_id: uuid.UUID) -> list[Suggestion]:
+    async def list_suggestions_for_document(
+        self, project_id: uuid.UUID, document_id: uuid.UUID, limit: int, offset: int
+    ) -> tuple[list[Suggestion], int]:
         document = await self._get_document_or_raise(project_id, document_id)
         if document.current_analysis_job_id is None:
-            return []
-        return await self._suggestions.list_by_analysis_job(document.current_analysis_job_id)
+            return [], 0
+        items = await self._suggestions.list_by_analysis_job(document.current_analysis_job_id, limit=limit, offset=offset)
+        total = await self._suggestions.count_by_analysis_job(document.current_analysis_job_id)
+        return items, total
 
     async def get_suggestion_for_document(self, project_id: uuid.UUID, document_id: uuid.UUID, suggestion_id: uuid.UUID) -> Suggestion:
         document = await self._get_document_or_raise(project_id, document_id)
@@ -47,17 +59,22 @@ class SuggestionService:
         return updated
 
     async def bulk_accept(self, project_id: uuid.UUID, document_id: uuid.UUID, user_id: uuid.UUID) -> list[Suggestion]:
-        suggestions = await self.list_suggestions_for_document(project_id, document_id)
-        pending_ids = [s.id for s in suggestions if s.status == SuggestionStatus.PENDING]
+        document = await self._get_document_or_raise(project_id, document_id)
+        if document.current_analysis_job_id is None:
+            return []
+        pending_ids = await self._suggestions.list_ids_by_analysis_job_and_status(
+            document.current_analysis_job_id, SuggestionStatus.PENDING
+        )
         return await self._suggestions.bulk_update_status(pending_ids, SuggestionStatus.ACCEPTED, user_id)
 
     async def get_accepted_changes(self, document_id: uuid.UUID) -> list[AppliedChange]:
         document = await self._documents.get_by_id(document_id)
         if document is None or document.current_analysis_job_id is None:
             return []
-        suggestions = await self._suggestions.list_by_analysis_job(document.current_analysis_job_id)
+        suggestions = await self._suggestions.list_by_analysis_job_and_status(
+            document.current_analysis_job_id, SuggestionStatus.ACCEPTED
+        )
         return [
             AppliedChange(section_ref=s.section_ref, change_type=s.change_type.value, old_text=s.old_text, new_text=s.new_text)
             for s in suggestions
-            if s.status == SuggestionStatus.ACCEPTED
         ]

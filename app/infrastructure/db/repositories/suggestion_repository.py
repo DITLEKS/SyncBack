@@ -1,9 +1,17 @@
-"""Репозиторий правок."""
+"""Репозиторий правок.
+
+ИСПРАВЛЕНО: list_by_analysis_job теперь принимает limit/offset, добавлен
+count_by_analysis_job. Также добавлены list_ids_by_analysis_job_and_status и
+list_by_analysis_job_and_status — фильтр по status теперь происходит на уровне SQL
+(WHERE status = ...), а не выборкой всех строк с последующей фильтрацией в Python —
+используются в SuggestionService.bulk_accept()/get_accepted_changes(), где раньше
+тянулись ВСЕ правки документа ради подмножества нужного статуса.
+"""
 
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.db.models.enums import SuggestionStatus
@@ -24,22 +32,46 @@ class SuggestionRepository:
     async def get_by_id(self, suggestion_id: uuid.UUID) -> Suggestion | None:
         return await self._session.get(Suggestion, suggestion_id)
 
-    async def list_by_analysis_job(self, analysis_job_id: uuid.UUID) -> list[Suggestion]:
+    async def list_by_analysis_job(self, analysis_job_id: uuid.UUID, limit: int, offset: int) -> list[Suggestion]:
         result = await self._session.execute(
-            select(Suggestion).where(Suggestion.analysis_job_id == analysis_job_id).order_by(Suggestion.created_at)
+            select(Suggestion)
+            .where(Suggestion.analysis_job_id == analysis_job_id)
+            .order_by(Suggestion.created_at)
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result.scalars().all())
+
+    async def count_by_analysis_job(self, analysis_job_id: uuid.UUID) -> int:
+        result = await self._session.execute(
+            select(func.count()).select_from(Suggestion).where(Suggestion.analysis_job_id == analysis_job_id)
+        )
+        return result.scalar_one()
+
+    async def list_by_analysis_job_and_status(
+        self, analysis_job_id: uuid.UUID, status: SuggestionStatus
+    ) -> list[Suggestion]:
+        result = await self._session.execute(
+            select(Suggestion)
+            .where(Suggestion.analysis_job_id == analysis_job_id, Suggestion.status == status)
+            .order_by(Suggestion.created_at)
+        )
+        return list(result.scalars().all())
+
+    async def list_ids_by_analysis_job_and_status(
+        self, analysis_job_id: uuid.UUID, status: SuggestionStatus
+    ) -> list[uuid.UUID]:
+        result = await self._session.execute(
+            select(Suggestion.id).where(Suggestion.analysis_job_id == analysis_job_id, Suggestion.status == status)
         )
         return list(result.scalars().all())
 
     async def update_status(self, suggestion: Suggestion, status: SuggestionStatus, decided_by: uuid.UUID) -> Suggestion | None:
         """
-        ИСПРАВЛЕНО: раньше это был обычный ORM update без проверки текущего статуса на
-        уровне БД (загрузили объект → изменили атрибуты → закоммитили). Между
-        чтением и записью два параллельных запроса могли оба посчитать suggestion ещё
-        не решённым и оба применить решение — в БД тихо сохранился бы результат
-        последнего commit'а без какой-либо ошибки конфликта. Теперь UPDATE условный
-        (WHERE status = 'pending') и атомарный на уровне БД: если suggestion уже был решён
-        другим запросом, обновление не применится, и вызывающий код узнаёт об этом по
-        возвращаемому None.
+        Атомарный UPDATE ... WHERE status = 'pending' — защита от гонки при двойном
+        accept/reject одной и той же правки параллельными запросами: если suggestion уже
+        был решён другим запросом, обновление не применится, и вызывающий код
+        узнаёт об этом по возвращаемому None.
         """
         stmt = (
             update(Suggestion)
@@ -59,12 +91,9 @@ class SuggestionRepository:
         self, suggestion_ids: list[uuid.UUID], status: SuggestionStatus, decided_by: uuid.UUID
     ) -> list[Suggestion]:
         """
-        ИСПРАВЛЕНО: раньше принимала уже загруженные ORM-объекты и обновляла их
-        атрибуты по одному в Python-цикле — между выборкой "ещё не решённых" правок и
-        коммитом параллельный запрос мог успеть принять/отклонить часть из них, и
-        bulk-accept тихо перезаписал бы это решение. Теперь принимает только id и делает
-        один атомарный UPDATE ... WHERE status = 'pending' — правки, решённые параллельно
-        между выборкой id и этим запросом, автоматически не попадут в обновление.
+        Принимает только id и делает один атомарный UPDATE ... WHERE status = 'pending' —
+        правки, решённые параллельно между выборкой id и этим запросом, автоматически
+        не попадут в обновление.
         """
         if not suggestion_ids:
             return []

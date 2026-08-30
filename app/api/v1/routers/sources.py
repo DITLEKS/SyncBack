@@ -4,13 +4,15 @@
 
 Путь в репозитории: app/api/v1/routers/sources.py
 
-ИСПРАВЛЕНО: upload_file_source теперь читает файл через read_upload_within_limit()
-чанками вместо полной буферизации через file.read().
+ИСПРАВЛЕНО: upload_file_source читает файл через read_upload_within_limit()
+чанками вместо полной буферизации через file.read(). list_sources теперь принимает
+limit/offset и возвращает Page вместо всего списка целиком.
 """
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 
 from app.api.deps import get_allowed_project
+from app.api.schemas.pagination import Page
 from app.api.schemas.source import SourceCreateRequest, SourceResponse
 from app.api.upload_utils import read_upload_within_limit
 from app.core.config import Settings, get_settings
@@ -59,10 +61,14 @@ async def upload_file_source(
     return SourceResponse.model_validate(source)
 
 
-@router.get("", response_model=list[SourceResponse])
+@router.get("", response_model=Page[SourceResponse])
 async def list_sources(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     project: Project = Depends(get_allowed_project),
     source_service: SourceService = Depends(get_source_service),
-) -> list[SourceResponse]:
-    sources = await source_service.list_sources(project.id)
-    return [SourceResponse.model_validate(s) for s in sources]
+) -> Page[SourceResponse]:
+    sources, total = await source_service.list_sources(project.id, limit=limit, offset=offset)
+    return Page[SourceResponse](
+        items=[SourceResponse.model_validate(s) for s in sources], total=total, limit=limit, offset=offset
+    )

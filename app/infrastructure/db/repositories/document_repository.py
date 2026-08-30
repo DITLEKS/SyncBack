@@ -1,10 +1,12 @@
 """
 Репозиторий документов.
+
+ИСПРАВЛЕНО: list_by_project теперь принимает limit/offset, добавлен count_by_project.
 """
 
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.db.models.document import Document
@@ -24,11 +26,21 @@ class DocumentRepository:
     async def get_by_id(self, document_id: uuid.UUID) -> Document | None:
         return await self._session.get(Document, document_id)
 
-    async def list_by_project(self, project_id: uuid.UUID) -> list[Document]:
+    async def list_by_project(self, project_id: uuid.UUID, limit: int, offset: int) -> list[Document]:
         result = await self._session.execute(
-            select(Document).where(Document.project_id == project_id).order_by(Document.created_at.desc())
+            select(Document)
+            .where(Document.project_id == project_id)
+            .order_by(Document.created_at.desc())
+            .limit(limit)
+            .offset(offset)
         )
         return list(result.scalars().all())
+
+    async def count_by_project(self, project_id: uuid.UUID) -> int:
+        result = await self._session.execute(
+            select(func.count()).select_from(Document).where(Document.project_id == project_id)
+        )
+        return result.scalar_one()
 
     async def attach_sources(self, document: Document, sources: list[Source]) -> Document:
         # Загружаем текущие источники документа в асинхронном контексте, чтобы

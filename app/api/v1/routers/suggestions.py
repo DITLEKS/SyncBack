@@ -1,15 +1,17 @@
 """Просмотр и точечное подтверждение/отклонение правок, bulk-accept.
 
-ИСПРАВЛЕНО: accept/reject теперь ловят SuggestionAlreadyDecidedError и возвращают
+ИСПРАВЛЕНО: accept/reject ловят SuggestionAlreadyDecidedError и возвращают
 409 Conflict, если правка уже была решена другим параллельным запросом (см.
- SuggestionRepository.update_status).
+ SuggestionRepository.update_status). list_suggestions теперь принимает limit/offset и
+возвращает Page вместо всего списка целиком.
 """
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.api.deps import get_allowed_project, get_current_user
+from app.api.schemas.pagination import Page
 from app.api.schemas.suggestion import BulkAcceptResponse, SuggestionResponse
 from app.core.dependencies import get_audit_log_service, get_suggestion_service
 from app.domain.exceptions import (
@@ -35,17 +37,23 @@ async def _log_decision(audit_log_service: AuditLogService, user_id: uuid.UUID, 
         logger.warning("Не удалось записать audit_log для решения по правке", extra={"suggestion_id": str(suggestion_id), "user_id": str(user_id)})
 
 
-@router.get("", response_model=list[SuggestionResponse])
+@router.get("", response_model=Page[SuggestionResponse])
 async def list_suggestions(
     document_id: uuid.UUID,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     project: Project = Depends(get_allowed_project),
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
-) -> list[SuggestionResponse]:
+) -> Page[SuggestionResponse]:
     try:
-        suggestions = await suggestion_service.list_suggestions_for_document(project.id, document_id)
+        suggestions, total = await suggestion_service.list_suggestions_for_document(
+            project.id, document_id, limit=limit, offset=offset
+        )
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    return [SuggestionResponse.model_validate(s) for s in suggestions]
+    return Page[SuggestionResponse](
+        items=[SuggestionResponse.model_validate(s) for s in suggestions], total=total, limit=limit, offset=offset
+    )
 
 
 @router.post("/{suggestion_id}/accept", response_model=SuggestionResponse)
