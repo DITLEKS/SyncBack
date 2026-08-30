@@ -1,7 +1,8 @@
 """
 Бизнес-логика источников истины: файл, текстовая заметка или ссылка.
-Ровно одно из полей storage_key/text_content/url заполняется в зависимости от типа —
-контролируется здесь, на уровне сервиса, а не CHECK-constraint'ом в БД (проще для MVP-миграций).
+
+ИСПРАВЛЕНО: list_sources теперь принимает limit/offset и возвращает
+(items, total) вместо всего списка целиком.
 """
 
 import uuid
@@ -49,8 +50,10 @@ class SourceService:
             await self._storage.delete(storage_key)
             raise
 
-    async def list_sources(self, project_id: uuid.UUID) -> list[Source]:
-        return await self._sources.list_by_project(project_id)
+    async def list_sources(self, project_id: uuid.UUID, limit: int, offset: int) -> tuple[list[Source], int]:
+        items = await self._sources.list_by_project(project_id, limit=limit, offset=offset)
+        total = await self._sources.count_by_project(project_id)
+        return items, total
 
     async def get_sources_for_project(self, project_id: uuid.UUID, source_ids: list[uuid.UUID]) -> list[Source]:
         sources = await self._sources.get_many_by_ids(source_ids)
@@ -59,8 +62,6 @@ class SourceService:
         if missing:
             raise SourceNotFoundError(f"Источники не найдены: {missing}")
 
-        # Проверяем принадлежность проекту здесь же — иначе можно было бы прикрепить
-        # к документу чужой источник, зная только его id
         foreign = [s.id for s in sources if s.project_id != project_id]
         if foreign:
             raise SourceNotFoundError(f"Источники не принадлежат проекту {project_id}: {foreign}")

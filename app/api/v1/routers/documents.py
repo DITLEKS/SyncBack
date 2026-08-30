@@ -3,16 +3,19 @@
 
 Путь в репозитории: app/api/v1/routers/documents.py
 
-ИСПРАВЛЕНО: upload_document теперь читает файл через read_upload_within_limit()
-чанками вместо полной буферизации через file.read() — см. app/api/upload_utils.py.
+ИСПРАВЛЕНО: upload_document читает файл через read_upload_within_limit() чанками
+вместо полной буферизации через file.read() — см. app/api/upload_utils.py.
+list_documents теперь принимает limit/offset и возвращает Page вместо всего
+списка целиком.
 """
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 
 from app.api.deps import get_allowed_project, get_current_user
 from app.api.schemas.document import AttachSourcesRequest, DocumentDownloadResponse, DocumentResponse
+from app.api.schemas.pagination import Page
 from app.api.upload_utils import read_upload_within_limit
 from app.core.config import Settings, get_settings
 from app.core.dependencies import (
@@ -71,13 +74,17 @@ async def upload_document(
     return DocumentResponse.model_validate(document)
 
 
-@router.get("", response_model=list[DocumentResponse])
+@router.get("", response_model=Page[DocumentResponse])
 async def list_documents(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     project: Project = Depends(get_allowed_project),
     document_service: DocumentService = Depends(get_document_service),
-) -> list[DocumentResponse]:
-    documents = await document_service.list_documents(project.id)
-    return [DocumentResponse.model_validate(d) for d in documents]
+) -> Page[DocumentResponse]:
+    documents, total = await document_service.list_documents(project.id, limit=limit, offset=offset)
+    return Page[DocumentResponse](
+        items=[DocumentResponse.model_validate(d) for d in documents], total=total, limit=limit, offset=offset
+    )
 
 
 @router.get("/{document_id}", response_model=DocumentResponse)

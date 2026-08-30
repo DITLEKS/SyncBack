@@ -1,7 +1,9 @@
 """
 Бизнес-логика документов: загрузка в Minio, определение формата по расширению,
-получение ссылки на скачивание. Парсинг содержимого (для пайплайна анализа) появится
-на этапе 5 — здесь документ хранится как есть, без извлечения текста.
+получение ссылки на скачивание.
+
+ИСПРАВЛЕНО: list_documents теперь принимает limit/offset и возвращает
+(items, total) вместо всего списка целиком.
 """
 
 import uuid
@@ -70,13 +72,13 @@ class DocumentService:
             await self._storage.delete(storage_key)
             raise
 
-    async def list_documents(self, project_id: uuid.UUID) -> list[Document]:
-        return await self._documents.list_by_project(project_id)
+    async def list_documents(self, project_id: uuid.UUID, limit: int, offset: int) -> tuple[list[Document], int]:
+        items = await self._documents.list_by_project(project_id, limit=limit, offset=offset)
+        total = await self._documents.count_by_project(project_id)
+        return items, total
 
     async def get_document(self, project_id: uuid.UUID, document_id: uuid.UUID) -> Document:
         document = await self._documents.get_by_id(document_id)
-        # Проверяем project_id, а не только существование документа — иначе можно было бы
-        # обратиться к чужому документу, зная только его id, в обход get_allowed_project
         if document is None or document.project_id != project_id:
             raise DocumentNotFoundError(f"Документ {document_id} не найден в проекте {project_id}")
         return document
