@@ -1,6 +1,6 @@
 """
 Celery-задачи пайплайна анализа. LLM вызывается отдельно на каждый источник —
-retry/dead-letter логика работает по каждому источнику независимо.
+ретрай/dead-letter логика работает по каждому источнику независимо.
 
 Путь в репозитории: app/workers/tasks/analysis_tasks.py
 
@@ -13,6 +13,14 @@ retry/dead-letter логика работает по каждому источн
    возможно при разной длительности обработки разных источников), его результат
    мог затереть уже актуальные suggestions. Теперь обновляем "текущий" job только
    если он действительно новее (по created_at) уже сохранённого текущего job'а.
+3. _process_source не проверял None для job/document/source после get_by_id, в отличие
+   от уже защищённых _start_job/_finalize_job. Если источник/документ/job удаляли
+   между постановкой в очередь и выполнением (или Celery повторно доставил уже
+   неактуальную задачу после acks_late), подзадача падала с AttributeError
+   вместо контролируемого "failed"-результата с понятным error_code. Теперь
+   каждая из трёх сущностей проверяется отдельно, и подзадача возвращает
+   {"status": "failed", "error_code": "...NOT_FOUND"} без retry (повторять нечего — запись
+   уже не появится).
 """
 
 import asyncio
@@ -88,8 +96,28 @@ async def _process_source(job_id: str, source_id: str) -> dict:
         suggestion_repo = SuggestionRepository(session)
 
         job = await job_repo.get_by_id(uuid.UUID(job_id))
+        if job is None:
+            logger.error(
+                "process_source_for_analysis_job вызван для несуществующего job_id",
+                extra={"job_id": job_id, "source_id": source_id},
+            )
+            return {"source_id": source_id, "status": "failed", "error_code": "JOB_NOT_FOUND", "error_message": "Задача анализа не найдена"}
+
         document = await document_repo.get_by_id(job.document_id)
+        if document is None:
+            logger.error(
+                "AnalysisJob ссылается на несуществующий документ при обработке источника",
+                extra={"job_id": job_id, "source_id": source_id, "document_id": str(job.document_id)},
+            )
+            return {"source_id": source_id, "status": "failed", "error_code": "DOCUMENT_NOT_FOUND", "error_message": "Документ не найден"}
+
         source = await source_repo.get_by_id(uuid.UUID(source_id))
+        if source is None:
+            logger.error(
+                "Источник удалён до обработки подзадачи анализа",
+                extra={"job_id": job_id, "source_id": source_id},
+            )
+            return {"source_id": source_id, "status": "failed", "error_code": "SOURCE_NOT_FOUND", "error_message": "Источник не найден"}
 
         source_ref = SourceRef(
             id=source.id, name=source.name, type=SourceKind(source.type.value), storage_key=source.storage_key,
