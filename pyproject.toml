@@ -58,7 +58,7 @@ known-first-party = ["app"]
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI требует вызывать Depends()/File()/Form() именно как значения по умолчанию
 # аргументов — это официальный паттерн самого FastAPI, а не баг вызова функции в
-# сигнатуре. Помечаем эти вызовы как "immutable", чтобы B008 не срабатывал
+# сигнатуре. Помечаем эти вызовы как "immutable", чтобы B008 не срабатывал ся
 # ложноположительно на каждом роутере и каждой DI-фабрике.
 extend-immutable-calls = [
     "fastapi.Depends",
@@ -66,6 +66,23 @@ extend-immutable-calls = [
     "fastapi.File",
     "fastapi.Form",
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# UP042 предлагает заменить `class X(str, enum.Enum)` на `enum.StrEnum`. Формально
+# доступно с Python 3.12, но меняет поведение str(member): было "X.ADMIN", станет
+# "admin". Это может незаметно изменить сериализацию в логах и местах, где enum
+# приводится к строке через str()/f-string, а не через .value. Осознанно откладываем
+# эту миграцию как отдельную задачу с ревью всех мест использования, а не делаем
+# вслепую в рамках чистки линтера.
+"app/infrastructure/db/models/enums.py" = ["UP042"]
+
+# UP046 предлагает заменить `class Page(BaseModel, Generic[T])` на PEP 695-синтаксис
+# `class Page[T](BaseModel)`. Не переходим на него вслепую: в pyproject.toml зафиксирован
+# `pydantic>=2.7` без верхней границы, а полная поддержка PEP 695 для генерик-моделей
+# BaseModel появилась не с самой ранней версии 2.x. Старый синтаксис через TypeVar/Generic
+# остаётся валидным и совместимым с широким диапазоном версий, миграция на PEP 695 —
+# отдельная задача после фиксации минимальной версии pydantic.
+"app/api/schemas/pagination.py" = ["UP046"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
