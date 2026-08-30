@@ -1,5 +1,5 @@
 """
-Простые фабрики зависимостей поверх встроенного DI FastAPI (Depends).
+Простые фабрики зависимостей поверх встроенным DI FastAPI (Depends).
 """
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +24,7 @@ from app.infrastructure.db.repositories.user_repository import UserRepository
 from app.infrastructure.db.session import get_db_session
 from app.infrastructure.exporters.exporter_registry import DocumentExporterRegistry
 from app.infrastructure.llm.factory import get_llm_client
+from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 from app.infrastructure.security.jwt_handler import JWTHandler
 from app.infrastructure.security.login_rate_limiter import LoginRateLimiter
 from app.infrastructure.security.password_hasher import PasswordHasher
@@ -48,6 +49,10 @@ def get_llm_client_instance():
 
 def get_exporter_registry() -> DocumentExporterRegistry:
     return DocumentExporterRegistry()
+
+
+def get_parser_registry() -> DocumentParserRegistry:
+    return DocumentParserRegistry()
 
 
 def get_user_repository(session: AsyncSession = Depends(get_db_session)) -> UserRepository:
@@ -98,8 +103,9 @@ def get_project_service(project_repository: ProjectRepository = Depends(get_proj
 def get_document_service(
     document_repository: DocumentRepository = Depends(get_document_repository),
     file_storage: MinioStorage = Depends(get_file_storage),
+    parser_registry: DocumentParserRegistry = Depends(get_parser_registry),
 ) -> DocumentService:
-    return DocumentService(document_repository, file_storage)
+    return DocumentService(document_repository, file_storage, parser_registry=parser_registry)
 
 
 def get_source_service(

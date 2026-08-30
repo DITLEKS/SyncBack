@@ -3,10 +3,12 @@
 
 Путь в репозитории: app/api/v1/routers/documents.py
 
-ИСПРАВЛЕНО: upload_document читает файл через read_upload_within_limit() чанками
-вместо полной буферизации через file.read() — см. app/api/upload_utils.py.
-list_documents теперь принимает limit/offset и возвращает Page вместо всего
-списка целиком.
+ИСПРАВЛЕНО:
+1. upload_document читает файл через read_upload_within_limit() чанками.
+2. list_documents принимает limit/offset и возвращает Page.
+3. Добавлен GET /{document_id}/content — распарсенный текст документа с позициями
+   секций, нужен фронтенду для инлайн-отображения правок по Suggestion.section_ref
+   прямо в тексте документа вместо отдельного скачивания сырого файла.
 """
 import logging
 import uuid
@@ -14,7 +16,13 @@ import uuid
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 
 from app.api.deps import get_allowed_project, get_current_user
-from app.api.schemas.document import AttachSourcesRequest, DocumentDownloadResponse, DocumentResponse
+from app.api.schemas.document import (
+    AttachSourcesRequest,
+    DocumentContentResponse,
+    DocumentDownloadResponse,
+    DocumentResponse,
+    DocumentSectionResponse,
+)
 from app.api.schemas.pagination import Page
 from app.api.upload_utils import read_upload_within_limit
 from app.core.config import Settings, get_settings
@@ -98,6 +106,31 @@ async def get_document(
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return DocumentResponse.model_validate(document)
+
+
+@router.get("/{document_id}/content", response_model=DocumentContentResponse)
+async def get_document_content(
+    document_id: uuid.UUID,
+    project: Project = Depends(get_allowed_project),
+    document_service: DocumentService = Depends(get_document_service),
+) -> DocumentContentResponse:
+    try:
+        document = await document_service.get_document(project.id, document_id)
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    try:
+        parsed = await document_service.get_document_content(document)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Не удалось распарсить документ: {exc}"
+        ) from exc
+    return DocumentContentResponse(
+        plain_text=parsed.plain_text,
+        sections=[
+            DocumentSectionResponse(ref=s.ref, start_offset=s.start_offset, end_offset=s.end_offset)
+            for s in parsed.sections
+        ],
+    )
 
 
 @router.get("/{document_id}/download", response_model=DocumentDownloadResponse)

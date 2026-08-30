@@ -1,9 +1,14 @@
 """
 Бизнес-логика документов: загрузка в Minio, определение формата по расширению,
-получение ссылки на скачивание.
+получение ссылки на скачивание, получение распарсенного текста для инлайн-отображения правок.
 
-ИСПРАВЛЕНО: list_documents теперь принимает limit/offset и возвращает
-(items, total) вместо всего списка целиком.
+ИСПРАВЛЕНО:
+1. list_documents принимает limit/offset и возвращает (items, total).
+2. Добавлен get_document_content() — раньше фронтенд мог получить только presigned URL
+   на сырой файл (download), а распарсенный текст с позициями секций (DocumentParser/
+   DocumentSection) использовался только внутри Celery-пайплайна анализа и не отдавался
+   наружу. Без этого фронтенд не может сопоставить suggestion.section_ref с конкретным
+   местом в тексте для инлайн-отображения правок в редакторе.
 """
 
 import uuid
@@ -11,11 +16,13 @@ from pathlib import Path
 
 from app.core.config import Settings, get_settings
 from app.domain.exceptions import DocumentNotFoundError, FileTooLargeError, UnsupportedFileFormatError
+from app.domain.interfaces.document_parser import ParsedDocument
 from app.domain.interfaces.file_storage import FileStorage
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.enums import DocumentFormat
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.repositories.document_repository import DocumentRepository
+from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 
 _EXTENSION_TO_FORMAT: dict[str, DocumentFormat] = {
     ".doc": DocumentFormat.DOC,
@@ -31,10 +38,12 @@ class DocumentService:
         self,
         document_repository: DocumentRepository,
         file_storage: FileStorage,
+        parser_registry: DocumentParserRegistry | None = None,
         settings: Settings | None = None,
     ):
         self._documents = document_repository
         self._storage = file_storage
+        self._parser_registry = parser_registry or DocumentParserRegistry()
         self._settings = settings or get_settings()
 
     def _resolve_format(self, filename: str) -> DocumentFormat:
@@ -87,6 +96,10 @@ class DocumentService:
         expires_in = self._settings.minio_presigned_url_expire_seconds
         url = await self._storage.get_presigned_url(document.storage_key, expires_in)
         return url, expires_in
+
+    async def get_document_content(self, document: Document) -> ParsedDocument:
+        raw_bytes = await self._storage.download(document.storage_key)
+        return self._parser_registry.parse_by_filename(document.storage_key, raw_bytes)
 
     async def attach_sources(self, document: Document, sources: list) -> Document:
         return await self._documents.attach_sources(document, sources)
