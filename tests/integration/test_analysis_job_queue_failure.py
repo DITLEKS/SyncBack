@@ -1,6 +1,7 @@
 import uuid
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -12,10 +13,16 @@ from app.infrastructure.db.models.audit_log import AuditLog
 from app.infrastructure.db.models.enums import AnalysisJobStatus, AuditAction, ChangeType, SuggestionStatus
 from app.infrastructure.db.models.suggestion import Suggestion
 
+# ИСПРАВЛЕНО: AsyncClient(app=app, ...) — устаревший шорткат, убранный в httpx 0.28+.
+# Так как pyproject.toml требует только httpx>=0.27 без верхней границы, в окружении
+# может быть установлена версия, где этот параметр уже удалён — все тесты в этом
+# файле упадут с TypeError при создании клиента. Заменено на явный ASGITransport,
+# который работает стабильно на любой версии httpx.
+
 
 @pytest.mark.asyncio
 async def test_analysis_job_queue_failure_updates_job_status(db_session):
-    async with AsyncClient(app=app, base_url="http://test") as client:
+    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         queue_failure_email = f"queue-failure-{uuid.uuid4().hex}@example.com"
         register_response = await client.post(
             "/api/v1/auth/register",
@@ -68,7 +75,7 @@ async def test_analysis_job_queue_failure_updates_job_status(db_session):
 
 @pytest.mark.asyncio
 async def test_analysis_job_persists_celery_task_id(db_session):
-    async with AsyncClient(app=app, base_url="http://test") as client:
+    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         celery_task_id_email = f"celery-task-id-{uuid.uuid4().hex}@example.com"
         register_response = await client.post(
             "/api/v1/auth/register",
@@ -119,7 +126,7 @@ async def test_analysis_job_persists_celery_task_id(db_session):
 
 @pytest.mark.asyncio
 async def test_download_audit_log_uses_document_id_and_constraints(db_session):
-    async with AsyncClient(app=app, base_url="http://test") as client:
+    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         audit_download_email = f"audit-download-{uuid.uuid4().hex}@example.com"
         register_response = await client.post(
             "/api/v1/auth/register",
