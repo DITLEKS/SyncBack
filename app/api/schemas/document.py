@@ -1,5 +1,9 @@
 """
 Схемы документов.
+
+DocumentContentResponse/DocumentSectionResponse — распарсенный текст документа с позициями
+секций для инлайн-отображения правок во фронтенде (сопоставляются с
+s.section_ref у Suggestion).
 """
 
 import uuid
@@ -27,3 +31,14 @@ class DocumentDownloadResponse(BaseModel):
 
 class AttachSourcesRequest(BaseModel):
     source_ids: list[uuid.UUID] = Field(min_length=1)
+
+
+class DocumentSectionResponse(BaseModel):
+    ref: str
+    start_offset: int
+    end_offset: int
+
+
+class DocumentContentResponse(BaseModel):
+    plain_text: str
+    sections: list[DocumentSectionResponse]

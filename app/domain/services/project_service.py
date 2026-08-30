@@ -1,10 +1,10 @@
 """
 Бизнес-логика проектов. Правило видимости (admin — всё, иначе только свои) продублировано
-здесь для листинга и отдельно проверяется в api/deps.get_allowed_project для точечного доступа —
-это два разных сценария ("что я вижу" против "имею ли доступ к конкретному id").
+здесь для листинга и отдельно проверяется в api/deps.get_allowed_project для точечного доступа.
 
-ИСПРАВЛЕНО: list_projects_for_user теперь принимает limit/offset и возвращает
-(items, total) вместо всего списка целиком — см. app/api/schemas/pagination.py.
+ИСПРАВЛЕНО:
+1. list_projects_for_user принимает limit/offset и возвращает (items, total).
+2. create_project теперь принимает опциональный description.
 """
 
 from app.infrastructure.db.models.enums import UserRole
@@ -17,8 +17,8 @@ class ProjectService:
     def __init__(self, project_repository: ProjectRepository):
         self._projects = project_repository
 
-    async def create_project(self, owner: User, name: str) -> Project:
-        project = Project(owner_id=owner.id, name=name)
+    async def create_project(self, owner: User, name: str, description: str | None = None) -> Project:
+        project = Project(owner_id=owner.id, name=name, description=description)
         return await self._projects.create(project)
 
     async def list_projects_for_user(self, user: User, limit: int, offset: int) -> tuple[list[Project], int]:

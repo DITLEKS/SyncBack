@@ -2,8 +2,9 @@
 CRUD проектов. Листинг фильтруется по видимости (ProjectService), точечный доступ —
 через get_allowed_project.
 
-ИСПРАВЛЕНО: list_projects теперь принимает limit/offset и возвращает Page вместо
-всего списка целиком — см. app/api/schemas/pagination.py.
+ИСПРАВЛЕНО:
+1. list_projects принимает limit/offset и возвращает Page.
+2. create_project теперь принимает и передаёт опциональный description.
 """
 
 from fastapi import APIRouter, Depends, Query, status
@@ -25,7 +26,7 @@ async def create_project(
     current_user: User = Depends(get_current_user),
     project_service: ProjectService = Depends(get_project_service),
 ) -> ProjectResponse:
-    project = await project_service.create_project(current_user, payload.name)
+    project = await project_service.create_project(current_user, payload.name, payload.description)
     return ProjectResponse.model_validate(project)
 
 
