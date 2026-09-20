@@ -3,11 +3,14 @@
 
 ДОБАВЛЕНО:
 - DELETE /{document_id} — удаление документа + MinIO-файл + каскад suggestions/jobs.
+ОПТИМИЗИРОВАНО (PERF-4):
+- list_documents: TypeAdapter для пакетной сериализации вместо N model_validate.
 """
 import logging
 import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
+from pydantic import TypeAdapter
 
 from app.api.deps import get_allowed_project, get_current_user
 from app.api.schemas.document import (
@@ -41,10 +44,20 @@ from app.infrastructure.db.models.user import User
 
 logger = logging.getLogger("syncscribe.api.documents")
 
+# PERF-4: один TypeAdapter на уровне модуля — единый проход по списку
+# вместо N отдельных model_validate.
+_document_list_adapter: TypeAdapter[list[DocumentResponse]] = TypeAdapter(
+    list[DocumentResponse]
+)
+
 router = APIRouter(prefix="/projects/{project_id}/documents", tags=["documents"])
 
 
-async def _log_download(audit_log_service: AuditLogService, user_id: uuid.UUID, document_id: uuid.UUID) -> None:
+async def _log_download(
+    audit_log_service: AuditLogService,
+    user_id: uuid.UUID,
+    document_id: uuid.UUID,
+) -> None:
     try:
         await audit_log_service.log_download(user_id, document_id)
     except Exception:
@@ -62,17 +75,27 @@ async def upload_document(
     settings: Settings = Depends(get_settings),
 ) -> DocumentResponse:
     if not file.filename:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Имя файла обязательно")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Имя файла обязательно"
+        )
     try:
         content = await read_upload_within_limit(file, settings.max_upload_size_bytes)
     except FileTooLargeError as exc:
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)
+        ) from exc
     try:
-        document = await document_service.upload_document(project, file.filename, content, file.content_type or "application/octet-stream")
+        document = await document_service.upload_document(
+            project, file.filename, content, file.content_type or "application/octet-stream"
+        )
     except UnsupportedFileFormatError as exc:
-        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc)
+        ) from exc
     except FileTooLargeError as exc:
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)
+        ) from exc
     return DocumentResponse.model_validate(document)
 
 
@@ -83,9 +106,15 @@ async def list_documents(
     project: Project = Depends(get_allowed_project),
     document_service: DocumentService = Depends(get_document_service),
 ) -> Page[DocumentResponse]:
-    documents, total = await document_service.list_documents(project.id, limit=limit, offset=offset)
+    documents, total = await document_service.list_documents(
+        project.id, limit=limit, offset=offset
+    )
+    # PERF-4: единый проход через список
     return Page[DocumentResponse](
-        items=[DocumentResponse.model_validate(d) for d in documents], total=total, limit=limit, offset=offset
+        items=_document_list_adapter.validate_python(documents, from_attributes=True),
+        total=total,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -130,12 +159,15 @@ async def get_document_content(
         parsed = await document_service.get_document_content(document)
     except Exception as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Не удалось распарсить документ: {exc}"
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Не удалось распарсить документ: {exc}",
         ) from exc
     return DocumentContentResponse(
         plain_text=parsed.plain_text,
         sections=[
-            DocumentSectionResponse(ref=s.ref, start_offset=s.start_offset, end_offset=s.end_offset)
+            DocumentSectionResponse(
+                ref=s.ref, start_offset=s.start_offset, end_offset=s.end_offset
+            )
             for s in parsed.sections
         ],
     )
@@ -173,7 +205,11 @@ async def export_document(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     content, filename, media_type = await export_service.export_document(document)
     await _log_download(audit_log_service, current_user.id, document.id)
-    return Response(content=content, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/{document_id}/sources", response_model=DocumentResponse)
