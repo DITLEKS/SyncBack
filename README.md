@@ -4,8 +4,6 @@
 
 Целевые пользователи: технические писатели, solution/implementation engineers, presale-инженеры в B2B IT/SaaS/ИБ-компаниях.
 
-Этот README описывает backend MVP после всех раундов код-ревью (race conditions, пагинация, оптимизация запросов, DI-фикс дашборда, корректный `user_id` в audit log).
-
 ---
 
 ## Архитектура
