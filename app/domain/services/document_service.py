@@ -1,12 +1,11 @@
 """
 Бизнес-логика документов.
 
-ДОБАВЛЕНО:
-- delete_document()       — удаляет MinIO-файл (best-effort), затем запись в БД.
-- get_original_content()  — читает снапшот текста до правок (#7).
-                            Использует document.original_storage_key, если
-                            он есть (выставляется пайплайном анализа), иначе
-                            отдаёт текущий storage_key (снапшот совпадает с текущим).
+ИСПРАВЛЕНО (code-review):
+- C-1: Document() конструктор: title= → name=
+- C-2: list_all_for_user передаёт status=/search= (было status_filter=/name_query=)
+- A-5: list_all_for_user возвращает tuple[list[Document], int] вместо list[dict]
+- Q-6: getattr(document, 'original_storage_key', None) → document.original_storage_key
 """
 
 import logging
@@ -18,10 +17,10 @@ from app.core.config import Settings, get_settings
 from app.domain.exceptions import DocumentNotFoundError, FileTooLargeError, UnsupportedFileFormatError
 from app.domain.interfaces.document_parser import ParsedDocument
 from app.domain.interfaces.file_storage import FileStorage
+from app.domain.interfaces.repository_interfaces import IDocumentRepository
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.enums import DocumentFormat, DocumentStatus
 from app.infrastructure.db.models.project import Project
-from app.infrastructure.db.repositories.document_repository import DocumentRepository
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 
 logger = logging.getLogger("syncscribe.services.document")
@@ -37,7 +36,7 @@ _EXTENSION_TO_FORMAT: dict[str, DocumentFormat] = {
 class DocumentService:
     def __init__(
         self,
-        document_repository: DocumentRepository,
+        document_repository: IDocumentRepository,
         file_storage: FileStorage,
         parser_registry: DocumentParserRegistry | None = None,
         settings: Settings | None = None,
@@ -69,10 +68,11 @@ class DocumentService:
 
         await self._storage.upload(storage_key, content, content_type)
 
+        # C-1: было title=filename, теперь name=filename (совпадает с ORM-полем)
         document = Document(
             id=document_id,
             project_id=project.id,
-            title=filename,
+            name=filename,
             format=document_format,
             storage_key=storage_key,
         )
@@ -102,12 +102,10 @@ class DocumentService:
         2. Удаляем запись из БД — ON DELETE CASCADE уберёт
            suggestions, analysis_jobs, document_sources.
         """
+        # Q-6: прямой доступ к атрибуту вместо getattr с fallback
         keys_to_delete = [
             k
-            for k in [
-                document.storage_key,
-                getattr(document, "original_storage_key", None),
-            ]
+            for k in [document.storage_key, document.original_storage_key]
             if k
         ]
         for key in set(keys_to_delete):
@@ -130,15 +128,14 @@ class DocumentService:
         return self._parser_registry.parse_by_filename(document.storage_key, raw_bytes)
 
     async def get_original_content(self, document: Document) -> ParsedDocument:
-        """Pежим «Оригинал» (#7): вернуть текст до правок.
+        """Режим «Оригинал» (#7): вернуть текст до правок.
 
         Пайплайн анализа записывает снапшот исходного файла в MinIO под
         ключом original_storage_key перед сохранением правок. Если
         original_storage_key не выставлен (документ не проходил анализ),
         отдаём текущий контент (оригинал == текущий).
         """
-        original_key: str | None = getattr(document, "original_storage_key", None)
-        storage_key = original_key or document.storage_key
+        storage_key = document.original_storage_key or document.storage_key
         raw_bytes = await self._storage.download(storage_key)
         return self._parser_registry.parse_by_filename(storage_key, raw_bytes)
 
@@ -155,18 +152,20 @@ class DocumentService:
         *,
         status: DocumentStatus | None = None,
         search: str | None = None,
-        sort_by: Literal["created_at", "updated_at", "title"] = "updated_at",
+        sort_by: Literal["created_at", "updated_at", "name"] = "updated_at",
         sort_dir: Literal["asc", "desc"] = "desc",
         limit: int = 50,
         offset: int = 0,
-    ) -> tuple[list[dict], int]:
-        """Список всех документов пользователя с агрегированными счётчиками правок."""
+    ) -> tuple[list[Document], int]:
+        """Список всех документов пользователя.
+
+        A-5: возвращает list[Document] вместо list[dict] для типобезопасности.
+        C-2: параметры status= и search= совпадают с сигнатурой репозитория.
+        """
         return await self._documents.list_all_for_user(
             owner_id,
-            status=status,
-            search=search,
-            sort_by=sort_by,
-            sort_dir=sort_dir,
             limit=limit,
             offset=offset,
+            status=status,
+            search=search,
         )

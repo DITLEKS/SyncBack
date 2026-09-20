@@ -1,15 +1,24 @@
+"""Репозиторий задач анализа.
+
+ИСПРАВЛЕНО (code-review):
+- C-5: mark_dispatched — refresh перемещён после записи изменений
+- Q-4: логика started_at/finished_at удалена из update_status —
+        теперь это ответственность AnalysisJobService.update_job_status
+- A-1: класс реализует IAnalysisJobRepository
+"""
 import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.interfaces.repository_interfaces import IAnalysisJobRepository
 from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.enums import AnalysisJobStatus, DocumentStatus
 
 
-class AnalysisJobRepository:
+class AnalysisJobRepository(IAnalysisJobRepository):
     def __init__(self, session: AsyncSession):
         self._session = session
 
@@ -52,7 +61,7 @@ class AnalysisJobRepository:
         return job
 
     async def mark_dispatched(self, job: AnalysisJob, document: Document, task_id: str) -> AnalysisJob:
-        await self._session.refresh(job)
+        # C-5: изменения сначала, refresh — после commit
         job.celery_task_id = task_id
         if (
             job.status in (AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING)
@@ -106,17 +115,13 @@ class AnalysisJobRepository:
         self,
         job: AnalysisJob,
         status: AnalysisJobStatus,
-        error_code: str | None = None,
-        error_message: str | None = None,
     ) -> AnalysisJob:
+        """Сохранить уже изменённый job в БД.
+
+        Q-4: timestamps (started_at, finished_at) управляются в
+        AnalysisJobService.update_job_status — репозиторий только persist.
+        """
         job.status = status
-        job.error_code = error_code
-        job.error_message = error_message
-        now = datetime.now(UTC)
-        if status == AnalysisJobStatus.PROCESSING and job.started_at is None:
-            job.started_at = now
-        if status in (AnalysisJobStatus.SUCCESS, AnalysisJobStatus.FAILED, AnalysisJobStatus.CANCELLED):
-            job.finished_at = now
         await self._session.commit()
         await self._session.refresh(job)
         return job

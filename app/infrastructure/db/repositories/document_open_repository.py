@@ -1,8 +1,9 @@
 """
 DocumentOpenRepository — CRUD для таблицы document_opens.
 
-Таблица создана миграцией 0010_document_opens.py.
-Хранит последнее открытие документа пользователем (upsert по unique (user_id, document_id)).
+ИСПРАВЛЕНО (code-review):
+- A-3: RecentItem импортируется из domain/interfaces/dashboard_types.py
+        (не из domain/services/dashboard_service.py)
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.services.dashboard_service import RecentItem
+from app.domain.interfaces.dashboard_types import RecentItem
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.document_open import DocumentOpen
 from app.infrastructure.db.models.project import Project
@@ -26,21 +27,19 @@ class DocumentOpenRepository:
     async def upsert_open(
         self, user_id: uuid.UUID, document_id: uuid.UUID
     ) -> None:
-        """INSERT … ON CONFLICT DO UPDATE last_opened_at = now().
-
-        Использует PostgreSQL UPSERT (pg_insert) для атомарного обновления.
-        """
+        """INSERT … ON CONFLICT DO UPDATE last_opened_at = now()."""
+        now = datetime.now(tz=timezone.utc)
         stmt = (
             pg_insert(DocumentOpen)
             .values(
                 id=uuid.uuid4(),
                 user_id=user_id,
                 document_id=document_id,
-                last_opened_at=datetime.now(tz=timezone.utc),
+                last_opened_at=now,
             )
             .on_conflict_do_update(
                 constraint="uq_document_opens_user_document",
-                set_={"last_opened_at": datetime.now(tz=timezone.utc)},
+                set_={"last_opened_at": now},
             )
         )
         await self._session.execute(stmt)

@@ -1,8 +1,11 @@
 """
 DashboardRepository — реальные SQL-агрегаты для GET /dashboard.
 
-refactor(#18): методы возвращают типизированные dataclass-объекты
-               (DashboardData, AttentionItem) вместо list[dict].
+ИСПРАВЛЕНО (code-review):
+- A-3/A-4: импорт DashboardData, AttentionItem, DayActivityData из
+           domain/interfaces/dashboard_types.py (не из сервисного слоя)
+- P-4: _get_activity_last_7_days джойнит analysis_jobs по finished_at
+       вместо document_opens — поле analyzed теперь семантически верно
 """
 from __future__ import annotations
 
@@ -12,14 +15,9 @@ from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.services.dashboard_service import (
-    AttentionItem,
-    DashboardData,
-    DayActivityData,
-)
+from app.domain.interfaces.dashboard_types import AttentionItem, DashboardData, DayActivityData
 from app.infrastructure.db.models.document import Document
-from app.infrastructure.db.models.document_open import DocumentOpen
-from app.infrastructure.db.models.enums import DocumentStatus
+from app.infrastructure.db.models.enums import AnalysisJobStatus, DocumentStatus
 from app.infrastructure.db.models.project import Project
 
 
@@ -27,16 +25,8 @@ class DashboardRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    # ------------------------------------------------------------------
-    # Агрегированный запрос — один вызов вместо трёх (#8 opt)
-    # ------------------------------------------------------------------
-
     async def get_dashboard_aggregates(self, owner_id: uuid.UUID) -> DashboardData:
-        """Возвращает все агрегаты дашборда одним запросом.
-
-        Использует conditional COUNT (FILTER WHERE) для total / awaiting / ready
-        — один SELECT вместо трёх.
-        """
+        """Все агрегаты дашборда одним запросом (conditional COUNT FILTER WHERE)."""
         q = (
             select(
                 func.count(Document.id).label("total"),
@@ -70,20 +60,30 @@ class DashboardRepository:
     async def _get_activity_last_7_days(
         self, owner_id: uuid.UUID
     ) -> list[DayActivityData]:
-        """Активность за последние 7 дней из document_opens."""
+        """P-4: завершённые analysis_jobs за последние 7 дней.
+
+        Поле analyzed = число успешно завершённых задач анализа (finished_at),
+        не открытий документа.
+        """
+        from app.infrastructure.db.models.analysis_job import AnalysisJob
+
         since = datetime.now(tz=timezone.utc) - timedelta(days=6)
-        day_col = func.date_trunc("day", DocumentOpen.last_opened_at).label("day")
+        day_col = func.date_trunc("day", AnalysisJob.finished_at).label("day")
         q = (
-            select(day_col, func.count().label("opens"))
+            select(day_col, func.count().label("analyzed"))
+            .select_from(AnalysisJob)
+            .join(Document, AnalysisJob.document_id == Document.id)
+            .join(Project, Document.project_id == Project.id)
             .where(
-                DocumentOpen.user_id == owner_id,
-                DocumentOpen.last_opened_at >= since,
+                Project.owner_id == owner_id,
+                AnalysisJob.status == AnalysisJobStatus.SUCCESS,
+                AnalysisJob.finished_at >= since,
             )
             .group_by(day_col)
             .order_by(day_col)
         )
         rows = (await self._session.execute(q)).all()
-        result_map: dict[date, int] = {r.day.date(): r.opens for r in rows}
+        result_map: dict[date, int] = {r.day.date(): r.analyzed for r in rows}
         today = datetime.now(tz=timezone.utc).date()
         return [
             DayActivityData(

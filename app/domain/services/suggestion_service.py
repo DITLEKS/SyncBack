@@ -3,10 +3,13 @@
 finalize_review, атомарное сохранение сессии ревью (P0-2) и сборка
 списка принятых изменений для экспорта.
 
-ИСПРАВЛЕНО (P0-#13):
-- bulk_accept() теперь возвращает tuple[list[Suggestion], Document], чтобы
-  роутер мог заполнить BulkAcceptResponse.document_status и .review_version
-  без лишнего GET-запроса.
+ИСПРАВЛЕНО (code-review):
+- C-4: increment_review_version вызывается только при непустых decisions
+        или finalize=True
+- P-1: bulk_accept не делает list_ids предзапрос — bulk_update_status
+        фильтрует WHERE status=PENDING и возвращает обновлённые строки
+- Q-2: убран uuid.UUID(int=0) в apply_review — user_id передаётся явно
+- A-1: импорты сервисов — через IDocumentRepository / ISuggestionRepository
 """
 from __future__ import annotations
 
@@ -21,16 +24,14 @@ from app.domain.exceptions import (
     OptimisticLockError,
     ReviewNotCompleteError,
     ReviewVersionConflictError,
-    StaleReviewVersionError,
     SuggestionAlreadyDecidedError,
     SuggestionNotFoundError,
 )
 from app.domain.interfaces.document_exporter import AppliedChange
+from app.domain.interfaces.repository_interfaces import IDocumentRepository, ISuggestionRepository
 from app.infrastructure.db.models.enums import DocumentStatus, SuggestionStatus
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.suggestion import Suggestion
-from app.infrastructure.db.repositories.document_repository import DocumentRepository
-from app.infrastructure.db.repositories.suggestion_repository import SuggestionRepository
 
 if TYPE_CHECKING:
     from app.domain.services.document_export_service import DocumentExportService
@@ -60,8 +61,8 @@ class BulkAcceptResult:
 class SuggestionService:
     def __init__(
         self,
-        suggestion_repository: SuggestionRepository,
-        document_repository: DocumentRepository,
+        suggestion_repository: ISuggestionRepository,
+        document_repository: IDocumentRepository,
     ) -> None:
         self._suggestions = suggestion_repository
         self._documents = document_repository
@@ -193,11 +194,11 @@ class SuggestionService:
         document_id: uuid.UUID,
         user_id: uuid.UUID,
     ) -> BulkAcceptResult:
-        """Бульковое принятие всех pending-правок.
+        """Булковое принятие всех pending-правок.
 
-        P0-#13: возвращает BulkAcceptResult(правки, документ), чтобы
-        роутер мог вернуть document_status и review_version в одном ответе,
-        без дополнительного GET /editor.
+        P-1: убран предварительный list_ids — bulk_update_status сам
+        фильтрует WHERE status=PENDING и возвращает обновлённые строки.
+        Экономия: минус 1 round-trip к БД.
         """
         document = await self._get_document_or_raise(project_id, document_id)
         if document.status != DocumentStatus.AWAITING_APPROVAL:
@@ -206,14 +207,13 @@ class SuggestionService:
             )
         if document.current_analysis_job_id is None:
             return BulkAcceptResult(suggestions=[], document=document)
-        pending_ids = await self._suggestions.list_ids_by_analysis_job_and_status(
-            document.current_analysis_job_id, SuggestionStatus.PENDING
+
+        # P-1: напрямую bulk_update с WHERE status=PENDING — нет предзапроса ids
+        accepted = await self._suggestions.bulk_update_status_by_job(
+            document.current_analysis_job_id,
+            SuggestionStatus.ACCEPTED,
+            user_id,
         )
-        accepted = await self._suggestions.bulk_update_status(
-            pending_ids, SuggestionStatus.ACCEPTED, user_id
-        )
-        # Перечитываем документ после операции, чтобы получить
-        # актуальный status и review_version.
         refreshed = await self._documents.get_by_id(document_id)
         return BulkAcceptResult(
             suggestions=accepted,
@@ -228,24 +228,14 @@ class SuggestionService:
         self,
         project_id: uuid.UUID,
         document_id: uuid.UUID,
+        user_id: uuid.UUID,
         accepted_ids: list[uuid.UUID],
         rejected_ids: list[uuid.UUID],
         current_review_version: int,
     ) -> int:
         """Атомарно применить списки принятых и отклонённых правок.
 
-        Алгоритм:
-        1. Загрузить документ и проверить review_version == current_review_version.
-           При несовпадении → ReviewVersionConflictError → роутер вернёт 409.
-        2. Применить bulk UPDATE для accepted_ids и rejected_ids.
-           Правки уже в ACCEPTED/REJECTED пропускаются атомарно (WHERE status = PENDING).
-        3. Инкрементировать review_version через finalize_and_bump_version или
-           отдельный update_review_version (только версия, без смены статуса).
-
-        Возвращает новую review_version.
-
-        Примечание: этот метод не требует, чтобы document.status == AWAITING_APPROVAL,
-        так как PUT /editor/review — «частичное» сохранение, а не финализация.
+        Q-2: user_id передаётся явно — убран uuid.UUID(int=0).
         """
         document = await self._get_document_or_raise(project_id, document_id)
 
@@ -256,20 +246,15 @@ class SuggestionService:
                 "Обновите страницу и повторите попытку."
             )
 
-        # Применяем bulk-обновления (WHERE status = PENDING — защита от гонки)
         if accepted_ids:
-            # user_id не передаётся в apply_review; правки без автора — допустимо
-            # для bulk-операции из PUT /editor/review (нет явного user_id в теле).
-            # TODO: передавать user_id из depends когда будет auth на этом эндпоинте.
             await self._suggestions.bulk_update_status(
-                accepted_ids, SuggestionStatus.ACCEPTED, uuid.UUID(int=0)
+                accepted_ids, SuggestionStatus.ACCEPTED, user_id
             )
         if rejected_ids:
             await self._suggestions.bulk_update_status(
-                rejected_ids, SuggestionStatus.REJECTED, uuid.UUID(int=0)
+                rejected_ids, SuggestionStatus.REJECTED, user_id
             )
 
-        # Инкрементируем review_version атомарно
         updated_document = await self._documents.bump_review_version(document)
         return updated_document.review_version
 
@@ -339,7 +324,7 @@ class SuggestionService:
                 "Атомарное сохранение ревью доступно только в статусе 'awaiting_approval'"
             )
 
-        current_version = getattr(document, "review_version", 0) or 0
+        current_version = document.review_version or 0
         if current_version != review_version:
             raise OptimisticLockError(
                 f"Версия ревью устарела: ожидалось {current_version}, получено {review_version}. "
@@ -386,7 +371,9 @@ class SuggestionService:
             document = await self._documents.update_status(document, DocumentStatus.READY)
             finalized = True
 
-        document = await self._documents.increment_review_version(document)
+        # C-4: bump версии только если были реальные изменения или finalize
+        if decisions or finalize:
+            document = await self._documents.increment_review_version(document)
 
         return ReviewSaveResult(
             document=document,

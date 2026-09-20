@@ -6,6 +6,8 @@
 - P0-6: create_text_source / create_file_source принимают scope: SourceScope.
 - P0-6: _assert_sources_mutable — гвард: запрещает изменение источников
   документа в статусах IN_PROGRESS и AWAITING_APPROVAL.
+- A-1: конструктор принимает ISourceRepository вместо конкретного класса.
+- Q-5: get_sources_for_project — один проход для found_ids и foreign-проверки.
 """
 
 import uuid
@@ -13,14 +15,13 @@ import uuid
 from app.core.config import Settings, get_settings
 from app.domain.exceptions import FileTooLargeError, SourceLockError, SourceNotFoundError
 from app.domain.interfaces.file_storage import FileStorage
+from app.domain.interfaces.repository_interfaces import ISourceRepository
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.enums import DocumentStatus, SourceType
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.source import Source
 from app.infrastructure.db.models.source_scope import SourceScope
-from app.infrastructure.db.repositories.source_repository import SourceRepository
 
-# Статусы, при которых изменение набора источников документа заблокировано.
 _LOCKED_STATUSES = frozenset({
     DocumentStatus.IN_PROGRESS,
     DocumentStatus.AWAITING_APPROVAL,
@@ -30,7 +31,7 @@ _LOCKED_STATUSES = frozenset({
 class SourceService:
     def __init__(
         self,
-        source_repository: SourceRepository,
+        source_repository: ISourceRepository,
         file_storage: FileStorage,
         settings: Settings | None = None,
     ):
@@ -38,27 +39,14 @@ class SourceService:
         self._storage = file_storage
         self._settings = settings or get_settings()
 
-    # ------------------------------------------------------------------
-    # Guard
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _assert_sources_mutable(document: Document) -> None:
-        """P0-6: Выбросить SourceLockError, если источники менять нельзя.
-
-        Изменение набора источников документа запрещено в статусах
-        IN_PROGRESS и AWAITING_APPROVAL — это гарантирует, что активный
-        или уже завершённый анализ не теряет ссылки на исходные источники.
-        """
+        """P0-6: Выбросить SourceLockError, если источники менять нельзя."""
         if document.status in _LOCKED_STATUSES:
             raise SourceLockError(
                 f"Нельзя изменить источники документа в статусе '{document.status.value}'. "
                 "Дождитесь завершения анализа или переведите документ обратно в черновик."
             )
-
-    # ------------------------------------------------------------------
-    # Create project-level sources (документ не передаётся)
-    # ------------------------------------------------------------------
 
     async def create_text_source(
         self,
@@ -109,10 +97,6 @@ class SourceService:
             await self._storage.delete(storage_key)
             raise
 
-    # ------------------------------------------------------------------
-    # Read
-    # ------------------------------------------------------------------
-
     async def list_sources(
         self, project_id: uuid.UUID, limit: int, offset: int
     ) -> tuple[list[Source], int]:
@@ -123,33 +107,32 @@ class SourceService:
     async def get_sources_for_project(
         self, project_id: uuid.UUID, source_ids: list[uuid.UUID]
     ) -> list[Source]:
+        """Q-5: один проход по sources — вместо двух set-операций."""
         sources = await self._sources.get_many_by_ids(source_ids)
-        found_ids = {s.id for s in sources}
-        missing = set(source_ids) - found_ids
+
+        source_ids_set = set(source_ids)
+        found_ids: set[uuid.UUID] = set()
+        foreign: list[uuid.UUID] = []
+
+        for s in sources:
+            found_ids.add(s.id)
+            if s.project_id != project_id:
+                foreign.append(s.id)
+
+        missing = source_ids_set - found_ids
         if missing:
             raise SourceNotFoundError(f"Источники не найдены: {missing}")
-
-        foreign = [s.id for s in sources if s.project_id != project_id]
         if foreign:
             raise SourceNotFoundError(f"Источники не принадлежат проекту {project_id}: {foreign}")
 
         return sources
-
-    # ------------------------------------------------------------------
-    # Attach / detach document-specific sources (P0-6 lock guard)
-    # ------------------------------------------------------------------
 
     async def replace_document_sources(
         self,
         document: Document,
         source_ids: list[uuid.UUID],
     ) -> list[Source]:
-        """Атомарная замена набора источников документа.
-
-        Заблокировано в статусах IN_PROGRESS и AWAITING_APPROVAL (P0-6).
-        Операция атомарна: старые document-specific источники удаляются,
-        новые добавляются в одной транзакции.
-        """
+        """Атомарная замена набора источников документа (P0-6)."""
         self._assert_sources_mutable(document)
         sources = await self.get_sources_for_project(document.project_id, source_ids)
         return await self._sources.replace_document_sources(document.id, sources)
