@@ -24,6 +24,8 @@ Celery-задачи пайплайна анализа. LLM вызывается 
 4. _finalize_job: session.commit() обёрнут в try/except — при сбое коммита
    статус документа откатывается в DRAFT и job помечается FAILED, чтобы документ
    не завис в IN_PROGRESS без живого job'а.
+5. _finalize_job: job.partial_success = True выставляется при частичном успехе
+   (есть и успешные, и упавшие источники).
 """
 
 import asyncio
@@ -193,6 +195,8 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
         if succeeded:
             message = None
             if failed:
+                # Часть источников упала — помечаем job как частично успешный.
+                job.partial_success = True
                 message = "Не обработаны источники: " + ", ".join(
                     f"{r['source_id']} ({r.get('error_code')})" for r in failed
                 )
@@ -226,9 +230,6 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
                 extra={"job_id": job_id, "document_id": str(job.document_id)},
             )
             await session.rollback()
-            # Пытаемся зафиксировать безопасный статус в отдельной сессии,
-            # чтобы не потерять информацию об ошибке даже если основная сессия
-            # уже в плохом состоянии.
             try:
                 async with isolated_db_session() as recovery_session:
                     recovery_job_repo = AnalysisJobRepository(recovery_session)

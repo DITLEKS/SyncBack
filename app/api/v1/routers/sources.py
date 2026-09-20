@@ -8,7 +8,7 @@
 чанками вместо полной буферизации через file.read(). list_sources теперь принимает
 limit/offset и возвращает Page вместо всего списка целиком.
 
-P0-6: scope пробрасывается из запроса в сервисный слой.
+P0-6: scope пробрасывается из запроса в сервисный слой как SourceScope (StrEnum).
 """
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
@@ -35,6 +35,8 @@ async def create_text_source(
     source_service: SourceService = Depends(get_source_service),
 ) -> SourceResponse:
     source_type = SourceType.NOTE if payload.type == "note" else SourceType.LINK
+    # payload.scope — Literal["project", "document"], SourceScope — StrEnum с теми же
+    # строковыми значениями, поэтому SourceScope(payload.scope) всегда корректен.
     scope = SourceScope(payload.scope)  # P0-6
     source = await source_service.create_text_source(
         project, payload.name, source_type, payload.text_content, payload.url, scope=scope
@@ -69,7 +71,7 @@ async def upload_file_source(
             file.filename,
             content,
             file.content_type or "application/octet-stream",
-            scope=SourceScope(scope),  # P0-6
+            scope=SourceScope(scope),  # P0-6: строка → StrEnum
         )
     except FileTooLargeError as exc:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc

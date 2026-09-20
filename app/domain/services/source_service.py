@@ -4,11 +4,12 @@
 ИСПРАВЛЕНО: list_sources теперь принимает limit/offset и возвращает
 (items, total) вместо всего списка целиком.
 
-P0-6: create_text_source / create_file_source принимают scope и передают в ORM.
+P0-6: create_text_source / create_file_source принимают scope: SourceScope
+(StrEnum) и передают напрямую в ORM — промежуточный _SCOPE_MAP убран, так как
+SourceScope уже является строкой (StrEnum) и совместим с полем модели.
 """
 
 import uuid
-from typing import Literal
 
 from app.core.config import Settings, get_settings
 from app.domain.exceptions import FileTooLargeError, SourceNotFoundError
@@ -18,13 +19,6 @@ from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.source import Source
 from app.infrastructure.db.models.source_scope import SourceScope
 from app.infrastructure.db.repositories.source_repository import SourceRepository
-
-_ScopeLiteral = Literal["project", "document"]
-
-_SCOPE_MAP: dict[str, SourceScope] = {
-    "project": SourceScope.PROJECT,
-    "document": SourceScope.DOCUMENT,
-}
 
 
 class SourceService:
@@ -45,7 +39,7 @@ class SourceService:
         source_type: SourceType,
         text_content: str | None,
         url: str | None,
-        scope: _ScopeLiteral = "project",
+        scope: SourceScope = SourceScope.PROJECT,
     ) -> Source:
         source = Source(
             project_id=project.id,
@@ -53,7 +47,7 @@ class SourceService:
             type=source_type,
             text_content=text_content,
             url=url,
-            scope=_SCOPE_MAP[scope],
+            scope=scope,
         )
         return await self._sources.create(source)
 
@@ -64,7 +58,7 @@ class SourceService:
         filename: str,
         content: bytes,
         content_type: str,
-        scope: _ScopeLiteral = "project",
+        scope: SourceScope = SourceScope.PROJECT,
     ) -> Source:
         if len(content) > self._settings.max_upload_size_bytes:
             raise FileTooLargeError(f"Файл превышает лимит {self._settings.max_upload_size_mb} МБ")
@@ -79,7 +73,7 @@ class SourceService:
             name=name,
             type=SourceType.FILE,
             storage_key=storage_key,
-            scope=_SCOPE_MAP[scope],
+            scope=scope,
         )
         try:
             return await self._sources.create(source)
