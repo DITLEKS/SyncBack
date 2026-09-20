@@ -40,8 +40,8 @@ class Document(Base):
     status: Mapped[DocumentStatus] = mapped_column(
         sa.Enum(DocumentStatus, name="document_status", values_callable=_values),
         nullable=False,
-        default=DocumentStatus.UPLOADED,
-        server_default=DocumentStatus.UPLOADED.value,
+        default=DocumentStatus.DRAFT,
+        server_default=DocumentStatus.DRAFT.value,
     )
     current_analysis_job_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),

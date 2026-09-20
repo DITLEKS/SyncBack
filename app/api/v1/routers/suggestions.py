@@ -11,11 +11,14 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.api.deps import get_allowed_project, get_current_user
+from app.api.schemas.document import DocumentResponse
 from app.api.schemas.pagination import Page
 from app.api.schemas.suggestion import BulkAcceptResponse, SuggestionResponse
 from app.core.dependencies import get_audit_log_service, get_suggestion_service
 from app.domain.exceptions import (
     DocumentNotFoundError,
+    InvalidDocumentStatusError,
+    ReviewNotCompleteError,
     SuggestionAlreadyDecidedError,
     SuggestionNotFoundError,
 )
@@ -69,6 +72,8 @@ async def accept_suggestion(
         suggestion = await suggestion_service.get_suggestion_for_document(project.id, document_id, suggestion_id)
     except (DocumentNotFoundError, SuggestionNotFoundError) as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except InvalidDocumentStatusError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     try:
         suggestion = await suggestion_service.decide(suggestion, current_user.id, SuggestionStatus.ACCEPTED)
     except SuggestionAlreadyDecidedError as exc:
@@ -90,6 +95,8 @@ async def reject_suggestion(
         suggestion = await suggestion_service.get_suggestion_for_document(project.id, document_id, suggestion_id)
     except (DocumentNotFoundError, SuggestionNotFoundError) as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except InvalidDocumentStatusError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     try:
         suggestion = await suggestion_service.decide(suggestion, current_user.id, SuggestionStatus.REJECTED)
     except SuggestionAlreadyDecidedError as exc:
@@ -110,6 +117,23 @@ async def bulk_accept_suggestions(
         accepted = await suggestion_service.bulk_accept(project.id, document_id, current_user.id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except InvalidDocumentStatusError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     for suggestion in accepted:
         await _log_decision(audit_log_service, current_user.id, suggestion.id, AuditAction.ACCEPT)
     return BulkAcceptResponse(accepted_count=len(accepted))
+
+
+@router.post("/finalize", response_model=DocumentResponse)
+async def finalize_review(
+    document_id: uuid.UUID,
+    project: Project = Depends(get_allowed_project),
+    suggestion_service: SuggestionService = Depends(get_suggestion_service),
+) -> DocumentResponse:
+    try:
+        document = await suggestion_service.finalize_review(project.id, document_id)
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return DocumentResponse.model_validate(document)

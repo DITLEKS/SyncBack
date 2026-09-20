@@ -27,10 +27,10 @@ class DocumentFormat(enum.StrEnum):
 
 
 class DocumentStatus(enum.StrEnum):
-    UPLOADED = "uploaded"
-    ANALYZING = "analyzing"
-    ANALYZED = "analyzed"
-    ERROR = "error"
+    DRAFT = "draft"
+    IN_PROGRESS = "in_progress"
+    AWAITING_APPROVAL = "awaiting_approval"
+    READY = "ready"
 
 
 class SourceType(enum.StrEnum):
@@ -44,6 +44,7 @@ class AnalysisJobStatus(enum.StrEnum):
     PROCESSING = "processing"
     SUCCESS = "success"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class ChangeType(enum.StrEnum):

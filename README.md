@@ -89,7 +89,7 @@ docker compose exec backend ruff check .
 | `documents` | Целевые документы (doc/docx/txt/markdown) | M:N с `sources`, ссылка на последний `analysis_job` |
 | `sources` | Источники истины (file/note/link), переиспользуемые | M:N с `documents` через `document_sources` |
 | `document_sources` | Связка документ↔источник | — |
-| `analysis_jobs` | Запуски анализа (pending/processing/success/failed) | 1:N `suggestions` |
+| `analysis_jobs` | Запуски анализа (pending/processing/success/failed/cancelled) | 1:N `suggestions` |
 | `suggestions` | Точечные правки (add/modify/delete) | заготовки `source_reference`/`confidence_score`/`explanation` под будущую верификацию |
 | `audit_logs` | Журнал действий (accept/reject/download) | по `suggestion_id` или `document_id` (взаимно исключающие, оба nullable, корректная комбинация гарантируется CHECK-constraint `ck_audit_logs_target`) |
 
@@ -121,17 +121,35 @@ GET    /projects/{project_id}/sources                            (пагинац
 
 POST   /projects/{project_id}/documents/{document_id}/analysis-jobs
 GET    /projects/{project_id}/documents/{document_id}/analysis-jobs/{job_id}
+POST   /projects/{project_id}/documents/{document_id}/analysis-jobs/{job_id}/cancel
 
 GET    /projects/{project_id}/documents/{document_id}/suggestions                        (пагинация: ?limit=&offset=)
 POST   /projects/{project_id}/documents/{document_id}/suggestions/{suggestion_id}/accept
 POST   /projects/{project_id}/documents/{document_id}/suggestions/{suggestion_id}/reject
 POST   /projects/{project_id}/documents/{document_id}/suggestions/bulk-accept
+POST   /projects/{project_id}/documents/{document_id}/suggestions/finalize
 
 GET    /system/llm-health                                         (диагностика провайдера)
 GET    /health                                                    (без префикса /api/v1)
 ```
 
 **Пагинация**: все list-эндпоинты (`GET /projects`, `/documents`, `/sources`, `/suggestions`) принимают запросные параметры `limit` (по умолчанию 50, максимум 200) и `offset` (по умолчанию 0), возвращая объект `{"items": [...], "total": N, "limit": L, "offset": O}` (схема `Page[T]` в `app/api/schemas/pagination.py`) вместо плоского списка — без этого объём ответа рос бы линейно без ограничения при росте числа документов/правок у клиента.
+
+## Жизненный цикл документа
+
+Документ имеет четыре пользовательских статуса: `draft`, `in_progress`,
+`awaiting_approval`, `ready`. После загрузки документ создаётся в `draft`; после
+успешной отправки задачи в Celery переходит в `in_progress`. Успешный анализ с
+правками переводит его в `awaiting_approval`, без правок — в `ready`. Ошибка или
+отмена анализа возвращает документ в `draft`; техническая причина хранится в
+`analysis_jobs`. Из `awaiting_approval` документ переходит в `ready` только через
+`POST .../suggestions/finalize`, когда у текущего анализа не осталось правок
+`pending`. Статус `ready` конечный в рамках MVP.
+
+Для одного документа разрешена только одна активная задача (`pending` или
+`processing`). Ограничение обеспечено и сервисом, и частичным уникальным индексом
+PostgreSQL. Активную задачу можно отменить через
+`POST .../analysis-jobs/{job_id}/cancel`.
 
 ## Пайплайн анализа (Celery)
 

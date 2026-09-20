@@ -14,11 +14,13 @@ import uuid
 
 from app.domain.exceptions import (
     DocumentNotFoundError,
+    InvalidDocumentStatusError,
+    ReviewNotCompleteError,
     SuggestionAlreadyDecidedError,
     SuggestionNotFoundError,
 )
 from app.domain.interfaces.document_exporter import AppliedChange
-from app.infrastructure.db.models.enums import SuggestionStatus
+from app.infrastructure.db.models.enums import DocumentStatus, SuggestionStatus
 from app.infrastructure.db.models.suggestion import Suggestion
 from app.infrastructure.db.repositories.document_repository import DocumentRepository
 from app.infrastructure.db.repositories.suggestion_repository import SuggestionRepository
@@ -47,6 +49,8 @@ class SuggestionService:
 
     async def get_suggestion_for_document(self, project_id: uuid.UUID, document_id: uuid.UUID, suggestion_id: uuid.UUID) -> Suggestion:
         document = await self._get_document_or_raise(project_id, document_id)
+        if document.status != DocumentStatus.AWAITING_APPROVAL:
+            raise InvalidDocumentStatusError("Решения по правкам доступны только в статусе 'awaiting_approval'")
         suggestion = await self._suggestions.get_by_id(suggestion_id)
         if suggestion is None or suggestion.analysis_job_id != document.current_analysis_job_id:
             raise SuggestionNotFoundError(f"Правка {suggestion_id} не найдена для документа {document_id}")
@@ -60,12 +64,27 @@ class SuggestionService:
 
     async def bulk_accept(self, project_id: uuid.UUID, document_id: uuid.UUID, user_id: uuid.UUID) -> list[Suggestion]:
         document = await self._get_document_or_raise(project_id, document_id)
+        if document.status != DocumentStatus.AWAITING_APPROVAL:
+            raise InvalidDocumentStatusError("Решения по правкам доступны только в статусе 'awaiting_approval'")
         if document.current_analysis_job_id is None:
             return []
         pending_ids = await self._suggestions.list_ids_by_analysis_job_and_status(
             document.current_analysis_job_id, SuggestionStatus.PENDING
         )
         return await self._suggestions.bulk_update_status(pending_ids, SuggestionStatus.ACCEPTED, user_id)
+
+    async def finalize_review(self, project_id: uuid.UUID, document_id: uuid.UUID):
+        document = await self._get_document_or_raise(project_id, document_id)
+        if document.status != DocumentStatus.AWAITING_APPROVAL:
+            raise InvalidDocumentStatusError("Завершить review можно только в статусе 'awaiting_approval'")
+        if document.current_analysis_job_id is None:
+            raise ReviewNotCompleteError("У документа отсутствует текущий результат анализа")
+        pending_count = await self._suggestions.count_by_analysis_job_and_status(
+            document.current_analysis_job_id, SuggestionStatus.PENDING
+        )
+        if pending_count:
+            raise ReviewNotCompleteError(f"Нельзя завершить review: не рассмотрено предложений — {pending_count}")
+        return await self._documents.update_status(document, DocumentStatus.READY)
 
     async def get_accepted_changes(self, document_id: uuid.UUID) -> list[AppliedChange]:
         document = await self._documents.get_by_id(document_id)
