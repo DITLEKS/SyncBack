@@ -1,82 +1,102 @@
-class DomainError(Exception):
-    """Базовый класс для всех доменных ошибок SyncScribe."""
+"""Доменные исключения SyncBack.
+
+Каждое исключение соответствует одной бизнес-ситуации и конвертируется
+в HTTP-ответ на уровне роутера или глобального exception handler.
+
+fix/review-critical-p0:
+- Добавлены все исключения, которые импортируются сервисами, но отсутствовали.
+- StaleReviewVersionError = алиас ReviewVersionConflictError (обратная совместимость).
+"""
 
 
-class EmailAlreadyRegisteredError(DomainError):
-    pass
+class SyncBackError(Exception):
+    """Базовый класс для всех доменных исключений."""
 
 
-class InvalidCredentialsError(DomainError):
-    pass
+# ---------------------------------------------------------------------------
+# Document / Project / Source
+# ---------------------------------------------------------------------------
+
+class DocumentNotFoundError(SyncBackError):
+    """Документ не найден или не принадлежит проекту."""
 
 
-class AccountTemporarilyLockedError(DomainError):
-    def __init__(self, retry_after_seconds: int):
-        self.retry_after_seconds = retry_after_seconds
-        super().__init__(f"Аккаунт временно заблокирован, повтор через {retry_after_seconds} сек.")
+class ProjectNotFoundError(SyncBackError):
+    """Проект не найден или недоступен текущему пользователю."""
 
 
-class InvalidTokenError(DomainError):
-    pass
+class SourceNotFoundError(SyncBackError):
+    """Источник не найден или не принадлежит проекту."""
 
 
-class UserNotFoundError(DomainError):
-    pass
+class FileTooLargeError(SyncBackError):
+    """Загружаемый файл превышает допустимый размер."""
 
 
-class ProjectNotFoundError(DomainError):
-    pass
+class UnsupportedFormatError(SyncBackError):
+    """Формат файла не поддерживается парсером (например, .doc)."""
 
 
-class ProjectAccessDeniedError(DomainError):
-    pass
+# ---------------------------------------------------------------------------
+# Document status transitions
+# ---------------------------------------------------------------------------
 
+class InvalidDocumentStatusError(SyncBackError):
+    """Операция недопустима для текущего статуса документа.
 
-class DocumentNotFoundError(DomainError):
-    pass
-
-
-class SourceNotFoundError(DomainError):
-    pass
-
-
-class SuggestionNotFoundError(DomainError):
-    pass
-
-
-class SuggestionAlreadyDecidedError(DomainError):
-    """ИСПРАВЛЕНО: новое исключение для защиты от гонки при двойном accept/reject одной
-    и той же правки — выбрасывается, когда атомарный UPDATE в SuggestionRepository не нашёл
-    строку в статусе PENDING (значит, её уже успел обработать другой запрос).
+    Сигнализирует роутеру вернуть HTTP 409 Conflict.
     """
 
 
-class UnsupportedFileFormatError(DomainError):
-    pass
+# ---------------------------------------------------------------------------
+# Analysis jobs
+# ---------------------------------------------------------------------------
+
+class AnalysisJobNotFoundError(SyncBackError):
+    """Задание анализа не найдено."""
 
 
-class FileTooLargeError(DomainError):
-    pass
+class AnalysisAlreadyRunningError(SyncBackError):
+    """Для документа уже выполняется анализ — нельзя запустить повторно.
+
+    Сигнализирует роутеру вернуть HTTP 409 Conflict.
+    """
 
 
-class AnalysisJobNotFoundError(DomainError):
-    pass
+class AnalysisJobNotCancellableError(SyncBackError):
+    """Задание анализа нельзя отменить (уже завершено или отменено).
+
+    Сигнализирует роутеру вернуть HTTP 422 Unprocessable Entity.
+    """
 
 
-class DocumentParseError(DomainError):
-    """Файл битый или не парсится — статус документа/job переводится в error с этим кодом."""
+# ---------------------------------------------------------------------------
+# Suggestions / Review
+# ---------------------------------------------------------------------------
+
+class SuggestionNotFoundError(SyncBackError):
+    """Правка не найдена или не принадлежит текущему документу."""
 
 
-class LLMTimeoutError(DomainError):
-    pass
+class SuggestionAlreadyDecidedError(SyncBackError):
+    """Правка уже была принята/отклонена другим запросом (race condition).
+
+    Сигнализирует роутеру вернуть HTTP 409 Conflict.
+    """
 
 
-class LLMInvalidResponseError(DomainError):
-    pass
+class ReviewNotCompleteError(SyncBackError):
+    """Review нельзя завершить: не все правки рассмотрены или экспорт не удался.
+
+    Сигнализирует роутеру вернуть HTTP 422 Unprocessable Entity.
+    """
 
 
-class AnalysisAlreadyRunningError(DomainError):
-    pass
+class ReviewVersionConflictError(SyncBackError):
+    """P0-2: review_version в БД изменилась пока клиент редактировал документ.
+
+    Сигнализирует роутеру вернуть HTTP 409 Conflict.
+    """
 
 
 class InvalidDocumentStatusError(DomainError):

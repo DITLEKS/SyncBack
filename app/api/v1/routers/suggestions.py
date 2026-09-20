@@ -25,6 +25,7 @@ from app.domain.exceptions import (
     InvalidDocumentStatusError,
     OptimisticLockError,
     ReviewNotCompleteError,
+    StaleReviewVersionError,
     SuggestionAlreadyDecidedError,
     SuggestionNotFoundError,
 )
@@ -251,6 +252,51 @@ async def finalize_review(
         document = await suggestion_service.finalize_review(project.id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return DocumentResponse.model_validate(document)
+
+
+# ---------------------------------------------------------------------------
+# P0-2: PUT /review — финализация с оптимистической блокировкой
+# ---------------------------------------------------------------------------
+
+@router.put("/review", response_model=DocumentResponse)
+async def put_review(
+    document_id: uuid.UUID,
+    project: Project = Depends(get_allowed_project),
+    suggestion_service: SuggestionService = Depends(get_suggestion_service),
+    if_match: str | None = Header(default=None, alias="If-Match"),
+) -> DocumentResponse:
+    """Финализировать review с оптимистической блокировкой.
+
+    Клиент обязан передать заголовок ``If-Match: <review_version>``.
+    Значение должно совпадать с текущим ``review_version`` документа.
+    При несовпадении → **412 Precondition Failed**.
+
+    Эндпоинт идемпотентен при повторном вызове с тем же версионным
+    значением (если документ уже в READY — возвращает 200 без ошибки).
+    """
+    if if_match is None:
+        raise HTTPException(
+            status_code=status.HTTP_428_PRECONDITION_REQUIRED,
+            detail="Заголовок If-Match обязателен для PUT /review",
+        )
+    try:
+        client_version = int(if_match.strip('"').strip())
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Заголовок If-Match должен содержать целочисленный review_version, получено: {if_match!r}",
+        )
+    try:
+        document = await suggestion_service.finalize_review_versioned(
+            project.id, document_id, client_version
+        )
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except StaleReviewVersionError as exc:
+        raise HTTPException(status_code=status.HTTP_412_PRECONDITION_FAILED, detail=str(exc)) from exc
     except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return DocumentResponse.model_validate(document)

@@ -2,12 +2,18 @@
 from fastapi import APIRouter, Depends
 
 from app.api.deps import get_current_user
+from app.api.schemas.system import CapabilitiesResponse
 from app.core.config import Settings, get_settings
 from app.core.dependencies import get_llm_client_instance
 from app.infrastructure.db.models.enums import DocumentFormat
 from app.infrastructure.db.models.user import User
 
 router = APIRouter(prefix="/system", tags=["system"])
+
+# Форматы, которые парсер принимает без ошибки
+_SUPPORTED_FORMATS = ["pdf", "docx", "txt", "md"]
+# Форматы, которые известны, но вернут 400 UnsupportedFormatError
+_UNSUPPORTED_FORMATS = ["doc"]
 
 
 @router.get("/llm-health")

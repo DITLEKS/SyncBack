@@ -20,6 +20,8 @@ from app.domain.exceptions import (
     InvalidDocumentStatusError,
     OptimisticLockError,
     ReviewNotCompleteError,
+    ReviewVersionConflictError,
+    StaleReviewVersionError,
     SuggestionAlreadyDecidedError,
     SuggestionNotFoundError,
 )
@@ -218,6 +220,63 @@ class SuggestionService:
             document=refreshed or document,
         )
 
+    # ------------------------------------------------------------------
+    # P0-2 (rev-4): apply_review — атомарное применение accepted/rejected
+    # ------------------------------------------------------------------
+
+    async def apply_review(
+        self,
+        project_id: uuid.UUID,
+        document_id: uuid.UUID,
+        accepted_ids: list[uuid.UUID],
+        rejected_ids: list[uuid.UUID],
+        current_review_version: int,
+    ) -> int:
+        """Атомарно применить списки принятых и отклонённых правок.
+
+        Алгоритм:
+        1. Загрузить документ и проверить review_version == current_review_version.
+           При несовпадении → ReviewVersionConflictError → роутер вернёт 409.
+        2. Применить bulk UPDATE для accepted_ids и rejected_ids.
+           Правки уже в ACCEPTED/REJECTED пропускаются атомарно (WHERE status = PENDING).
+        3. Инкрементировать review_version через finalize_and_bump_version или
+           отдельный update_review_version (только версия, без смены статуса).
+
+        Возвращает новую review_version.
+
+        Примечание: этот метод не требует, чтобы document.status == AWAITING_APPROVAL,
+        так как PUT /editor/review — «частичное» сохранение, а не финализация.
+        """
+        document = await self._get_document_or_raise(project_id, document_id)
+
+        if document.review_version != current_review_version:
+            raise ReviewVersionConflictError(
+                f"Конфликт версий review: ожидалась {current_review_version}, "
+                f"текущая версия {document.review_version}. "
+                "Обновите страницу и повторите попытку."
+            )
+
+        # Применяем bulk-обновления (WHERE status = PENDING — защита от гонки)
+        if accepted_ids:
+            # user_id не передаётся в apply_review; правки без автора — допустимо
+            # для bulk-операции из PUT /editor/review (нет явного user_id в теле).
+            # TODO: передавать user_id из depends когда будет auth на этом эндпоинте.
+            await self._suggestions.bulk_update_status(
+                accepted_ids, SuggestionStatus.ACCEPTED, uuid.UUID(int=0)
+            )
+        if rejected_ids:
+            await self._suggestions.bulk_update_status(
+                rejected_ids, SuggestionStatus.REJECTED, uuid.UUID(int=0)
+            )
+
+        # Инкрементируем review_version атомарно
+        updated_document = await self._documents.bump_review_version(document)
+        return updated_document.review_version
+
+    # ------------------------------------------------------------------
+    # Finalize
+    # ------------------------------------------------------------------
+
     async def finalize_review(
         self,
         project_id: uuid.UUID,
@@ -256,7 +315,6 @@ class SuggestionService:
                 raise ReviewNotCompleteError(
                     "Не удалось применить утверждённые правки к документу."
                 ) from err
-
         return await self._documents.update_status(document, DocumentStatus.READY)
 
     # ------------------------------------------------------------------
