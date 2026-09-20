@@ -26,6 +26,31 @@ class AnalysisJobService:
         self._jobs = analysis_job_repository
         self._documents = document_repository
 
+    # ------------------------------------------------------------------
+    # Idempotency helpers (P0-7)
+    # ------------------------------------------------------------------
+
+    async def find_job_by_idempotency_key(
+        self,
+        project_id: uuid.UUID,
+        document_id: uuid.UUID,
+        idempotency_key: str,
+    ) -> AnalysisJob | None:
+        """Найти существующий job по ключу идемпотентности.
+
+        Проверяет принадлежность документа проекту перед поиском.
+        Возвращает None, если документ не найден или job с таким ключом
+        не существует (роутер должен создать новый job в этом случае).
+        """
+        document = await self._documents.get_by_id(document_id)
+        if document is None or document.project_id != project_id:
+            return None
+        return await self._jobs.get_by_idempotency_key(document_id, idempotency_key)
+
+    # ------------------------------------------------------------------
+    # Core job lifecycle
+    # ------------------------------------------------------------------
+
     async def create_job(
         self,
         project_id: uuid.UUID,
