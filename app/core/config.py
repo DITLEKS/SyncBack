@@ -5,6 +5,7 @@
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -43,10 +44,22 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: Literal["json", "text"] = "json"
 
-    # CORS — список разрешённых origins через запятую.
+    # CORS — список разрешённых origins через запятую, или уже готовый список.
     # Для локальной разработки: http://localhost:3000,http://localhost:5173
     # Для prod задайте явный список без wildcard.
-    cors_origins: list[str] = ["http://localhost:3000", "http://localhost:5173"]
+    # Примеры .env:
+    #   CORS_ALLOWED_ORIGINS=*                                    (только для local)
+    #   CORS_ALLOWED_ORIGINS=http://localhost:5173                (один origin)
+    #   CORS_ALLOWED_ORIGINS=https://app.example.com,https://staging.example.com
+    cors_allowed_origins: list[str] = ["*"]
+
+    @field_validator("cors_allowed_origins", mode="before")
+    @classmethod
+    def _parse_cors_origins(cls, v: object) -> list[str]:
+        """Принимает строку (из .env) или уже готовый список."""
+        if isinstance(v, str):
+            return [origin.strip() for origin in v.split(",") if origin.strip()]
+        return v  # type: ignore[return-value]
 
     @property
     def max_upload_size_bytes(self) -> int:
