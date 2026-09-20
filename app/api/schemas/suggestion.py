@@ -8,6 +8,9 @@ class SuggestionResponse(BaseModel):
     id: uuid.UUID
     analysis_job_id: uuid.UUID
     section_ref: str
+    block_id: str | None = None
+    start_offset: int | None = None
+    end_offset: int | None = None
     change_type: str
     old_text: str | None
     new_text: str | None
@@ -23,3 +26,13 @@ class SuggestionResponse(BaseModel):
 
 class BulkAcceptResponse(BaseModel):
     accepted_count: int
+
+
+class ReviewFinalizeRequest(BaseModel):
+    review_version: int
+
+
+class ReviewFinalizeResponse(BaseModel):
+    document_id: uuid.UUID
+    review_version: int
+    status: str

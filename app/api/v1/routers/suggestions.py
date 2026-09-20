@@ -1,34 +1,27 @@
 """Просмотр и точечное подтверждение/отклонение правок, bulk-accept, finalize.
 
-ИСПРАВЛЕНО (rev-3):
-- Баг #1: accept/reject теперь вызывают публичные методы сервиса
-  accept_suggestion() / reject_suggestion() вместо несуществующего decide().
-- Баг #2: убрана _assert_document_awaiting_approval, которая обращалась к
-  приватному _documents репозиторию напрямую и делала лишний SELECT.
-  Проверка статуса AWAITING_APPROVAL выполняется внутри сервиса (через _decide)
-  и пробрасывается как InvalidDocumentStatusError → 409 Conflict.
-- Баг #3: убраны мёртвые импорты DocumentRepository / get_document_service,
-  оставшиеся от предыдущей версии. finalize_review корректно работает в
-  MVP-режиме (export_service=None → ленивый экспорт при /export).
+P0-2: добавлен PUT /review с If-Match + review_version.
 """
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 
 from app.api.deps import get_allowed_project, get_current_user
 from app.api.schemas.document import DocumentResponse
 from app.api.schemas.pagination import Page
-from app.api.schemas.suggestion import BulkAcceptResponse, SuggestionResponse
-from app.core.dependencies import get_audit_log_service, get_suggestion_service
+from app.api.schemas.suggestion import BulkAcceptResponse, ReviewFinalizeRequest, ReviewFinalizeResponse, SuggestionResponse
+from app.core.dependencies import get_audit_log_service, get_document_service, get_suggestion_service
 from app.domain.exceptions import (
     DocumentNotFoundError,
     InvalidDocumentStatusError,
     ReviewNotCompleteError,
+    ReviewVersionConflictError,
     SuggestionAlreadyDecidedError,
     SuggestionNotFoundError,
 )
 from app.domain.services.audit_log_service import AuditLogService
+from app.domain.services.document_service import DocumentService
 from app.domain.services.suggestion_service import SuggestionService
 from app.infrastructure.db.models.enums import AuditAction
 from app.infrastructure.db.models.project import Project
@@ -88,10 +81,6 @@ async def accept_suggestion(
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
     audit_log_service: AuditLogService = Depends(get_audit_log_service),
 ) -> SuggestionResponse:
-    """Принять правку (переход документа в READY не выполняется здесь — только через /finalize).
-
-    Статус AWAITING_APPROVAL проверяется внутри сервиса; при нарушении → 409 Conflict.
-    """
     try:
         suggestion = await suggestion_service.accept_suggestion(
             project.id, document_id, suggestion_id, current_user.id
@@ -115,10 +104,6 @@ async def reject_suggestion(
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
     audit_log_service: AuditLogService = Depends(get_audit_log_service),
 ) -> SuggestionResponse:
-    """Отклонить правку.
-
-    Статус AWAITING_APPROVAL проверяется внутри сервиса; при нарушении → 409 Conflict.
-    """
     try:
         suggestion = await suggestion_service.reject_suggestion(
             project.id, document_id, suggestion_id, current_user.id
@@ -158,14 +143,6 @@ async def finalize_review(
     project: Project = Depends(get_allowed_project),
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
 ) -> DocumentResponse:
-    """Перевести документ в READY (переход №8 статусной модели).
-
-    Условие: статус AWAITING_APPROVAL и ни одной правки в PENDING.
-    Если все правки отклонены — документ всё равно переходит в READY.
-
-    MVP: export_service не передаётся → ленивый экспорт при вызове /export.
-    При необходимости строгой материализации — передать export_service явно.
-    """
     try:
         document = await suggestion_service.finalize_review(project.id, document_id)
     except DocumentNotFoundError as exc:
@@ -173,3 +150,34 @@ async def finalize_review(
     except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return DocumentResponse.model_validate(document)
+
+
+@router.put("/review", response_model=ReviewFinalizeResponse)
+async def put_review(
+    document_id: uuid.UUID,
+    payload: ReviewFinalizeRequest,
+    if_match: str | None = Header(default=None, alias="If-Match"),
+    project: Project = Depends(get_allowed_project),
+    document_service: DocumentService = Depends(get_document_service),
+    suggestion_service: SuggestionService = Depends(get_suggestion_service),
+) -> ReviewFinalizeResponse:
+    try:
+        document = await document_service.get_document(project.id, document_id)
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    expected = str(document.review_version)
+    if if_match is None or if_match.strip('"') != expected or payload.review_version != document.review_version:
+        raise HTTPException(status_code=status.HTTP_412_PRECONDITION_FAILED, detail="review_version conflict")
+
+    try:
+        document = await suggestion_service.finalize_review(project.id, document_id)
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ReviewVersionConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_412_PRECONDITION_FAILED, detail=str(exc)) from exc
+    except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    document.review_version = (document.review_version or 1) + 1
+    return ReviewFinalizeResponse(document_id=document.id, review_version=document.review_version, status=str(document.status))

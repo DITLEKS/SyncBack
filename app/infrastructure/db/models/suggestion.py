@@ -2,6 +2,7 @@
 Путь в репозитории: app/infrastructure/db/models/suggestion.py
 
 Фикс: values_callable у ChangeType и SuggestionStatus.
+P0-3: добавлены block_id / start_offset / end_offset.
 """
 
 import uuid
@@ -9,7 +10,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
-from sqlalchemy import DateTime, Float, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -17,7 +18,6 @@ from app.infrastructure.db.base import Base
 from app.infrastructure.db.models.enums import ChangeType, SuggestionStatus
 
 if TYPE_CHECKING:
-    # ИСПРАВЛЕНО (F821): импорт только для статического анализа типов.
     from app.infrastructure.db.models.analysis_job import AnalysisJob
 
 _values = lambda enum_cls: [member.value for member in enum_cls]  # noqa: E731
@@ -29,6 +29,9 @@ class Suggestion(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     analysis_job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("analysis_jobs.id", ondelete="CASCADE"), nullable=False, index=True)
     section_ref: Mapped[str] = mapped_column(String(500), nullable=False)
+    block_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    start_offset: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    end_offset: Mapped[int | None] = mapped_column(Integer, nullable=True)
     change_type: Mapped[ChangeType] = mapped_column(sa.Enum(ChangeType, name="change_type", values_callable=_values), nullable=False)
     old_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     new_text: Mapped[str | None] = mapped_column(Text, nullable=True)

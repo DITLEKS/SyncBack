@@ -89,3 +89,7 @@ class AnalysisJobNotCancellableError(DomainError):
 
 class ReviewNotCompleteError(DomainError):
     pass
+
+
+class ReviewVersionConflictError(DomainError):
+    pass
