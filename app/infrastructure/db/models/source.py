@@ -1,42 +1,31 @@
-"""
-Путь в репозитории: app/infrastructure/db/models/source.py
+"""Расширение модели Source для разделения базовых и специфичных источников.
 
-Фикс: values_callable у SourceType.
+SourceScope.PROJECT  — базовые источники проекта, применяются ко всем документам.
+SourceScope.DOCUMENT — специфичные источники, применяются только к одному документу.
 """
-
 import uuid
-from datetime import datetime
-from typing import TYPE_CHECKING
 
-import sqlalchemy as sa
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Column, Enum, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import relationship
 
 from app.infrastructure.db.base import Base
-from app.infrastructure.db.models.document_source import document_sources
 from app.infrastructure.db.models.enums import SourceType
-
-if TYPE_CHECKING:
-    # ИСПРАВЛЕНО (F821): импорт только для статического анализа типов.
-    from app.infrastructure.db.models.document import Document
-    from app.infrastructure.db.models.project import Project
+from app.infrastructure.db.models.source_scope import SourceScope
 
 
 class Source(Base):
     __tablename__ = "sources"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    type: Mapped[SourceType] = mapped_column(
-        sa.Enum(SourceType, name="source_type", values_callable=lambda enum_cls: [member.value for member in enum_cls]),
-        nullable=False,
-    )
-    storage_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
-    text_content: Mapped[str | None] = mapped_column(Text, nullable=True)
-    url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
-    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
+    name = Column("name", nullable=False)
+    type = Column(Enum(SourceType, name="source_type"), nullable=False)
+    storage_key = Column("storage_key")
+    text_content = Column("text_content")
+    url = Column("url")
+    uploaded_at = Column("uploaded_at")
+    scope = Column(Enum(SourceScope, name="source_scope"), nullable=False, default=SourceScope.PROJECT)
 
-    project: Mapped["Project"] = relationship(back_populates="sources")
-    documents: Mapped[list["Document"]] = relationship(secondary=document_sources, back_populates="sources")
+    project = relationship("Project", back_populates="sources")
+    documents = relationship("Document", secondary="document_sources", back_populates="sources")

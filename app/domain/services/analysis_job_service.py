@@ -117,3 +117,21 @@ class AnalysisJobService:
         if document is None or document.project_id != project_id:
             raise DocumentNotFoundError(f"Документ {document_id} не найден в проекте {project_id}")
         return job
+
+    async def bulk_create_jobs_for_project(
+        self, project_id: uuid.UUID
+    ) -> list[tuple[uuid.UUID, AnalysisJob | None, str | None]]:
+        """Запустить анализ для всех документов проекта в статусах draft/awaiting_approval.
+
+        Возвращает список кортежей (document_id, job, error_code), где job=None при ошибке.
+        Ошибка создания задачи для одного документа не блокирует остальные.
+        """
+        analyzable_documents = await self._documents.list_analyzable_for_project(project_id)
+        results: list[tuple[uuid.UUID, AnalysisJob | None, str | None]] = []
+        for document in analyzable_documents:
+            try:
+                job = await self.create_job(project_id, document.id)
+                results.append((document.id, job, None))
+            except (DocumentNotFoundError, InvalidDocumentStatusError, AnalysisAlreadyRunningError) as exc:
+                results.append((document.id, None, exc.__class__.__name__))
+        return results
