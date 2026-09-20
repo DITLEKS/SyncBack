@@ -250,7 +250,7 @@ class SuggestionService:
         if export_service is not None:
             try:
                 await export_service.export_and_save(document)
-            except Exception:
+            except Exception as err:
                 logger.exception(
                     "Не удалось материализовать финальный файл при finalize_review",
                     extra={"document_id": str(document_id)},
@@ -258,6 +258,6 @@ class SuggestionService:
                 raise ReviewNotCompleteError(
                     "Не удалось применить утверждённые правки к документу. "
                     "Повторите попытку или обратитесь к администратору."
-                )
+                ) from err
 
         return await self._documents.update_status(document, DocumentStatus.READY)
