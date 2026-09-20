@@ -3,11 +3,13 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.v1.routers.analysis_jobs import router as analysis_jobs_router
 from app.api.v1.routers.auth import router as auth_router
 from app.api.v1.routers.documents import router as documents_router
+from app.api.v1.routers.my_documents import router as my_documents_router
 from app.api.v1.routers.projects import router as projects_router
 from app.api.v1.routers.sources import router as sources_router
 from app.api.v1.routers.suggestions import router as suggestions_router
@@ -24,7 +26,10 @@ logger = logging.getLogger("syncscribe.main")
 async def lifespan(app: FastAPI):
     configure_logging()
     settings = get_settings()
-    logger.info("Запуск SyncScribe backend", extra={"env": settings.env, "llm_provider": settings.llm_provider})
+    logger.info(
+        "Запуск SyncScribe backend",
+        extra={"env": settings.env, "llm_provider": settings.llm_provider},
+    )
     yield
     logger.info("Остановка SyncScribe backend")
 
@@ -32,7 +37,30 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
 
-    app = FastAPI(title="SyncScribe API", version="0.1.0", debug=settings.debug, lifespan=lifespan)
+    app = FastAPI(
+        title="SyncScribe API",
+        version="0.1.0",
+        debug=settings.debug,
+        lifespan=lifespan,
+    )
+
+    # CORS должен быть первым middleware — до любых других,
+    # чтобы preflight OPTIONS-запросы обрабатывались корректно.
+    #
+    # allow_credentials=True несовместимо с allow_origins=["*"] в браузерах
+    # (браузер блокирует credentials при wildcard-origin — это стандарт CORS).
+    # В local-окружении это не мешает: токены отправляются явно через
+    # Authorization-header, а не через cookies.
+    # В staging/production задайте CORS_ALLOWED_ORIGINS=https://yourapp.com
+    # — тогда credentials работают штатно.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["X-Request-ID"],
+    )
 
     app.add_middleware(CorrelationIdMiddleware)
 
@@ -47,6 +75,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(projects_router, prefix="/api/v1")
+    app.include_router(my_documents_router, prefix="/api/v1")  # P0-4: GET /api/v1/documents
     app.include_router(documents_router, prefix="/api/v1")
     app.include_router(sources_router, prefix="/api/v1")
     app.include_router(analysis_jobs_router, prefix="/api/v1")
