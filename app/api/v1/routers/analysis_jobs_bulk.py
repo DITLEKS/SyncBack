@@ -3,26 +3,20 @@
 
 POST /projects/{project_id}/documents/analysis-jobs/bulk
 
-Переписан с нуля — старый файл использовал несуществующие символы
-(AnalysisJobRead, BulkAnalysisJobsResponse, AnalysisJobRepository,
-DocumentRepository импортировались из несуществующих мест).
+#10: файл переписан с нуля. Старые несуществующие символы:
+  AnalysisJobRead, BulkAnalysisJobsResponse, AnalysisJobRepository, DocumentRepository
+— удалены. Файл компилируется и запускается без ImportError.
 """
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel
 
 from app.api.deps import get_allowed_project
 from app.api.schemas.analysis_job import AnalysisJobResponse
 from app.core.dependencies import get_analysis_job_service
-from app.domain.exceptions import (
-    AnalysisAlreadyRunningError,
-    DocumentNotFoundError,
-    InvalidDocumentStatusError,
-)
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.infrastructure.db.models.project import Project
-from app.workers.celery_app import celery_app
 from app.workers.tasks.analysis_tasks import run_analysis_job
 
 router = APIRouter(
@@ -52,13 +46,8 @@ async def bulk_start_analysis_jobs(
     project: Project = Depends(get_allowed_project),
     service: AnalysisJobService = Depends(get_analysis_job_service),
 ) -> BulkAnalysisJobsResponse:
-    """Запускает analysis_job для каждого документа проекта со статусом draft.
+    """Запускает analysis_job для каждого документа проекта в статусе draft.
     Документы в in_progress / awaiting_approval / ready пропускаются без ошибки.
-
-    Ответ содержит:
-    - started  — кол-во новых jobs
-    - skipped  — кол-во пропущенных документов
-    - results  — детали по каждому документу
     """
     raw_results = await service.bulk_create_jobs_for_project(project.id)
 
@@ -72,19 +61,22 @@ async def bulk_start_analysis_jobs(
         err: str | None = item.get("error")
 
         if err is not None:
-            # Пропущен из-за статуса или уже запущен
             results.append(BulkJobResult(document_id=doc_id, error=err))
             skipped += 1
             continue
 
-        # Диспатч в Celery
         try:
             task = run_analysis_job.delay(str(job.id))
             job = await service.mark_dispatched(job, task.id)
         except Exception as exc:  # noqa: BLE001
             job = await service.mark_job_queue_unavailable(job, str(exc))
 
-        results.append(BulkJobResult(document_id=doc_id, job=AnalysisJobResponse.model_validate(job)))
+        results.append(
+            BulkJobResult(
+                document_id=doc_id,
+                job=AnalysisJobResponse.model_validate(job),
+            )
+        )
         started += 1
 
     return BulkAnalysisJobsResponse(started=started, skipped=skipped, results=results)

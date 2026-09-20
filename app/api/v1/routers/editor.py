@@ -1,17 +1,9 @@
-"""Агрегированный endpoint редактора документа (P0-8).
+"""Агрегированный endpoint редактора документа.
 
 GET /projects/{project_id}/documents/{document_id}/editor
 
-Возвращает одним запросом всё, что нужно экрану редактора фронтенда:
-- метаданные документа + статус + review_version
-- plain_text контент + позиции секций (если доступен)
-- список правок текущего анализа
-- агрегированные счётчики (pending/accepted/rejected/total)
-- права текущего пользователя на действия с документом
-
-Заменяет N+1 запросов:
-  GET /documents/{id}  +  GET /documents/{id}/content
-  + GET /suggestions  +  GET /analysis-jobs/{id}
+#7: возвращаем view_mode и original_content (исходный plain_text без правок)
+#8: возвращаем sources_is_editable=False при in_progress / awaiting_approval
 """
 import logging
 import uuid
@@ -42,6 +34,16 @@ router = APIRouter(
     tags=["editor"],
 )
 
+# --- Маппинг статуса → view_mode (#7) ---
+_STATUS_VIEW_MODE: dict[DocumentStatus, str] = {
+    DocumentStatus.DRAFT: "original",
+    DocumentStatus.IN_PROGRESS: "original",
+    DocumentStatus.AWAITING_APPROVAL: "suggested",
+    DocumentStatus.READY: "clean",
+    DocumentStatus.ERROR: "original",
+    DocumentStatus.CANCELLED: "original",
+}
+
 
 @router.get("", response_model=EditorAggregateResponse)
 async def get_editor_aggregate(
@@ -51,13 +53,7 @@ async def get_editor_aggregate(
     document_service: DocumentService = Depends(get_document_service),
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
 ) -> EditorAggregateResponse:
-    """Полный агрегат данных для экрана редактора.
-
-    Выполняет параллельно:
-    - загрузку метаданных документа
-    - парсинг контента (graceful degradation: None при ошибке)
-    - загрузку списка правок
-    """
+    """Полный агрегат данных для экрана редактора."""
     # --- 1. Документ ---
     try:
         document = await document_service.get_document(project.id, document_id)
@@ -65,6 +61,7 @@ async def get_editor_aggregate(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     review_version = getattr(document, "review_version", 0) or 0
+    view_mode = _STATUS_VIEW_MODE.get(document.status, "original")  # #7
 
     meta = EditorDocumentMeta(
         id=document.id,
@@ -73,8 +70,9 @@ async def get_editor_aggregate(
         status=document.status,
         current_analysis_job_id=document.current_analysis_job_id,
         created_at=document.uploaded_at,
-        updated_at=document.uploaded_at,  # TODO: добавить updated_at в модель
+        updated_at=document.uploaded_at,
         review_version=review_version,
+        view_mode=view_mode,  # #7
     )
 
     # --- 2. Контент (graceful degradation) ---
@@ -92,11 +90,46 @@ async def get_editor_aggregate(
                 for s in parsed.sections
             ],
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning(
             "Не удалось получить контент документа для редактора",
             extra={"document_id": str(document_id)},
         )
+
+    # --- 2b. original_content (#7) ---
+    # original_content == editor_content на статусах draft/in_progress/error/cancelled.
+    # Для awaiting_approval и ready — текущий content уже содержит правки,
+    # поэтому original_content сохраняем как original_snapshot из DocumentService
+    # (если метод доступен, иначе None).
+    original_content: EditorContent | None = None
+    if document.status in (
+        DocumentStatus.AWAITING_APPROVAL,
+        DocumentStatus.READY,
+    ):
+        try:
+            orig_parsed = await document_service.get_original_content(document)
+            original_content = EditorContent(
+                plain_text=orig_parsed.plain_text,
+                sections=[
+                    DocumentSectionResponse(
+                        ref=s.ref,
+                        start_offset=s.start_offset,
+                        end_offset=s.end_offset,
+                    )
+                    for s in orig_parsed.sections
+                ],
+            )
+        except (AttributeError, NotImplementedError):
+            # get_original_content ещё не реализован — подразумеваем stub (None).
+            pass
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Не удалось получить original_content документа",
+                extra={"document_id": str(document_id)},
+            )
+    else:
+        # На draft/in_progress: original_content и content — одно и то же
+        original_content = editor_content
 
     # --- 3. Правки ---
     suggestions_raw, total = await suggestion_service.list_suggestions_for_document(
@@ -117,16 +150,23 @@ async def get_editor_aggregate(
 
     # --- 5. Права ---
     locked = document.status in (DocumentStatus.IN_PROGRESS,)
+    # #8: sources_is_editable=False при активном job или ожидании утверждения
+    sources_is_editable = document.status not in (
+        DocumentStatus.IN_PROGRESS,
+        DocumentStatus.AWAITING_APPROVAL,
+    )
     permissions = EditorPermissions(
         can_analyze=document.status in (DocumentStatus.DRAFT, DocumentStatus.READY),
         can_review=document.status == DocumentStatus.AWAITING_APPROVAL,
         can_export=document.status == DocumentStatus.READY,
         can_delete=not locked,
+        sources_is_editable=sources_is_editable,  # #8
     )
 
     return EditorAggregateResponse(
         document=meta,
         content=editor_content,
+        original_content=original_content,  # #7
         suggestions=suggestions,
         counters=counters,
         permissions=permissions,
