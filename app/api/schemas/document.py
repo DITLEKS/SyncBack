@@ -2,6 +2,8 @@
 P0-2: добавлен review_version в DocumentResponse для оптимистической блокировки.
 P0-6: добавлен UploadDocumentRequest — загрузка документа с явным project_id
       (нужно для маршрута «Мои документы» → кнопка «Загрузить документ»).
+P0-#12: поле переименовано title→name в DocumentListItem, чтобы совпадало
+        с DocumentResponse.name и ORM-атрибутом Document.name.
 """
 import uuid
 from datetime import datetime
@@ -60,7 +62,9 @@ class SuggestionCounters(BaseModel):
 
 class DocumentListItem(BaseModel):
     id: uuid.UUID
-    title: str
+    # P0-#12: было title — переименовано в name для единообразия с
+    # DocumentResponse.name и ORM-полем Document.name.
+    name: str
     format: str
     status: str
     current_analysis_job_id: uuid.UUID | None = None
