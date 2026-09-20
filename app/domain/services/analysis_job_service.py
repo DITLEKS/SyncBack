@@ -33,10 +33,15 @@ class AnalysisJobService:
           • DRAFT             → переход №2 (первичный/ручной запуск)
           • AWAITING_APPROVAL → переход №9 (повторный запуск)
 
-        Перед созданием job документ переводится в DRAFT, чтобы пайплайн всегда
-        следовал маршруту DRAFT → IN_PROGRESS, а не AWAITING_APPROVAL → IN_PROGRESS.
-        Это упрощает логику _start_job и исключает попадание в неконсистентный статус
-        при ошибке постановки задачи в очередь (переход №3 — остаться/вернуться в DRAFT).
+        При повторном запуске из AWAITING_APPROVAL документ сначала сбрасывается
+        в DRAFT (пайплайн всегда стартует из DRAFT → IN_PROGRESS). Если после
+        сброса создание job упало до коммита — документ откатывается обратно в
+        AWAITING_APPROVAL, чтобы пользователь не потерял правки предыдущего раунда
+        и мог либо завершить review, либо повторить запуск позже.
+
+        Если сброс и создание job прошли успешно, но Celery-очередь недоступна —
+        вызывающий код вызывает mark_job_queue_unavailable; документ остаётся в
+        DRAFT (переход №3), что корректно.
         """
         document = await self._documents.get_by_id(document_id)
         if document is None or document.project_id != project_id:
@@ -49,16 +54,31 @@ class AnalysisJobService:
             )
         if await self._jobs.get_active_by_document_id(document.id) is not None:
             raise AnalysisAlreadyRunningError("Для документа уже выполняется анализ")
+
+        # Запоминаем предыдущий статус для отката при повторном запуске из
+        # AWAITING_APPROVAL. При запуске из DRAFT откат не нужен — previous_status
+        # совпадает с целевым DRAFT.
+        previous_status = document.status
+
         # Приводим документ к DRAFT — пайплайн всегда стартует из этого статуса.
-        # При повторном запуске из AWAITING_APPROVAL это сбрасывает предыдущий статус
-        # ожидания до того, как новый job будет поставлен в очередь.
         if document.status != DocumentStatus.DRAFT:
             document = await self._documents.update_status(document, DocumentStatus.DRAFT)
+
         job = AnalysisJob(id=uuid.uuid4(), document_id=document.id, status=AnalysisJobStatus.PENDING)
         try:
             return await self._jobs.create_for_document(job, document)
         except IntegrityError as exc:
+            # Параллельный запрос успел создать active job — откатываем статус
+            # документа обратно в предыдущий, чтобы не потерять правки.
+            if previous_status != DocumentStatus.DRAFT:
+                await self._documents.update_status(document, previous_status)
             raise AnalysisAlreadyRunningError("Для документа уже выполняется анализ") from exc
+        except Exception:
+            # Неожиданная ошибка при создании job — откатываем статус, чтобы
+            # документ не завис в DRAFT без активной задачи.
+            if previous_status != DocumentStatus.DRAFT:
+                await self._documents.update_status(document, previous_status)
+            raise
 
     async def mark_dispatched(self, job: AnalysisJob, task_id: str) -> AnalysisJob:
         document = await self._documents.get_by_id(job.document_id)
