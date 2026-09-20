@@ -89,3 +89,16 @@ class AnalysisJobNotCancellableError(DomainError):
 
 class ReviewNotCompleteError(DomainError):
     pass
+
+
+class OptimisticLockError(DomainError):
+    """P0-2: версия ревью на клиенте устарела — документ был изменён параллельным запросом.
+
+    Клиент должен перезагрузить состояние (GET /editor) и повторить сохранение.
+    """
+
+
+class SourceLockError(DomainError):
+    """P0-6: изменение источников запрещено, пока документ находится
+    в статусе IN_PROGRESS или AWAITING_APPROVAL.
+    """

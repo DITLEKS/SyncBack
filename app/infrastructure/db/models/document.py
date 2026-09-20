@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Column, Enum, ForeignKey, Table
+from sqlalchemy import Column, Enum, ForeignKey, Integer, Table
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -21,6 +21,11 @@ class Document(Base):
     uploaded_at = Column("uploaded_at", nullable=False)
     status = Column(Enum(DocumentStatus, name="document_status"), nullable=False, default=DocumentStatus.DRAFT)
     current_analysis_job_id = Column(UUID(as_uuid=True), ForeignKey("analysis_jobs.id"))
+
+    # P0-2: версия ревью для оптимистической блокировки.
+    # Инкрементируется при каждом атомарном PUT /review.
+    # Клиент обязан передать текущее значение; при расхождении — 409.
+    review_version = Column(Integer, nullable=False, default=0, server_default="0")
 
     project = relationship("Project", back_populates="documents")
     sources = relationship("Source", secondary="document_sources", back_populates="documents")
