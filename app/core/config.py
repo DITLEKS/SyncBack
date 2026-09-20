@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: Literal["json", "text"] = "json"
 
+    # CORS — список разрешённых origins через запятую.
+    # Для локальной разработки: http://localhost:3000,http://localhost:5173
+    # Для prod задайте явный список без wildcard.
+    cors_origins: list[str] = ["http://localhost:3000", "http://localhost:5173"]
+
     @property
     def max_upload_size_bytes(self) -> int:
         return self.max_upload_size_mb * 1024 * 1024

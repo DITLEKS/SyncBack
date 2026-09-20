@@ -3,6 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.v1.routers.analysis_jobs import router as analysis_jobs_router
@@ -34,6 +35,18 @@ def create_app() -> FastAPI:
     settings = get_settings()
 
     app = FastAPI(title="SyncScribe API", version="0.1.0", debug=settings.debug, lifespan=lifespan)
+
+    # CORS — должен быть первым middleware, чтобы preflight OPTIONS
+    # обрабатывался до любых других проверок (авторизация, correlation id).
+    # origins берутся из CORS_ORIGINS в .env; для локальной разработки
+    # по умолчанию разрешены localhost:3000 и localhost:5173 (Vite/CRA).
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     app.add_middleware(CorrelationIdMiddleware)
 
