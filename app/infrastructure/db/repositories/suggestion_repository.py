@@ -48,6 +48,16 @@ class SuggestionRepository:
         )
         return result.scalar_one()
 
+    async def count_by_analysis_job_and_status(
+        self, analysis_job_id: uuid.UUID, status: SuggestionStatus
+    ) -> int:
+        result = await self._session.execute(
+            select(func.count()).select_from(Suggestion).where(
+                Suggestion.analysis_job_id == analysis_job_id, Suggestion.status == status
+            )
+        )
+        return result.scalar_one()
+
     async def list_by_analysis_job_and_status(
         self, analysis_job_id: uuid.UUID, status: SuggestionStatus
     ) -> list[Suggestion]:

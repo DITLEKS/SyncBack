@@ -9,7 +9,14 @@ from sqlalchemy.exc import IntegrityError
 
 from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.models.audit_log import AuditLog
-from app.infrastructure.db.models.enums import AnalysisJobStatus, AuditAction, ChangeType, SuggestionStatus
+from app.infrastructure.db.models.document import Document
+from app.infrastructure.db.models.enums import (
+    AnalysisJobStatus,
+    AuditAction,
+    ChangeType,
+    DocumentStatus,
+    SuggestionStatus,
+)
 from app.infrastructure.db.models.suggestion import Suggestion
 from app.main import app
 
@@ -71,6 +78,8 @@ async def test_analysis_job_queue_failure_updates_job_status(db_session):
         assert job.status == AnalysisJobStatus.FAILED
         assert job.error_code == "QUEUE_UNAVAILABLE"
         assert job.error_message is not None
+        document = await db_session.get(Document, uuid.UUID(document_id))
+        assert document.status == DocumentStatus.DRAFT
 
 
 @pytest.mark.asyncio
@@ -122,6 +131,24 @@ async def test_analysis_job_persists_celery_task_id(db_session):
         )
         job = result.scalars().one()
         assert job.celery_task_id == "fake-celery-id"
+        document = await db_session.get(Document, uuid.UUID(document_id))
+        assert document.status == DocumentStatus.IN_PROGRESS
+
+        duplicate_response = await client.post(
+            f"/api/v1/projects/{project_id}/documents/{document_id}/analysis-jobs",
+            headers=headers,
+        )
+        assert duplicate_response.status_code == 409
+
+        with patch("app.api.v1.routers.analysis_jobs.celery_app.control.revoke"):
+            cancel_response = await client.post(
+                f"/api/v1/projects/{project_id}/documents/{document_id}/analysis-jobs/{job.id}/cancel",
+                headers=headers,
+            )
+        assert cancel_response.status_code == 200
+        assert cancel_response.json()["status"] == "cancelled"
+        await db_session.refresh(document)
+        assert document.status == DocumentStatus.DRAFT
 
 
 @pytest.mark.asyncio

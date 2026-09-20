@@ -64,7 +64,11 @@ async def _start_job(job_id: str) -> list[str]:
         if job is None:
             logger.error("run_analysis_job вызван для несуществующего job_id", extra={"job_id": job_id})
             return []
-        await job_repo.update_status(job, AnalysisJobStatus.PROCESSING)
+        if job.status not in (AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING):
+            return []
+        if not await job_repo.mark_processing_if_active(job.id):
+            return []
+        await session.refresh(job)
 
         document = await document_repo.get_by_id(job.document_id)
         if document is None:
@@ -76,8 +80,9 @@ async def _start_job(job_id: str) -> list[str]:
                 job, AnalysisJobStatus.FAILED, error_code="DOCUMENT_NOT_FOUND", error_message="Документ не найден"
             )
             return []
-        document.status = DocumentStatus.ANALYZING
-        await session.commit()
+        if document.current_analysis_job_id == job.id:
+            document.status = DocumentStatus.IN_PROGRESS
+            await session.commit()
 
         await session.refresh(document, ["sources"])
         return [str(source.id) for source in document.sources]
@@ -102,6 +107,9 @@ async def _process_source(job_id: str, source_id: str) -> dict:
                 extra={"job_id": job_id, "source_id": source_id},
             )
             return {"source_id": source_id, "status": "failed", "error_code": "JOB_NOT_FOUND", "error_message": "Задача анализа не найдена"}
+
+        if getattr(job, "status", None) == AnalysisJobStatus.CANCELLED:
+            return {"source_id": source_id, "status": "cancelled"}
 
         document = await document_repo.get_by_id(job.document_id)
         if document is None:
@@ -134,6 +142,9 @@ async def _process_source(job_id: str, source_id: str) -> dict:
         batch = await llm_client.generate_suggestions(parsed_document.plain_text, source_text, document.format.value)
 
         suggestions = map_to_suggestions(batch, job.id, source_reference=source.name)
+        await session.refresh(job)
+        if getattr(job, "status", None) == AnalysisJobStatus.CANCELLED:
+            return {"source_id": source_id, "status": "cancelled"}
         await suggestion_repo.bulk_create(suggestions)
 
     return {"source_id": source_id, "status": "success", "suggestions_count": len(suggestions)}
@@ -161,47 +172,45 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
     async with isolated_db_session() as session:
         job_repo = AnalysisJobRepository(session)
         document_repo = DocumentRepository(session)
-
         job = await job_repo.get_by_id(uuid.UUID(job_id))
         if job is None:
             logger.error("finalize_analysis_job вызван для несуществующего job_id", extra={"job_id": job_id})
             return
+        if getattr(job, "status", None) == AnalysisJobStatus.CANCELLED:
+            return
         document = await document_repo.get_by_id(job.document_id)
         if document is None:
-            logger.error(
-                "AnalysisJob ссылается на несуществующий документ при финализации",
-                extra={"job_id": job_id, "document_id": str(job.document_id)},
-            )
-            await job_repo.update_status(
-                job, AnalysisJobStatus.FAILED, error_code="DOCUMENT_NOT_FOUND", error_message="Документ не найден"
-            )
+            await job_repo.update_status(job, AnalysisJobStatus.FAILED, "DOCUMENT_NOT_FOUND", "Документ не найден")
             return
-
         succeeded = [r for r in source_results if r.get("status") == "success"]
         failed = [r for r in source_results if r.get("status") == "failed"]
-
+        suggestions_count = sum(int(r.get("suggestions_count", 0)) for r in succeeded)
+        is_current = document.current_analysis_job_id == job.id
         if succeeded:
-            error_message = None
+            message = None
             if failed:
-                error_message = "Не обработаны источники: " + ", ".join(f"{r['source_id']} ({r.get('error_code')})" for r in failed)
-            await job_repo.update_status(job, AnalysisJobStatus.SUCCESS, error_message=error_message)
-            document.status = DocumentStatus.ANALYZED
+                message = "Не обработаны источники: " + ", ".join(
+                    f"{r['source_id']} ({r.get('error_code')})" for r in failed
+                )
+            await job_repo.update_status(job, AnalysisJobStatus.SUCCESS, error_message=message)
+            if is_current:
+                document.status = (
+                    DocumentStatus.AWAITING_APPROVAL if suggestions_count else DocumentStatus.READY
+                )
         elif failed:
-            error_message = "; ".join(f"{r['source_id']}: {r.get('error_message')}" for r in failed)
-            await job_repo.update_status(job, AnalysisJobStatus.FAILED, error_code="ALL_SOURCES_FAILED", error_message=error_message)
-            document.status = DocumentStatus.ERROR
+            message = "; ".join(f"{r['source_id']}: {r.get('error_message')}" for r in failed)
+            await job_repo.update_status(job, AnalysisJobStatus.FAILED, "ALL_SOURCES_FAILED", message)
+            if is_current:
+                document.status = DocumentStatus.DRAFT
         else:
-            await job_repo.update_status(job, AnalysisJobStatus.FAILED, error_code="NO_SOURCES_ATTACHED", error_message="К документу не привязано ни одного источника")
-            document.status = DocumentStatus.ERROR
-
-        current_job_id = document.current_analysis_job_id
-        should_update_current = current_job_id is None or current_job_id == job.id
-        if not should_update_current:
-            current_job = await job_repo.get_by_id(current_job_id)
-            should_update_current = current_job is None or job.created_at >= current_job.created_at
-        if should_update_current:
-            document.current_analysis_job_id = job.id
-
+            await job_repo.update_status(
+                job,
+                AnalysisJobStatus.FAILED,
+                "NO_SOURCES_ATTACHED",
+                "К документу не привязано ни одного источника",
+            )
+            if is_current:
+                document.status = DocumentStatus.DRAFT
         await session.commit()
 
 

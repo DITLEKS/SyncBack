@@ -73,3 +73,19 @@ class LLMTimeoutError(DomainError):
 
 class LLMInvalidResponseError(DomainError):
     pass
+
+
+class AnalysisAlreadyRunningError(DomainError):
+    pass
+
+
+class InvalidDocumentStatusError(DomainError):
+    pass
+
+
+class AnalysisJobNotCancellableError(DomainError):
+    pass
+
+
+class ReviewNotCompleteError(DomainError):
+    pass

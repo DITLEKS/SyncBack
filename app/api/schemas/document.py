@@ -11,13 +11,16 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from app.infrastructure.db.models.enums import DocumentStatus
+
 
 class DocumentResponse(BaseModel):
     id: uuid.UUID
     project_id: uuid.UUID
     title: str
     format: str
-    status: str
+    status: DocumentStatus
+    current_analysis_job_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
 

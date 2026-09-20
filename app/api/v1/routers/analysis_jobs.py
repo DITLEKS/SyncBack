@@ -1,39 +1,47 @@
-"""Запуск и просмотр задач анализа документа."""
+"""Запуск, просмотр и отмена задач анализа документа."""
+
 import uuid
+from contextlib import suppress
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.deps import get_allowed_project
 from app.api.schemas.analysis_job import AnalysisJobResponse
 from app.core.dependencies import get_analysis_job_service
-from app.domain.exceptions import DocumentNotFoundError
+from app.domain.exceptions import (
+    AnalysisAlreadyRunningError,
+    AnalysisJobNotCancellableError,
+    DocumentNotFoundError,
+    InvalidDocumentStatusError,
+)
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.infrastructure.db.models.project import Project
+from app.workers.celery_app import celery_app
 from app.workers.tasks.analysis_tasks import run_analysis_job
 
-router = APIRouter(prefix="/projects/{project_id}/documents/{document_id}/analysis-jobs", tags=["analysis-jobs"])
+router = APIRouter(
+    prefix="/projects/{project_id}/documents/{document_id}/analysis-jobs", tags=["analysis-jobs"]
+)
 
 
 @router.post("", response_model=AnalysisJobResponse, status_code=status.HTTP_201_CREATED)
 async def start_analysis_job(
     document_id: uuid.UUID,
     project: Project = Depends(get_allowed_project),
-    analysis_job_service: AnalysisJobService = Depends(get_analysis_job_service),
+    service: AnalysisJobService = Depends(get_analysis_job_service),
 ) -> AnalysisJobResponse:
     try:
-        job = await analysis_job_service.create_job(project.id, document_id)
+        job = await service.create_job(project.id, document_id)
     except DocumentNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-
-    # NOTE: for production-grade reliability, a transactional outbox or queue write-ahead
-    # pattern is recommended to avoid the window where the job exists in the DB but dispatch fails.
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (AnalysisAlreadyRunningError, InvalidDocumentStatusError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     try:
-        result = run_analysis_job.delay(str(job.id))
+        task = run_analysis_job.delay(str(job.id))
     except Exception as exc:
-        await analysis_job_service.mark_job_queue_unavailable(job, str(exc))
+        job = await service.mark_job_queue_unavailable(job, str(exc))
         return AnalysisJobResponse.model_validate(job)
-
-    await analysis_job_service.set_celery_task_id(job, result.id)
+    job = await service.mark_dispatched(job, task.id)
     return AnalysisJobResponse.model_validate(job)
 
 
@@ -42,10 +50,29 @@ async def get_analysis_job(
     document_id: uuid.UUID,
     job_id: uuid.UUID,
     project: Project = Depends(get_allowed_project),
-    analysis_job_service: AnalysisJobService = Depends(get_analysis_job_service),
+    service: AnalysisJobService = Depends(get_analysis_job_service),
 ) -> AnalysisJobResponse:
     try:
-        job = await analysis_job_service.get_job(project.id, document_id, job_id)
+        job = await service.get_job(project.id, document_id, job_id)
     except DocumentNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return AnalysisJobResponse.model_validate(job)
+
+
+@router.post("/{job_id}/cancel", response_model=AnalysisJobResponse)
+async def cancel_analysis_job(
+    document_id: uuid.UUID,
+    job_id: uuid.UUID,
+    project: Project = Depends(get_allowed_project),
+    service: AnalysisJobService = Depends(get_analysis_job_service),
+) -> AnalysisJobResponse:
+    try:
+        job = await service.cancel_job(project.id, document_id, job_id)
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AnalysisJobNotCancellableError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if job.celery_task_id:
+        with suppress(Exception):
+            celery_app.control.revoke(job.celery_task_id, terminate=False)
     return AnalysisJobResponse.model_validate(job)

@@ -3,11 +3,13 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
+from app.infrastructure.db.models.enums import AnalysisJobStatus
+
 
 class AnalysisJobResponse(BaseModel):
     id: uuid.UUID
     document_id: uuid.UUID
-    status: str
+    status: AnalysisJobStatus
     error_code: str | None
     error_message: str | None
     retry_count: int

@@ -42,6 +42,12 @@ class DocumentRepository:
         )
         return result.scalar_one()
 
+    async def update_status(self, document: Document, status) -> Document:
+        document.status = status
+        await self._session.commit()
+        await self._session.refresh(document)
+        return document
+
     async def attach_sources(self, document: Document, sources: list[Source]) -> Document:
         # Загружаем текущие источники документа в асинхронном контексте, чтобы
         # избежать lazy-load вне greenlet_spawn.
