@@ -1,54 +1,86 @@
-"""Схемы для роутера editor (aggregate + atomic review)."""
+"""
+Схема агрегированного ответа редактора документа.
+
+GET /projects/{project_id}/documents/{document_id}/editor
+
+Исправления P0 (#7, #8):
+  #7 — добавлены view_mode (оригинал / правки / чистовик) и original_plain_text в
+     EditorDocumentMeta / EditorAggregateResponse. Фронт не должен дополнительно
+     опрашивать за исходным текстом.
+  #8 — добавлен sources_is_editable: bool в EditorPermissions —
+     фронт видит режим read-only для блока источников без повторного запроса.
+"""
+from __future__ import annotations
+
 import uuid
-from typing import List
+from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from app.api.schemas.analysis_job import AnalysisJobResponse
-from app.api.schemas.document import DocumentContentResponse, DocumentResponse
-from app.api.schemas.pagination import Page
+from app.api.schemas.document import DocumentSectionResponse, SuggestionCounters
 from app.api.schemas.suggestion import SuggestionResponse
+from app.infrastructure.db.models.enums import DocumentStatus
+
+# Три режима отображения, определённых в документации:
+# • original  — исходный текст до правок
+# • suggested — текущий текст + правки (inline diff)
+# • clean     — чистовик: текст с принятыми правками
+EditorViewMode = Literal["original", "suggested", "clean"]
+
+
+class EditorDocumentMeta(BaseModel):
+    """Mетаданные документа для редактора."""
+
+    id: uuid.UUID
+    title: str
+    format: str
+    status: DocumentStatus
+    current_analysis_job_id: uuid.UUID | None
+    created_at: datetime
+    updated_at: datetime
+    review_version: int
+    # #7: текущий режим отображения, выводимый бэкендом по статусу:
+    #   draft / in_progress                → "original"
+    #   awaiting_approval                  → "suggested"
+    #   ready                              → "clean"
+    view_mode: EditorViewMode = "original"
+
+
+class EditorContent(BaseModel):
+    """Kонтент документа: plain_text + позиции секций."""
+
+    plain_text: str
+    sections: list[DocumentSectionResponse]
+
+
+class EditorPermissions(BaseModel):
+    """Доступные действия для текущего пользователя."""
+
+    can_analyze: bool
+    can_review: bool
+    can_export: bool
+    can_delete: bool
+    # #8: режим редактирования источников. False, если анализ in_progress
+    # или документ awaiting_approval (job активен).
+    sources_is_editable: bool = True
 
 
 class EditorAggregateResponse(BaseModel):
-    """P0-8: один HTTP-запрос вместо трёх при открытии редактора."""
+    """Полный агрегат для экрана редактора — один запрос вместо N+1.
 
-    document: DocumentResponse
-    content: DocumentContentResponse
-    suggestions: Page[SuggestionResponse]
-    current_analysis_job: AnalysisJobResponse | None = None
-    review_version: int
-
-
-# ---------------------------------------------------------------------------
-# P0-2: AtomicReviewRequest — «Сохранить всё» без race condition
-# ---------------------------------------------------------------------------
-
-class AtomicReviewRequest(BaseModel):
-    """Тело запроса PUT /editor/{document_id}/review.
-
-    review_version — оптимистичная блокировка: клиент передаёт значение,
-    полученное при последнем GET. Если к моменту PUT версия в БД изменилась,
-    сервер возвращает 409 Conflict.
+    Поля:
+    - document:          метаданные + статус + review_version + view_mode (#7)
+    - content:           plain_text + секции (None, если парсинг не выполнялся)
+    - original_content:  исходный plain_text без правок (#7, None если анализ не запускался)
+    - suggestions:       список правок текущего анализа (пусто, если анализа нет)
+    - counters:          pending/accepted/rejected/total
+    - permissions:       что разрешено + sources_is_editable (#8)
     """
 
-    review_version: int = Field(
-        ...,
-        description="Версия ревью, известная клиенту (из EditorAggregateResponse.review_version)",
-    )
-    accepted_ids: List[uuid.UUID] = Field(
-        default_factory=list,
-        description="UUID правок, которые пользователь принял",
-    )
-    rejected_ids: List[uuid.UUID] = Field(
-        default_factory=list,
-        description="UUID правок, которые пользователь отклонил",
-    )
-
-
-class AtomicReviewResponse(BaseModel):
-    """Ответ на PUT /editor/{document_id}/review."""
-
-    review_version: int = Field(description="Новая версия ревью после применения изменений")
-    accepted_count: int
-    rejected_count: int
+    document: EditorDocumentMeta
+    content: EditorContent | None
+    original_content: EditorContent | None  # #7: исходный текст до правок
+    suggestions: list[SuggestionResponse]
+    counters: SuggestionCounters
+    permissions: EditorPermissions

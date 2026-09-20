@@ -2,9 +2,13 @@
 Источники истины внутри проекта: текстовая заметка/ссылка через JSON-эндпоинт,
 файл — через отдельный multipart-эндпоинт.
 
-P0-6: scope пробрасывается из запроса в сервисный слой.
-P0-6: guard активного анализа — если для документа есть активный job,
-      изменение источников запрещено (HTTP 423 Locked).
+Путь в репозитории: app/api/v1/routers/sources.py
+
+ИСПРАВЛЕНО: upload_file_source читает файл через read_upload_within_limit()
+чанками вместо полной буферизации через file.read(). list_sources теперь принимает
+limit/offset и возвращает Page вместо всего списка целиком.
+
+P0-6: scope пробрасывается из запроса в сервисный слой как SourceScope (StrEnum).
 """
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
@@ -56,7 +60,9 @@ async def create_text_source(
         job_service,
     )
     source_type = SourceType.NOTE if payload.type == "note" else SourceType.LINK
-    scope = SourceScope(payload.scope)
+    # payload.scope — Literal["project", "document"], SourceScope — StrEnum с теми же
+    # строковыми значениями, поэтому SourceScope(payload.scope) всегда корректен.
+    scope = SourceScope(payload.scope)  # P0-6
     source = await source_service.create_text_source(
         project, payload.name, source_type, payload.text_content, payload.url, scope=scope
     )
@@ -104,7 +110,7 @@ async def upload_file_source(
             file.filename,
             content,
             file.content_type or "application/octet-stream",
-            scope=SourceScope(scope),
+            scope=SourceScope(scope),  # P0-6: строка → StrEnum
         )
     except FileTooLargeError as exc:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc

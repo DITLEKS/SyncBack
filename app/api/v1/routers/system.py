@@ -1,10 +1,11 @@
-"""Служебные эндпоинты диагностики окружения и capabilities."""
+"""Служебные эндпоинты диагностики окружения и возможностей системы."""
 from fastapi import APIRouter, Depends
 
 from app.api.deps import get_current_user
 from app.api.schemas.system import CapabilitiesResponse
 from app.core.config import Settings, get_settings
 from app.core.dependencies import get_llm_client_instance
+from app.infrastructure.db.models.enums import DocumentFormat
 from app.infrastructure.db.models.user import User
 
 router = APIRouter(prefix="/system", tags=["system"])
@@ -25,16 +26,41 @@ async def llm_health(
     return {"provider": settings.llm_provider, "healthy": is_healthy}
 
 
-@router.get("/capabilities", response_model=CapabilitiesResponse)
+@router.get("/capabilities")
 async def get_capabilities(
     settings: Settings = Depends(get_settings),
-) -> CapabilitiesResponse:
-    """Возвращает константы, которые фронт не должен хардкодить.
+) -> dict:
+    """Возможности системы для фронтенда — форматы, лимиты, ограничения.
 
-    Не требует авторизации — используется при инициализации приложения.
+    Фронтенд не должен хардкодить эти параметры — они читаются при старте.
+    Endpoint публичный (без авторизации): нужен до логина для инициализации UI.
     """
-    return CapabilitiesResponse(
-        supported_formats=_SUPPORTED_FORMATS,
-        unsupported_formats=_UNSUPPORTED_FORMATS,
-        max_file_size_mb=settings.max_upload_size_mb,
-    )
+    supported_formats = [
+        f.value
+        for f in DocumentFormat
+        if f != DocumentFormat.DOC  # .doc не поддерживается парсером
+    ]
+    return {
+        "upload": {
+            "max_size_mb": settings.max_upload_size_mb,
+            "max_size_bytes": settings.max_upload_size_bytes,
+            "supported_formats": supported_formats,
+            "supported_mime_types": [
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
+                "text/plain",   # .txt
+                "text/markdown",  # .md
+                "text/x-markdown",
+            ],
+        },
+        "analysis": {
+            "idempotency_key_required": False,
+            "parallel_jobs_per_document": 1,
+        },
+        "review": {
+            "atomic_save_endpoint": "PUT /projects/{project_id}/documents/{document_id}/review",
+            "optimistic_locking": True,
+        },
+        "export": {
+            "supported_formats": ["docx", "txt", "markdown"],
+        },
+    }

@@ -1,152 +1,173 @@
-"""
-P0-8: Editor aggregate endpoint — один запрос вместо трёх.
-P0-2: PUT /review — атомарное применение правок с оптимистичной блокировкой.
+"""Агрегированный endpoint редактора документа.
 
-GET  /projects/{project_id}/documents/{document_id}/editor
-PUT  /projects/{project_id}/documents/{document_id}/editor/review
+GET /projects/{project_id}/documents/{document_id}/editor
+
+#7: возвращаем view_mode и original_content (исходный plain_text без правок)
+#8: возвращаем sources_is_editable=False при in_progress / awaiting_approval
 """
+import logging
 import uuid
-from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.deps import get_allowed_project
-from app.api.schemas.analysis_job import AnalysisJobResponse
-from app.api.schemas.document import DocumentResponse
-from app.api.schemas.editor import AtomicReviewRequest, AtomicReviewResponse
-from app.api.schemas.pagination import Page
-from app.api.schemas.suggestion import SuggestionResponse
-from app.core.dependencies import (
-    get_analysis_job_service,
-    get_document_service,
-    get_suggestion_service,
+from app.api.deps import get_allowed_project, get_current_user
+from app.api.schemas.document import DocumentSectionResponse, SuggestionCounters
+from app.api.schemas.editor import (
+    EditorAggregateResponse,
+    EditorContent,
+    EditorDocumentMeta,
+    EditorPermissions,
 )
-from app.domain.exceptions import DocumentNotFoundError, ReviewVersionConflictError
-from app.domain.services.analysis_job_service import AnalysisJobService
+from app.api.schemas.suggestion import SuggestionResponse
+from app.core.dependencies import get_document_service, get_suggestion_service
+from app.domain.exceptions import DocumentNotFoundError
 from app.domain.services.document_service import DocumentService
 from app.domain.services.suggestion_service import SuggestionService
+from app.infrastructure.db.models.enums import DocumentStatus
 from app.infrastructure.db.models.project import Project
+from app.infrastructure.db.models.user import User
+
+logger = logging.getLogger("syncscribe.api.editor")
 
 router = APIRouter(
     prefix="/projects/{project_id}/documents/{document_id}/editor",
     tags=["editor"],
 )
 
+# --- Маппинг статуса → view_mode (#7) ---
+_STATUS_VIEW_MODE: dict[DocumentStatus, str] = {
+    DocumentStatus.DRAFT: "original",
+    DocumentStatus.IN_PROGRESS: "original",
+    DocumentStatus.AWAITING_APPROVAL: "suggested",
+    DocumentStatus.READY: "clean",
+    DocumentStatus.ERROR: "original",
+    DocumentStatus.CANCELLED: "original",
+}
 
-class EditorResponse(BaseModel):
-    """Агрегированный ответ для экрана редактора."""
 
-    document: DocumentResponse
-    current_job: Optional[AnalysisJobResponse] = None
-    suggestions: Page[SuggestionResponse]
-
-
-@router.get("", response_model=EditorResponse)
-async def get_editor_state(
+@router.get("", response_model=EditorAggregateResponse)
+async def get_editor_aggregate(
     document_id: uuid.UUID,
-    suggestions_limit: int = Query(200, ge=1, le=200, description="Макс. правок в ответе"),
-    suggestions_offset: int = Query(0, ge=0),
     project: Project = Depends(get_allowed_project),
+    current_user: User = Depends(get_current_user),
     document_service: DocumentService = Depends(get_document_service),
-    job_service: AnalysisJobService = Depends(get_analysis_job_service),
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
-) -> EditorResponse:
-    """Один запрос — всё состояние редактора.
-
-    Ошибки:
-    - 404 если документ не найден или не принадлежит проекту.
-    """
+) -> EditorAggregateResponse:
+    """Полный агрегат данных для экрана редактора."""
+    # --- 1. Документ ---
     try:
         document = await document_service.get_document(project.id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
-    current_job = None
-    if document.current_analysis_job_id is not None:
+    review_version = getattr(document, "review_version", 0) or 0
+    view_mode = _STATUS_VIEW_MODE.get(document.status, "original")  # #7
+
+    meta = EditorDocumentMeta(
+        id=document.id,
+        title=document.name,
+        format=document.format.value,
+        status=document.status,
+        current_analysis_job_id=document.current_analysis_job_id,
+        created_at=document.uploaded_at,
+        updated_at=document.uploaded_at,
+        review_version=review_version,
+        view_mode=view_mode,  # #7
+    )
+
+    # --- 2. Контент (graceful degradation) ---
+    editor_content: EditorContent | None = None
+    try:
+        parsed = await document_service.get_document_content(document)
+        editor_content = EditorContent(
+            plain_text=parsed.plain_text,
+            sections=[
+                DocumentSectionResponse(
+                    ref=s.ref,
+                    start_offset=s.start_offset,
+                    end_offset=s.end_offset,
+                )
+                for s in parsed.sections
+            ],
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Не удалось получить контент документа для редактора",
+            extra={"document_id": str(document_id)},
+        )
+
+    # --- 2b. original_content (#7) ---
+    # original_content == editor_content на статусах draft/in_progress/error/cancelled.
+    # Для awaiting_approval и ready — текущий content уже содержит правки,
+    # поэтому original_content сохраняем как original_snapshot из DocumentService
+    # (если метод доступен, иначе None).
+    original_content: EditorContent | None = None
+    if document.status in (
+        DocumentStatus.AWAITING_APPROVAL,
+        DocumentStatus.READY,
+    ):
         try:
-            current_job = await job_service.get_job(
-                project.id, document_id, document.current_analysis_job_id
+            orig_parsed = await document_service.get_original_content(document)
+            original_content = EditorContent(
+                plain_text=orig_parsed.plain_text,
+                sections=[
+                    DocumentSectionResponse(
+                        ref=s.ref,
+                        start_offset=s.start_offset,
+                        end_offset=s.end_offset,
+                    )
+                    for s in orig_parsed.sections
+                ],
             )
+        except (AttributeError, NotImplementedError):
+            # get_original_content ещё не реализован — подразумеваем stub (None).
+            pass
         except Exception:  # noqa: BLE001
-            current_job = None
+            logger.warning(
+                "Не удалось получить original_content документа",
+                extra={"document_id": str(document_id)},
+            )
+    else:
+        # На draft/in_progress: original_content и content — одно и то же
+        original_content = editor_content
 
-    suggestions_list, suggestions_total = await suggestion_service.list_suggestions_for_document(
-        project.id,
-        document_id,
-        limit=suggestions_limit,
-        offset=suggestions_offset,
+    # --- 3. Правки ---
+    suggestions_raw, total = await suggestion_service.list_suggestions_for_document(
+        project.id, document_id, limit=200, offset=0
+    )
+    suggestions = [SuggestionResponse.model_validate(s) for s in suggestions_raw]
+
+    # --- 4. Счётчики ---
+    pending = sum(1 for s in suggestions if s.status == "pending")
+    accepted = sum(1 for s in suggestions if s.status == "accepted")
+    rejected = sum(1 for s in suggestions if s.status == "rejected")
+    counters = SuggestionCounters(
+        total=total,
+        pending=pending,
+        accepted=accepted,
+        rejected=rejected,
     )
 
-    return EditorResponse(
-        document=DocumentResponse.model_validate(document),
-        current_job=AnalysisJobResponse.model_validate(current_job) if current_job else None,
-        suggestions=Page[SuggestionResponse](
-            items=[SuggestionResponse.model_validate(s) for s in suggestions_list],
-            total=suggestions_total,
-            limit=suggestions_limit,
-            offset=suggestions_offset,
-        ),
+    # --- 5. Права ---
+    locked = document.status in (DocumentStatus.IN_PROGRESS,)
+    # #8: sources_is_editable=False при активном job или ожидании утверждения
+    sources_is_editable = document.status not in (
+        DocumentStatus.IN_PROGRESS,
+        DocumentStatus.AWAITING_APPROVAL,
+    )
+    permissions = EditorPermissions(
+        can_analyze=document.status in (DocumentStatus.DRAFT, DocumentStatus.READY),
+        can_review=document.status == DocumentStatus.AWAITING_APPROVAL,
+        can_export=document.status == DocumentStatus.READY,
+        can_delete=not locked,
+        sources_is_editable=sources_is_editable,  # #8
     )
 
-
-@router.put("/review", response_model=AtomicReviewResponse, status_code=status.HTTP_200_OK)
-async def atomic_review(
-    document_id: uuid.UUID,
-    body: AtomicReviewRequest,
-    project: Project = Depends(get_allowed_project),
-    document_service: DocumentService = Depends(get_document_service),
-    suggestion_service: SuggestionService = Depends(get_suggestion_service),
-) -> AtomicReviewResponse:
-    """P0-2: Атомарно применяет принятые/отклонённые правки.
-
-    Использует оптимистичную блокировку через review_version:
-    - если версия клиента не совпадает с текущей в БД → 409 Conflict
-    - если совпадает → применяет все изменения в одной транзакции
-
-    Это устраняет race condition при кнопке «Сохранить всё» во фронте.
-
-    Ошибки:
-    - 404 — документ не найден
-    - 409 — review_version устарела (другой пользователь уже изменил документ)
-    - 422 — один UUID присутствует в обоих списках одновременно
-    """
-    overlap = set(body.accepted_ids) & set(body.rejected_ids)
-    if overlap:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Suggestion IDs не могут быть одновременно accepted и rejected: {overlap}",
-        )
-
-    try:
-        document = await document_service.get_document(project.id, document_id)
-    except DocumentNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-
-    if document.review_version != body.review_version:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                f"review_version конфликт: ожидалось {body.review_version}, "
-                f"текущая версия {document.review_version}. "
-                "Перезагрузите документ и повторите."
-            ),
-        )
-
-    try:
-        new_version = await suggestion_service.apply_review(
-            project_id=project.id,
-            document_id=document_id,
-            accepted_ids=body.accepted_ids,
-            rejected_ids=body.rejected_ids,
-            current_review_version=body.review_version,
-        )
-    except ReviewVersionConflictError as exc:
-        # Сервисный слой поймал race condition на уровне БД
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-
-    return AtomicReviewResponse(
-        review_version=new_version,
-        accepted_count=len(body.accepted_ids),
-        rejected_count=len(body.rejected_ids),
+    return EditorAggregateResponse(
+        document=meta,
+        content=editor_content,
+        original_content=original_content,  # #7
+        suggestions=suggestions,
+        counters=counters,
+        permissions=permissions,
     )

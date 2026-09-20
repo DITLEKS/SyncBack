@@ -29,6 +29,11 @@ class Document(Base):
     # Клиент передаёт текущее значение в заголовке If-Match; при несовпадении → 412.
     review_version = Column(Integer, nullable=False, default=0, server_default="0")
 
+    # P0-2: версия ревью для оптимистической блокировки.
+    # Инкрементируется при каждом атомарном PUT /review.
+    # Клиент обязан передать текущее значение; при расхождении — 409.
+    review_version = Column(Integer, nullable=False, default=0, server_default="0")
+
     project = relationship("Project", back_populates="documents")
     sources = relationship("Source", secondary="document_sources", back_populates="documents")
 

@@ -5,10 +5,12 @@
 - update() — изменяет name/description (partial update, None-поля игнорируются).
 - collect_storage_keys() — собирает MinIO-ключи всех документов и файл-источников проекта.
 - delete() — удаляет запись проекта; каскад в БД удаляет дочерние таблицы.
+- get_for_user() — возвращает проект или выбрасывает HTTP 403/404 (ownership guard).
 """
 
 import uuid
 
+from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +25,29 @@ class ProjectRepository:
 
     async def get_by_id(self, project_id: uuid.UUID) -> Project | None:
         return await self._session.get(Project, project_id)
+
+    async def get_for_user(
+        self, project_id: uuid.UUID, owner_id: uuid.UUID
+    ) -> Project:
+        """
+        Возвращает проект, если он принадлежит owner_id.
+        - 404 если проекта нет
+        - 403 если проект существует, но принадлежит другому пользователю
+
+        Используется везде, где нужна проверка ownership перед мутацией.
+        """
+        project = await self._session.get(Project, project_id)
+        if project is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project {project_id} not found.",
+            )
+        if project.owner_id != owner_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: this project belongs to another user.",
+            )
+        return project
 
     async def create(self, project: Project) -> Project:
         self._session.add(project)

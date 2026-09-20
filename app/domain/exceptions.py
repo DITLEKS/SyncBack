@@ -99,7 +99,26 @@ class ReviewVersionConflictError(SyncBackError):
     """
 
 
-# Алиас для обратной совместимости: document_repository и suggestion_service
-# выбрасывают StaleReviewVersionError; роутер перехватывает ReviewVersionConflictError.
-# Оба имени ссылаются на один и тот же класс.
-StaleReviewVersionError = ReviewVersionConflictError
+class InvalidDocumentStatusError(DomainError):
+    pass
+
+
+class AnalysisJobNotCancellableError(DomainError):
+    pass
+
+
+class ReviewNotCompleteError(DomainError):
+    pass
+
+
+class OptimisticLockError(DomainError):
+    """P0-2: версия ревью на клиенте устарела — документ был изменён параллельным запросом.
+
+    Клиент должен перезагрузить состояние (GET /editor) и повторить сохранение.
+    """
+
+
+class SourceLockError(DomainError):
+    """P0-6: изменение источников запрещено, пока документ находится
+    в статусе IN_PROGRESS или AWAITING_APPROVAL.
+    """

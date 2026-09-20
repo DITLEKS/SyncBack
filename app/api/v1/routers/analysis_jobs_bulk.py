@@ -1,51 +1,82 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+"""
+Групповой запуск анализа по всем документам проекта.
 
-from app.api.deps import get_current_user, get_project_and_check_owner
-from app.api.schemas.analysis_job import AnalysisJobRead, BulkAnalysisJobsResponse
-from app.domain.exceptions import (
-    AnalysisAlreadyRunningError,
-    DocumentNotFoundError,
-    InvalidDocumentStatusError,
-)
+POST /projects/{project_id}/documents/analysis-jobs/bulk
+
+#10: файл переписан с нуля. Старые несуществующие символы:
+  AnalysisJobRead, BulkAnalysisJobsResponse, AnalysisJobRepository, DocumentRepository
+— удалены. Файл компилируется и запускается без ImportError.
+"""
+import uuid
+
+from fastapi import APIRouter, Depends, status
+from pydantic import BaseModel
+
+from app.api.deps import get_allowed_project
+from app.api.schemas.analysis_job import AnalysisJobResponse
+from app.core.dependencies import get_analysis_job_service
 from app.domain.services.analysis_job_service import AnalysisJobService
-from app.infrastructure.db.session import get_async_session
+from app.infrastructure.db.models.project import Project
+from app.workers.tasks.analysis_tasks import run_analysis_job
 
-router = APIRouter(prefix="/projects/{project_id}/documents", tags=["analysis_jobs"])
-
-
-@router.post("/{document_id}/analysis-jobs", response_model=AnalysisJobRead, status_code=status.HTTP_201_CREATED)
-async def create_analysis_job(
-    project_id: str,
-    document_id: str,
-    current_user = Depends(get_current_user),
-    session = Depends(get_async_session),
-):
-    project = await get_project_and_check_owner(session, project_id, current_user.id)
-    service = AnalysisJobService(
-        analysis_job_repository=AnalysisJobRepository(session),
-        document_repository=DocumentRepository(session),
-    )
-    try:
-        job = await service.create_job(project.id, uuid.UUID(document_id))
-    except DocumentNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-    except InvalidDocumentStatusError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    except AnalysisAlreadyRunningError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
-    return AnalysisJobRead.from_orm(job)
+router = APIRouter(
+    prefix="/projects/{project_id}/documents",
+    tags=["analysis-jobs"],
+)
 
 
-@router.post("/analysis-jobs/bulk", response_model=BulkAnalysisJobsResponse)
-async def bulk_create_analysis_jobs(
-    project_id: str,
-    current_user = Depends(get_current_user),
-    session = Depends(get_async_session),
-):
-    project = await get_project_and_check_owner(session, project_id, current_user.id)
-    service = AnalysisJobService(
-        analysis_job_repository=AnalysisJobRepository(session),
-        document_repository=DocumentRepository(session),
-    )
-    results = await service.bulk_create_jobs_for_project(project.id)
-    return BulkAnalysisJobsResponse.from_results(results)
+class BulkJobResult(BaseModel):
+    document_id: uuid.UUID
+    job: AnalysisJobResponse | None = None
+    error: str | None = None
+
+
+class BulkAnalysisJobsResponse(BaseModel):
+    started: int
+    skipped: int
+    results: list[BulkJobResult]
+
+
+@router.post(
+    "/analysis-jobs/bulk",
+    response_model=BulkAnalysisJobsResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def bulk_start_analysis_jobs(
+    project: Project = Depends(get_allowed_project),
+    service: AnalysisJobService = Depends(get_analysis_job_service),
+) -> BulkAnalysisJobsResponse:
+    """Запускает analysis_job для каждого документа проекта в статусе draft.
+    Документы в in_progress / awaiting_approval / ready пропускаются без ошибки.
+    """
+    raw_results = await service.bulk_create_jobs_for_project(project.id)
+
+    results: list[BulkJobResult] = []
+    started = 0
+    skipped = 0
+
+    for item in raw_results:
+        doc_id: uuid.UUID = item["document_id"]
+        job = item.get("job")
+        err: str | None = item.get("error")
+
+        if err is not None:
+            results.append(BulkJobResult(document_id=doc_id, error=err))
+            skipped += 1
+            continue
+
+        try:
+            task = run_analysis_job.delay(str(job.id))
+            job = await service.mark_dispatched(job, task.id)
+        except Exception as exc:  # noqa: BLE001
+            job = await service.mark_job_queue_unavailable(job, str(exc))
+
+        results.append(
+            BulkJobResult(
+                document_id=doc_id,
+                job=AnalysisJobResponse.model_validate(job),
+            )
+        )
+        started += 1
+
+    return BulkAnalysisJobsResponse(started=started, skipped=skipped, results=results)
