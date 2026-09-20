@@ -3,6 +3,10 @@
 P0-7: Идемпотентный Idempotency-Key.
 P0-9: Повторный анализ READY-документа требует force=True в теле запроса.
       Без force — HTTP 409 с confirmation_required=True.
+
+ОПТИМИЗАЦИЯ (код-ревью):
+- #4  detail HTTPException — .model_dump() вместо jsonable_encoder на Pydantic-объекте.
+- #9  _job_response() — хелпер вместо трёх одинаковых JSONResponse-блоков.
 """
 
 import uuid
@@ -37,6 +41,14 @@ router = APIRouter(
 )
 
 
+# #9 Хелпер, чтобы не дублировать JSONResponse + jsonable_encoder в трёх местах
+def _job_response(job, http_status: int = status.HTTP_201_CREATED) -> JSONResponse:
+    return JSONResponse(
+        status_code=http_status,
+        content=jsonable_encoder(AnalysisJobResponse.model_validate(job)),
+    )
+
+
 @router.post(
     "",
     status_code=status.HTTP_201_CREATED,
@@ -64,10 +76,7 @@ async def start_analysis_job(
             project.id, document_id, idempotency_key
         )
         if existing is not None:
-            return JSONResponse(
-                status_code=status.HTTP_200_OK,
-                content=jsonable_encoder(AnalysisJobResponse.model_validate(existing)),
-            )
+            return _job_response(existing, status.HTTP_200_OK)  # #9
 
     # P0-9: повторный анализ документа в статусе READY без force
     try:
@@ -76,16 +85,16 @@ async def start_analysis_job(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     if document.status == DocumentStatus.READY and not body.force:
+        # #4 model_dump() вместо jsonable_encoder на ещё несериализованном Pydantic-объекте
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=jsonable_encoder(
-                AnalysisJobConflictResponse(
-                    detail=(
-                        "Документ уже в статусе Готов. "
-                        "Перезапустить анализ? Передайте force=true."
+            detail=AnalysisJobConflictResponse(
+                detail=(
+                    "Документ уже в статусе Готов. "
+                    "Перезапустить анализ? Передайте force=true."
                 ),
                 confirmation_required=True,
-            ),
+            ).model_dump(),
         )
 
     try:
@@ -99,15 +108,10 @@ async def start_analysis_job(
         task = run_analysis_job.delay(str(job.id))
     except Exception as exc:  # noqa: BLE001
         job = await service.mark_job_queue_unavailable(job, str(exc))
-        return JSONResponse(
-            status_code=status.HTTP_201_CREATED,
-            content=jsonable_encoder(AnalysisJobResponse.model_validate(job)),
-        )
+        return _job_response(job)  # #9
+
     job = await service.mark_dispatched(job, task.id)
-    return JSONResponse(
-        status_code=status.HTTP_201_CREATED,
-        content=jsonable_encoder(AnalysisJobResponse.model_validate(job)),
-    )
+    return _job_response(job)  # #9
 
 
 @router.get("/{job_id}", response_model=AnalysisJobResponse)
