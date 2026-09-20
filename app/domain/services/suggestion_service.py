@@ -3,13 +3,10 @@
 finalize_review, атомарное сохранение сессии ревью (P0-2) и сборка
 списка принятых изменений для экспорта.
 
-ИСПРАВЛЕНО (rev-4 / P0-2):
-9. atomic_review_save() — единый транзакционный метод:
-   - Принимает список решений (accepted/rejected) + review_version.
-   - Проверяет оптимистическую блокировку: document.review_version == review_version.
-   - Применяет все решения в одной транзакции через bulk UPDATE.
-   - При finalize=True автоматически вызывает finalize_review, если pending == 0.
-   - Инкрементирует review_version после успешного сохранения.
+ИСПРАВЛЕНО (P0-#13):
+- bulk_accept() теперь возвращает tuple[list[Suggestion], Document], чтобы
+  роутер мог заполнить BulkAcceptResponse.document_status и .review_version
+  без лишнего GET-запроса.
 """
 from __future__ import annotations
 
@@ -41,13 +38,21 @@ logger = logging.getLogger("syncscribe.services.suggestion")
 
 @dataclass
 class ReviewSaveResult:
-    """Результат атомарного сохранения ревью."""
+    """Result of atomic review save."""
 
     document: Document
     accepted_count: int = 0
     rejected_count: int = 0
     pending_count: int = 0
     finalized: bool = False
+
+
+@dataclass
+class BulkAcceptResult:
+    """P0-#13: результат bulk-accept — список правок + актуальный документ."""
+
+    suggestions: list[Suggestion]
+    document: Document
 
 
 class SuggestionService:
@@ -185,19 +190,32 @@ class SuggestionService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         user_id: uuid.UUID,
-    ) -> list[Suggestion]:
+    ) -> BulkAcceptResult:
+        """Бульковое принятие всех pending-правок.
+
+        P0-#13: возвращает BulkAcceptResult(правки, документ), чтобы
+        роутер мог вернуть document_status и review_version в одном ответе,
+        без дополнительного GET /editor.
+        """
         document = await self._get_document_or_raise(project_id, document_id)
         if document.status != DocumentStatus.AWAITING_APPROVAL:
             raise InvalidDocumentStatusError(
                 "Решения по правкам доступны только в статусе 'awaiting_approval'"
             )
         if document.current_analysis_job_id is None:
-            return []
+            return BulkAcceptResult(suggestions=[], document=document)
         pending_ids = await self._suggestions.list_ids_by_analysis_job_and_status(
             document.current_analysis_job_id, SuggestionStatus.PENDING
         )
-        return await self._suggestions.bulk_update_status(
+        accepted = await self._suggestions.bulk_update_status(
             pending_ids, SuggestionStatus.ACCEPTED, user_id
+        )
+        # Перечитываем документ после операции, чтобы получить
+        # актуальный status и review_version.
+        refreshed = await self._documents.get_by_id(document_id)
+        return BulkAcceptResult(
+            suggestions=accepted,
+            document=refreshed or document,
         )
 
     async def finalize_review(
@@ -255,23 +273,7 @@ class SuggestionService:
         finalize: bool = True,
         export_service: "DocumentExportService | None" = None,
     ) -> ReviewSaveResult:
-        """Атомарное сохранение всех решений ревью за один вызов.
-
-        Алгоритм:
-        1. Загрузить документ и проверить статус AWAITING_APPROVAL.
-        2. Проверить оптимистическую блокировку: document.review_version == review_version.
-        3. Применить все решения через bulk UPDATE (отдельные запросы для accepted/rejected).
-        4. Если finalize=True и pending == 0 после применения — вызвать finalize_review.
-        5. Инкрементировать review_version на документе.
-        6. Вернуть ReviewSaveResult с итоговыми счётчиками и статусом документа.
-
-        Оптимистическая блокировка защищает от параллельных сохранений:
-        - Клиент А читает документ (review_version=3).
-        - Клиент Б читает тот же документ (review_version=3).
-        - Клиент А сохраняет → review_version становится 4.
-        - Клиент Б пытается сохранить с review_version=3 → получает 409.
-        - Клиент Б перезагружает (GET /editor) и получает актуальное состояние.
-        """
+        """Атомарное сохранение всех решений ревью за один вызов."""
         document = await self._get_document_or_raise(project_id, document_id)
 
         if document.status != DocumentStatus.AWAITING_APPROVAL:
@@ -279,7 +281,6 @@ class SuggestionService:
                 "Атомарное сохранение ревью доступно только в статусе 'awaiting_approval'"
             )
 
-        # Оптимистическая блокировка
         current_version = getattr(document, "review_version", 0) or 0
         if current_version != review_version:
             raise OptimisticLockError(
@@ -292,7 +293,6 @@ class SuggestionService:
                 "У документа отсутствует текущий результат анализа"
             )
 
-        # Применяем решения батчем
         accepted_ids = [sid for sid, st in decisions if st == SuggestionStatus.ACCEPTED]
         rejected_ids = [sid for sid, st in decisions if st == SuggestionStatus.REJECTED]
 
@@ -308,14 +308,12 @@ class SuggestionService:
                 rejected_ids, SuggestionStatus.REJECTED, user_id
             )
 
-        # Считаем оставшиеся pending
         pending_count = await self._suggestions.count_by_analysis_job_and_status(
             document.current_analysis_job_id, SuggestionStatus.PENDING
         )
 
         finalized = False
         if finalize and pending_count == 0:
-            # Финализируем без повторной проверки статуса (уже проверили выше)
             if export_service is not None:
                 try:
                     await export_service.export_and_save(document)
@@ -330,7 +328,6 @@ class SuggestionService:
             document = await self._documents.update_status(document, DocumentStatus.READY)
             finalized = True
 
-        # Инкрементируем review_version
         document = await self._documents.increment_review_version(document)
 
         return ReviewSaveResult(

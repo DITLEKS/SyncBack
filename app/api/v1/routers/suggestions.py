@@ -1,11 +1,5 @@
-"""Просмотр и точечное подтверждение/отклонение правок, bulk-accept, finalize.
-
-ДОБАВЛЕНО (P0-2):
-- PUT /review — атомарный endpoint сохранения всей сессии ревью.
-  Принимает review_version (оптимистическая блокировка) и список decisions.
-  После успешного сохранения инкрементирует review_version.
-  При несоответствии версии → 409 Conflict (OptimisticLockError).
-"""
+"""P0-#13: bulk_accept возвращает BulkAcceptResult — роутер заполняет
+       document_status и review_version без лишнего GET-запроса."""
 import logging
 import uuid
 
@@ -85,12 +79,6 @@ async def atomic_review_save(
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
     audit_log_service: AuditLogService = Depends(get_audit_log_service),
 ) -> ReviewSaveResponse:
-    """Атомарное сохранение сессии ревью (P0-2).
-
-    Принимает весь набор решений за один вызов. Защищён оптимистической
-    блокировкой через review_version — при расхождении версий возвращает
-    409 Conflict. Клиент должен перезагрузить GET /editor и повторить.
-    """
     decisions = [
         (
             d.suggestion_id,
@@ -115,7 +103,6 @@ async def atomic_review_save(
     except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    # Пишем audit log для каждого принятого решения
     for d in payload.decisions:
         action = AuditAction.ACCEPT if d.decision == "accepted" else AuditAction.REJECT
         await _log_decision(audit_log_service, current_user.id, d.suggestion_id, action)
@@ -188,14 +175,20 @@ async def bulk_accept_suggestions(
     audit_log_service: AuditLogService = Depends(get_audit_log_service),
 ) -> BulkAcceptResponse:
     try:
-        accepted = await suggestion_service.bulk_accept(project.id, document_id, current_user.id)
+        # P0-#13: сервис возвращает BulkAcceptResult(список + документ)
+        result = await suggestion_service.bulk_accept(project.id, document_id, current_user.id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except InvalidDocumentStatusError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    for suggestion in accepted:
+    for suggestion in result.suggestions:
         await _log_decision(audit_log_service, current_user.id, suggestion.id, AuditAction.ACCEPT)
-    return BulkAcceptResponse(accepted_count=len(accepted))
+    doc = result.document
+    return BulkAcceptResponse(
+        accepted_count=len(result.suggestions),
+        document_status=doc.status.value if doc else None,
+        review_version=getattr(doc, "review_version", None),
+    )
 
 
 @router.post("/finalize", response_model=DocumentResponse)
