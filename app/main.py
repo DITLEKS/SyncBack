@@ -62,6 +62,18 @@ def create_app() -> FastAPI:
         expose_headers=["X-Request-ID"],
     )
 
+    # CORS — должен быть первым middleware, чтобы preflight OPTIONS
+    # обрабатывался до любых других проверок (авторизация, correlation id).
+    # origins берутся из CORS_ORIGINS в .env; для локальной разработки
+    # по умолчанию разрешены localhost:3000 и localhost:5173 (Vite/CRA).
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     app.add_middleware(CorrelationIdMiddleware)
 
     @app.exception_handler(DomainError)

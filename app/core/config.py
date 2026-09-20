@@ -44,10 +44,12 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: Literal["json", "text"] = "json"
 
-    # CORS: строка, разделённая запятыми, или одиночное значение.
-    # Примеры:
-    #   CORS_ALLOWED_ORIGINS=*                              (только для local)
-    #   CORS_ALLOWED_ORIGINS=http://localhost:5173          (один origin)
+    # CORS — список разрешённых origins через запятую, или уже готовый список.
+    # Для локальной разработки: http://localhost:3000,http://localhost:5173
+    # Для prod задайте явный список без wildcard.
+    # Примеры .env:
+    #   CORS_ALLOWED_ORIGINS=*                                    (только для local)
+    #   CORS_ALLOWED_ORIGINS=http://localhost:5173                (один origin)
     #   CORS_ALLOWED_ORIGINS=https://app.example.com,https://staging.example.com
     cors_allowed_origins: list[str] = ["*"]
 
