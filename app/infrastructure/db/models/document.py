@@ -1,61 +1,34 @@
-"""
-Путь в репозитории: app/infrastructure/db/models/document.py
-
-Фикс: values_callable у DocumentFormat и DocumentStatus (та же причина, что у user_role).
-"""
-
 import uuid
-from datetime import datetime
-from typing import TYPE_CHECKING
 
-import sqlalchemy as sa
-from sqlalchemy import DateTime, ForeignKey, String, func
+from sqlalchemy import Column, Enum, ForeignKey, Table
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import relationship
 
 from app.infrastructure.db.base import Base
-from app.infrastructure.db.models.document_source import document_sources
 from app.infrastructure.db.models.enums import DocumentFormat, DocumentStatus
-
-if TYPE_CHECKING:
-    # ИСПРАВЛЕНО (F821): см. комментарий в analysis_job.py — импорт только для
-    # статического анализа типов, без риска циклического импорта в рантайме.
-    from app.infrastructure.db.models.analysis_job import AnalysisJob
-    from app.infrastructure.db.models.project import Project
-    from app.infrastructure.db.models.source import Source
-
-_values = lambda enum_cls: [member.value for member in enum_cls]  # noqa: E731
+from app.infrastructure.db.models.source_scope import SourceScope
 
 
 class Document(Base):
     __tablename__ = "documents"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
-    title: Mapped[str] = mapped_column(String(500), nullable=False)
-    format: Mapped[DocumentFormat] = mapped_column(
-        sa.Enum(DocumentFormat, name="document_format", values_callable=_values), nullable=False
-    )
-    storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
-    status: Mapped[DocumentStatus] = mapped_column(
-        sa.Enum(DocumentStatus, name="document_status", values_callable=_values),
-        nullable=False,
-        default=DocumentStatus.DRAFT,
-        server_default=DocumentStatus.DRAFT.value,
-    )
-    current_analysis_job_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("analysis_jobs.id", ondelete="SET NULL", use_alter=True, name="fk_documents_current_analysis_job"),
-        nullable=True,
-    )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
+    name = Column("name", nullable=False)
+    format = Column(Enum(DocumentFormat, name="document_format"), nullable=False)
+    storage_key = Column("storage_key", nullable=False)
+    size_bytes = Column("size_bytes", nullable=False)
+    uploaded_at = Column("uploaded_at", nullable=False)
+    status = Column(Enum(DocumentStatus, name="document_status"), nullable=False, default=DocumentStatus.DRAFT)
+    current_analysis_job_id = Column(UUID(as_uuid=True), ForeignKey("analysis_jobs.id"))
 
-    project: Mapped["Project"] = relationship(back_populates="documents")
-    sources: Mapped[list["Source"]] = relationship(secondary=document_sources, back_populates="documents")
-    analysis_jobs: Mapped[list["AnalysisJob"]] = relationship(
-        back_populates="document", foreign_keys="[AnalysisJob.document_id]", cascade="all, delete-orphan"
-    )
-    current_analysis_job: Mapped["AnalysisJob | None"] = relationship(
-        foreign_keys=[current_analysis_job_id], post_update=True, viewonly=False
-    )
+    project = relationship("Project", back_populates="documents")
+    sources = relationship("Source", secondary="document_sources", back_populates="documents")
+
+
+document_sources = Table(
+    "document_sources",
+    Base.metadata,
+    Column("document_id", UUID(as_uuid=True), ForeignKey("documents.id"), primary_key=True),
+    Column("source_id", UUID(as_uuid=True), ForeignKey("sources.id"), primary_key=True),
+)
