@@ -5,6 +5,7 @@
 from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.models.audit_log import AuditLog
 from app.infrastructure.db.models.document import Document
+from app.infrastructure.db.models.document_open import DocumentOpen
 from app.infrastructure.db.models.document_source import document_sources
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.source import Source
@@ -15,6 +16,7 @@ __all__ = [
     "AnalysisJob",
     "AuditLog",
     "Document",
+    "DocumentOpen",
     "document_sources",
     "Project",
     "Source",
