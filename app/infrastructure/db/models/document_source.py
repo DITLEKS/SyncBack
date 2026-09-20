@@ -9,6 +9,12 @@ from sqlalchemy.dialects.postgresql import UUID
 
 from app.infrastructure.db.base import Base
 
+# Единственная декларация промежуточной таблицы для M:N-связи Document↔Source.
+# Другие модули (Document, Source, repositories) должны импортировать
+# document_sources из этого файла и использовать его через secondary/document_sources,
+# не создавая новый Table("document_sources", Base.metadata, ...) — иначе SQLAlchemy
+# будет считать, что таблица объявлена дважды в одном MetaData.
+
 document_sources = Table(
     "document_sources",
     Base.metadata,
