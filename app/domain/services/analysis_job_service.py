@@ -9,19 +9,27 @@ from app.domain.exceptions import (
     InvalidDocumentStatusError,
 )
 from app.infrastructure.db.models.analysis_job import AnalysisJob
+from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.enums import AnalysisJobStatus, DocumentStatus
 from app.infrastructure.db.repositories.analysis_job_repository import AnalysisJobRepository
 from app.infrastructure.db.repositories.document_repository import DocumentRepository
 
 # Статусы документа, из которых разрешён запуск анализа:
 #   DRAFT              — первичный / повторный запуск (переходы №2, №7→2)
-#   AWAITING_APPROVAL  — повторный запуск после изменений (переход №9 по таблице)
-_ANALYSIS_ALLOWED_STATUSES = (DocumentStatus.DRAFT, DocumentStatus.AWAITING_APPROVAL)
+#   AWAITING_APPROVAL  — повторный запуск после изменений (переход №9)
+#   READY              — повторный анализ с force=True (#9 роутер)
+_ANALYSIS_ALLOWED_STATUSES = (
+    DocumentStatus.DRAFT,
+    DocumentStatus.AWAITING_APPROVAL,
+    DocumentStatus.READY,
+)
 
 
 class AnalysisJobService:
     def __init__(
-        self, analysis_job_repository: AnalysisJobRepository, document_repository: DocumentRepository
+        self,
+        analysis_job_repository: AnalysisJobRepository,
+        document_repository: DocumentRepository,
     ):
         self._jobs = analysis_job_repository
         self._documents = document_repository
@@ -36,7 +44,7 @@ class AnalysisJobService:
         document_id: uuid.UUID,
         idempotency_key: str,
     ) -> AnalysisJob | None:
-        """Найти существующий job по ключу идемпотентности.
+        """Nайти существующий job по ключу идемпотентности.
 
         Проверяет принадлежность документа проекту перед поиском.
         Возвращает None, если документ не найден или job с таким ключом
@@ -48,6 +56,25 @@ class AnalysisJobService:
         return await self._jobs.get_by_idempotency_key(document_id, idempotency_key)
 
     # ------------------------------------------------------------------
+    # Document helpers
+    # ------------------------------------------------------------------
+
+    async def get_document_for_job(
+        self, project_id: uuid.UUID, document_id: uuid.UUID
+    ) -> Document:
+        """Vернуть ORM-документ для проверки статуса (#9).
+
+        Используется роутером до create_job, чтобы проверить READY-гард
+        без force=True до чего-либо изменения в БД.
+        """
+        document = await self._documents.get_by_id(document_id)
+        if document is None or document.project_id != project_id:
+            raise DocumentNotFoundError(
+                f"Документ {document_id} не найден в проекте {project_id}"
+            )
+        return document
+
+    # ------------------------------------------------------------------
     # Core job lifecycle
     # ------------------------------------------------------------------
 
@@ -57,33 +84,24 @@ class AnalysisJobService:
         document_id: uuid.UUID,
         idempotency_key: str | None = None,
     ) -> AnalysisJob:
-        """Создать задачу анализа.
-
-        Если передан idempotency_key и job с таким ключом уже существует для
-        данного документа — возвращает существующий job без создания нового
-        (HTTP-роутер должен отдать 200 вместо 201 в этом случае).
+        """Cоздать задачу анализа.
 
         Разрешённые исходные статусы документа (таблица переходов):
           • DRAFT             → переход №2 (первичный/ручной запуск)
           • AWAITING_APPROVAL → переход №9 (повторный запуск)
+          • READY             → разрешен только с force=True (#9),
+                               роутер проверяет это до вызова create_job
 
-        При повторном запуске из AWAITING_APPROVAL документ сначала сбрасывается
-        в DRAFT (пайплайн всегда стартует из DRAFT → IN_PROGRESS). Если после
-        сброса создание job упало до коммита — документ откатывается обратно в
-        AWAITING_APPROVAL, чтобы пользователь не потерял правки предыдущего раунда
-        и мог либо завершить review, либо повторить запуск позже.
-
-        Если сброс и создание job прошли успешно, но Celery-очередь недоступна —
-        вызывающий код вызывает mark_job_queue_unavailable; документ остаётся в
-        DRAFT (переход №3), что корректно.
+        При повторном запуске из AWAITING_APPROVAL/READY документ сбрасывается
+        в DRAFT (пайплайн всегда стартует из DRAFT → IN_PROGRESS).
         """
         document = await self._documents.get_by_id(document_id)
         if document is None or document.project_id != project_id:
-            raise DocumentNotFoundError(f"Документ {document_id} не найден в проекте {project_id}")
+            raise DocumentNotFoundError(
+                f"Документ {document_id} не найден в проекте {project_id}"
+            )
 
-        # --- Idempotency-check (P0-7) ---
-        # Выполняем до проверки статуса документа: если ключ уже знаком,
-        # повторно запускать анализ не нужно вне зависимости от текущего статуса.
+        # Idempotency-check (P0-7)
         if idempotency_key is not None:
             existing = await self._jobs.get_by_idempotency_key(document_id, idempotency_key)
             if existing is not None:
@@ -98,12 +116,8 @@ class AnalysisJobService:
         if await self._jobs.get_active_by_document_id(document.id) is not None:
             raise AnalysisAlreadyRunningError("Для документа уже выполняется анализ")
 
-        # Запоминаем предыдущий статус для отката при повторном запуске из
-        # AWAITING_APPROVAL. При запуске из DRAFT откат не нужен — previous_status
-        # совпадает с целевым DRAFT.
         previous_status = document.status
 
-        # Приводим документ к DRAFT — пайплайн всегда стартует из этого статуса.
         if document.status != DocumentStatus.DRAFT:
             document = await self._documents.update_status(document, DocumentStatus.DRAFT)
 
@@ -116,14 +130,10 @@ class AnalysisJobService:
         try:
             return await self._jobs.create_for_document(job, document)
         except IntegrityError as exc:
-            # Параллельный запрос успел создать active job — откатываем статус
-            # документа обратно в предыдущий, чтобы не потерять правки.
             if previous_status != DocumentStatus.DRAFT:
                 await self._documents.update_status(document, previous_status)
             raise AnalysisAlreadyRunningError("Для документа уже выполняется анализ") from exc
         except Exception:
-            # Неожиданная ошибка при создании job — откатываем статус, чтобы
-            # документ не завис в DRAFT без активной задачи.
             if previous_status != DocumentStatus.DRAFT:
                 await self._documents.update_status(document, previous_status)
             raise
@@ -157,29 +167,54 @@ class AnalysisJobService:
             raise DocumentNotFoundError(f"Документ {document_id} не найден")
         return await self._jobs.cancel(job, document)
 
-    async def get_job(self, project_id: uuid.UUID, document_id: uuid.UUID, job_id: uuid.UUID) -> AnalysisJob:
+    async def get_job(
+        self, project_id: uuid.UUID, document_id: uuid.UUID, job_id: uuid.UUID
+    ) -> AnalysisJob:
         job = await self._jobs.get_by_id(job_id)
         if job is None or job.document_id != document_id:
-            raise DocumentNotFoundError(f"Задача анализа {job_id} не найдена для документа {document_id}")
+            raise DocumentNotFoundError(
+                f"Задача анализа {job_id} не найдена для документа {document_id}"
+            )
         document = await self._documents.get_by_id(document_id)
         if document is None or document.project_id != project_id:
-            raise DocumentNotFoundError(f"Документ {document_id} не найден в проекте {project_id}")
+            raise DocumentNotFoundError(
+                f"Документ {document_id} не найден в проекте {project_id}"
+            )
         return job
+
+    # ------------------------------------------------------------------
+    # Bulk (#10)
+    # ------------------------------------------------------------------
 
     async def bulk_create_jobs_for_project(
         self, project_id: uuid.UUID
-    ) -> list[tuple[uuid.UUID, AnalysisJob | None, str | None]]:
-        """Запустить анализ для всех документов проекта в статусах draft/awaiting_approval.
+    ) -> list[dict]:
+        """Zапустить анализ для всех документов проекта в статусе draft/awaiting_approval.
 
-        Возвращает список кортежей (document_id, job, error_code), где job=None при ошибке.
-        Ошибка создания задачи для одного документа не блокирует остальные.
+        Возвращает list[dict] вида:
+          {"document_id": UUID, "job": AnalysisJob}           — успешный запуск
+          {"document_id": UUID, "job": None, "error": str}    — ошибка
+
+        Ошибка для одного документа не блокирует остальные.
         """
+        # Документы в статусах DRAFT и AWAITING_APPROVAL
+        # (без READY — bulk не перезапускает готовые документы без явного force)
         analyzable_documents = await self._documents.list_analyzable_for_project(project_id)
-        results: list[tuple[uuid.UUID, AnalysisJob | None, str | None]] = []
+        results: list[dict] = []
         for document in analyzable_documents:
             try:
                 job = await self.create_job(project_id, document.id)
-                results.append((document.id, job, None))
-            except (DocumentNotFoundError, InvalidDocumentStatusError, AnalysisAlreadyRunningError) as exc:
-                results.append((document.id, None, exc.__class__.__name__))
+                results.append({"document_id": document.id, "job": job})
+            except (
+                DocumentNotFoundError,
+                InvalidDocumentStatusError,
+                AnalysisAlreadyRunningError,
+            ) as exc:
+                results.append(
+                    {
+                        "document_id": document.id,
+                        "job": None,
+                        "error": exc.__class__.__name__,
+                    }
+                )
         return results

@@ -2,7 +2,11 @@
 Бизнес-логика документов.
 
 ДОБАВЛЕНО:
-- delete_document() — удаляет MinIO-файл (best-effort), затем запись в БД.
+- delete_document()       — удаляет MinIO-файл (best-effort), затем запись в БД.
+- get_original_content()  — читает снапшот текста до правок (#7).
+                            Использует document.original_storage_key, если
+                            он есть (выставляется пайплайном анализа), иначе
+                            отдаёт текущий storage_key (снапшот совпадает с текущим).
 """
 
 import logging
@@ -78,7 +82,9 @@ class DocumentService:
             await self._storage.delete(storage_key)
             raise
 
-    async def list_documents(self, project_id: uuid.UUID, limit: int, offset: int) -> tuple[list[Document], int]:
+    async def list_documents(
+        self, project_id: uuid.UUID, limit: int, offset: int
+    ) -> tuple[list[Document], int]:
         items = await self._documents.list_by_project(project_id, limit=limit, offset=offset)
         total = await self._documents.count_by_project(project_id)
         return items, total
@@ -92,17 +98,25 @@ class DocumentService:
     async def delete_document(self, document: Document) -> None:
         """
         Удаление документа:
-        1. Удаляем файл из MinIO (best-effort — не блокируем удаление при отсутствии файла).
-        2. Удаляем запись из БД — ON DELETE CASCADE уберёт suggestions, analysis_jobs,
-           document_sources.
+        1. Удаляем файл из MinIO (best-effort).
+        2. Удаляем запись из БД — ON DELETE CASCADE уберёт
+           suggestions, analysis_jobs, document_sources.
         """
-        if document.storage_key:
+        keys_to_delete = [
+            k
+            for k in [
+                document.storage_key,
+                getattr(document, "original_storage_key", None),
+            ]
+            if k
+        ]
+        for key in set(keys_to_delete):
             try:
-                await self._storage.delete(document.storage_key)
+                await self._storage.delete(key)
             except Exception:  # noqa: BLE001
                 logger.warning(
                     "Не удалось удалить файл из MinIO при удалении документа",
-                    extra={"storage_key": document.storage_key, "document_id": str(document.id)},
+                    extra={"storage_key": key, "document_id": str(document.id)},
                 )
         await self._documents.delete(document)
 
@@ -114,6 +128,19 @@ class DocumentService:
     async def get_document_content(self, document: Document) -> ParsedDocument:
         raw_bytes = await self._storage.download(document.storage_key)
         return self._parser_registry.parse_by_filename(document.storage_key, raw_bytes)
+
+    async def get_original_content(self, document: Document) -> ParsedDocument:
+        """Pежим «Оригинал» (#7): вернуть текст до правок.
+
+        Пайплайн анализа записывает снапшот исходного файла в MinIO под
+        ключом original_storage_key перед сохранением правок. Если
+        original_storage_key не выставлен (документ не проходил анализ),
+        отдаём текущий контент (оригинал == текущий).
+        """
+        original_key: str | None = getattr(document, "original_storage_key", None)
+        storage_key = original_key or document.storage_key
+        raw_bytes = await self._storage.download(storage_key)
+        return self._parser_registry.parse_by_filename(storage_key, raw_bytes)
 
     async def attach_sources(self, document: Document, sources: list) -> Document:
         return await self._documents.attach_sources(document, sources)
