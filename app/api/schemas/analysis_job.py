@@ -1,3 +1,4 @@
+# P0-7: добавлен partial_success в ответ
 import uuid
 from datetime import datetime
 
@@ -16,4 +17,5 @@ class AnalysisJobResponse(BaseModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    partial_success: bool = False  # P0-7: True если job завершился частично
     model_config = {"from_attributes": True}
