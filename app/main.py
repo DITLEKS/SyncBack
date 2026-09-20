@@ -3,6 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.v1.routers.analysis_jobs import router as analysis_jobs_router
@@ -25,7 +26,10 @@ logger = logging.getLogger("syncscribe.main")
 async def lifespan(app: FastAPI):
     configure_logging()
     settings = get_settings()
-    logger.info("Запуск SyncScribe backend", extra={"env": settings.env, "llm_provider": settings.llm_provider})
+    logger.info(
+        "Запуск SyncScribe backend",
+        extra={"env": settings.env, "llm_provider": settings.llm_provider},
+    )
     yield
     logger.info("Остановка SyncScribe backend")
 
@@ -33,7 +37,30 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
 
-    app = FastAPI(title="SyncScribe API", version="0.1.0", debug=settings.debug, lifespan=lifespan)
+    app = FastAPI(
+        title="SyncScribe API",
+        version="0.1.0",
+        debug=settings.debug,
+        lifespan=lifespan,
+    )
+
+    # CORS должен быть первым middleware — до любых других,
+    # чтобы preflight OPTIONS-запросы обрабатывались корректно.
+    #
+    # allow_credentials=True несовместимо с allow_origins=["*"] в браузерах
+    # (браузер блокирует credentials при wildcard-origin — это стандарт CORS).
+    # В local-окружении это не мешает: токены отправляются явно через
+    # Authorization-header, а не через cookies.
+    # В staging/production задайте CORS_ALLOWED_ORIGINS=https://yourapp.com
+    # — тогда credentials работают штатно.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["X-Request-ID"],
+    )
 
     app.add_middleware(CorrelationIdMiddleware)
 
