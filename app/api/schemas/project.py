@@ -1,11 +1,14 @@
 """
 Схемы проектов.
+
+refactor(#14): поле color валидируется как строго 6-символьный hex через @field_validator.
 """
 
+import re
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # Допустимые цвета карточки проекта (hex без #, 6 символов).
 # Фронт использует их для визуального различения карточек (#11).
@@ -19,6 +22,8 @@ PROJECT_COLORS = [
     "14B8A6",  # teal
     "F97316",  # orange
 ]
+
+_HEX_RE = re.compile(r"^[0-9A-Fa-f]{6}$")
 
 
 class ProjectCreateRequest(BaseModel):
@@ -38,6 +43,16 @@ class ProjectCreateRequest(BaseModel):
         examples=["folder", "📘"],
     )
 
+    @field_validator("color")
+    @classmethod
+    def validate_hex_color(cls, v: str | None) -> str | None:
+        """Принимает только строки вида RRGGBB (без #). None — разрешён."""
+        if v is not None and not _HEX_RE.match(v):
+            raise ValueError(
+                f"color должен быть 6-символьным hex без '#', например '3B82F6'. Получено: '{v}'"
+            )
+        return v
+
 
 class ProjectUpdateRequest(BaseModel):
     """PATCH /projects/{id} — все поля опциональны (partial update)."""
@@ -47,6 +62,15 @@ class ProjectUpdateRequest(BaseModel):
     # P0-#11
     color: str | None = Field(default=None, max_length=6)
     icon: str | None = Field(default=None, max_length=64)
+
+    @field_validator("color")
+    @classmethod
+    def validate_hex_color(cls, v: str | None) -> str | None:
+        if v is not None and not _HEX_RE.match(v):
+            raise ValueError(
+                f"color должен быть 6-символьным hex без '#', например '3B82F6'. Получено: '{v}'"
+            )
+        return v
 
 
 class ProjectResponse(BaseModel):

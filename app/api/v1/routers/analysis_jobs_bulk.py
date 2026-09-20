@@ -3,17 +3,17 @@
 
 POST /projects/{project_id}/documents/analysis-jobs/bulk
 
-#10: файл переписан с нуля. Старые несуществующие символы:
-  AnalysisJobRead, BulkAnalysisJobsResponse, AnalysisJobRepository, DocumentRepository
-— удалены. Файл компилируется и запускается без ImportError.
+refactor(#6): схемы BulkJobResult / BulkAnalysisJobsResponse перенесены
+              в app/api/schemas/analysis_job.py.
 """
-import uuid
-
 from fastapi import APIRouter, Depends, status
-from pydantic import BaseModel
 
 from app.api.deps import get_allowed_project
-from app.api.schemas.analysis_job import AnalysisJobResponse
+from app.api.schemas.analysis_job import (
+    AnalysisJobResponse,
+    BulkAnalysisJobsResponse,
+    BulkJobResult,
+)
 from app.core.dependencies import get_analysis_job_service
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.infrastructure.db.models.project import Project
@@ -23,18 +23,6 @@ router = APIRouter(
     prefix="/projects/{project_id}/documents",
     tags=["analysis-jobs"],
 )
-
-
-class BulkJobResult(BaseModel):
-    document_id: uuid.UUID
-    job: AnalysisJobResponse | None = None
-    error: str | None = None
-
-
-class BulkAnalysisJobsResponse(BaseModel):
-    started: int
-    skipped: int
-    results: list[BulkJobResult]
 
 
 @router.post(
@@ -47,6 +35,7 @@ async def bulk_start_analysis_jobs(
     service: AnalysisJobService = Depends(get_analysis_job_service),
 ) -> BulkAnalysisJobsResponse:
     """Запускает analysis_job для каждого документа проекта в статусе draft.
+
     Документы в in_progress / awaiting_approval / ready пропускаются без ошибки.
     """
     raw_results = await service.bulk_create_jobs_for_project(project.id)
@@ -56,7 +45,7 @@ async def bulk_start_analysis_jobs(
     skipped = 0
 
     for item in raw_results:
-        doc_id: uuid.UUID = item["document_id"]
+        doc_id = item["document_id"]
         job = item.get("job")
         err: str | None = item.get("error")
 
