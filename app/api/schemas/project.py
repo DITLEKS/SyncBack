@@ -13,6 +13,13 @@ class ProjectCreateRequest(BaseModel):
     description: str | None = Field(default=None, max_length=2000)
 
 
+class ProjectUpdateRequest(BaseModel):
+    """PATCH /projects/{id} — все поля опциональны (partial update)."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+
+
 class ProjectResponse(BaseModel):
     id: uuid.UUID
     name: str

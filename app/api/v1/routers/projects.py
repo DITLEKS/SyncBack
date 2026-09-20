@@ -2,16 +2,16 @@
 CRUD проектов. Листинг фильтруется по видимости (ProjectService), точечный доступ —
 через get_allowed_project.
 
-ИСПРАВЛЕНО:
-1. list_projects принимает limit/offset и возвращает Page.
-2. create_project теперь принимает и передаёт опциональный description.
+ДОБАВЛЕНО:
+- PATCH /{project_id} — частичное обновление (переименование / изменение описания).
+- DELETE /{project_id} — каскадное удаление документов (+ MinIO), источников, jobs.
 """
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.api.deps import get_allowed_project, get_current_user
 from app.api.schemas.pagination import Page
-from app.api.schemas.project import ProjectCreateRequest, ProjectResponse
+from app.api.schemas.project import ProjectCreateRequest, ProjectResponse, ProjectUpdateRequest
 from app.core.dependencies import get_project_service
 from app.domain.services.project_service import ProjectService
 from app.infrastructure.db.models.project import Project
@@ -46,3 +46,32 @@ async def list_projects(
 @router.get("/{project_id}", response_model=ProjectResponse)
 async def get_project(project: Project = Depends(get_allowed_project)) -> ProjectResponse:
     return ProjectResponse.model_validate(project)
+
+
+@router.patch("/{project_id}", response_model=ProjectResponse)
+async def update_project(
+    payload: ProjectUpdateRequest,
+    project: Project = Depends(get_allowed_project),
+    project_service: ProjectService = Depends(get_project_service),
+) -> ProjectResponse:
+    """Частичное обновление проекта (переименование, изменение описания)."""
+    if payload.name is None and payload.description is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Необходимо указать хотя бы одно поле для обновления: name или description.",
+        )
+    updated = await project_service.update_project(
+        project,
+        name=payload.name,
+        description=payload.description,
+    )
+    return ProjectResponse.model_validate(updated)
+
+
+@router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_project(
+    project: Project = Depends(get_allowed_project),
+    project_service: ProjectService = Depends(get_project_service),
+) -> None:
+    """Каскадное удаление: документы (+ MinIO-файлы), источники (+ MinIO-файлы), jobs, suggestions."""
+    await project_service.delete_project(project)

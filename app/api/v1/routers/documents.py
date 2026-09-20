@@ -1,14 +1,8 @@
 """
 Загрузка и просмотр документов внутри проекта, привязка источников к документу.
 
-Путь в репозитории: app/api/v1/routers/documents.py
-
-ИСПРАВЛЕНО:
-1. upload_document читает файл через read_upload_within_limit() чанками.
-2. list_documents принимает limit/offset и возвращает Page.
-3. Добавлен GET /{document_id}/content — распарсенный текст документа с позициями
-   секций, нужен фронтенду для инлайн-отображения правок по Suggestion.section_ref
-   прямо в тексте документа вместо отдельного скачивания сырого файла.
+ДОБАВЛЕНО:
+- DELETE /{document_id} — удаление документа + MinIO-файл + каскад suggestions/jobs.
 """
 import logging
 import uuid
@@ -106,6 +100,20 @@ async def get_document(
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return DocumentResponse.model_validate(document)
+
+
+@router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_document(
+    document_id: uuid.UUID,
+    project: Project = Depends(get_allowed_project),
+    document_service: DocumentService = Depends(get_document_service),
+) -> None:
+    """Удаление документа: MinIO-файл + каскад БД (suggestions, analysis_jobs, document_sources)."""
+    try:
+        document = await document_service.get_document(project.id, document_id)
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    await document_service.delete_document(document)
 
 
 @router.get("/{document_id}/content", response_model=DocumentContentResponse)

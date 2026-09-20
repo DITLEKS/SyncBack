@@ -1,19 +1,11 @@
 """
-Бизнес-логика документов: загрузка в Minio, определение формата по расширению,
-получение ссылки на скачивание, получение распарсенного текста для инлайн-отображения правок.
+Бизнес-логика документов.
 
-ИСПРАВЛЕНО:
-1. list_documents принимает limit/offset и возвращает (items, total).
-2. Добавлен get_document_content() — раньше фронтенд мог получить только presigned URL
-   на сырой файл (download), а распарсенный текст с позициями секций (DocumentParser/
-   DocumentSection) использовался только внутри Celery-пайплайна анализа и не отдавался
-   наружу. Без этого фронтенд не может сопоставить suggestion.section_ref с конкретным
-   местом в тексте для инлайн-отображения правок в редакторе.
-ДОБАВЛЕНО (P0-4):
-3. list_all_for_user() — проксирующий метод для глобального списка документов
-   с счётчиками правок.
+ДОБАВЛЕНО:
+- delete_document() — удаляет MinIO-файл (best-effort), затем запись в БД.
 """
 
+import logging
 import uuid
 from pathlib import Path
 from typing import Literal
@@ -28,8 +20,9 @@ from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.repositories.document_repository import DocumentRepository
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 
+logger = logging.getLogger("syncscribe.services.document")
+
 _EXTENSION_TO_FORMAT: dict[str, DocumentFormat] = {
-    ".doc": DocumentFormat.DOC,
     ".docx": DocumentFormat.DOCX,
     ".txt": DocumentFormat.TXT,
     ".md": DocumentFormat.MARKDOWN,
@@ -56,7 +49,7 @@ class DocumentService:
         if document_format is None:
             raise UnsupportedFileFormatError(
                 f"Формат '{suffix or 'без расширения'}' не поддерживается. "
-                f"Допустимые форматы: {', '.join(sorted(e.value for e in DocumentFormat))}"
+                f"Допустимые форматы: docx, txt, md"
             )
         return document_format
 
@@ -95,6 +88,23 @@ class DocumentService:
         if document is None or document.project_id != project_id:
             raise DocumentNotFoundError(f"Документ {document_id} не найден в проекте {project_id}")
         return document
+
+    async def delete_document(self, document: Document) -> None:
+        """
+        Удаление документа:
+        1. Удаляем файл из MinIO (best-effort — не блокируем удаление при отсутствии файла).
+        2. Удаляем запись из БД — ON DELETE CASCADE уберёт suggestions, analysis_jobs,
+           document_sources.
+        """
+        if document.storage_key:
+            try:
+                await self._storage.delete(document.storage_key)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Не удалось удалить файл из MinIO при удалении документа",
+                    extra={"storage_key": document.storage_key, "document_id": str(document.id)},
+                )
+        await self._documents.delete(document)
 
     async def get_download_url(self, document: Document) -> tuple[str, int]:
         expires_in = self._settings.minio_presigned_url_expire_seconds
