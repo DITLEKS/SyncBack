@@ -4,7 +4,7 @@
 
 Целевые пользователи: технические писатели, solution/implementation engineers, presale-инженеры в B2B IT/SaaS/ИБ-компаниях.
 
-Этот README описывает backend MVP после нескольких раундов код-ревью (race conditions, пагинация, оптимизация запросов).
+Этот README описывает backend MVP после всех раундов код-ревью (race conditions, пагинация, оптимизация запросов, DI-фикс дашборда, корректный `user_id` в audit log).
 
 ---
 
@@ -91,7 +91,7 @@ docker compose exec backend ruff check .
 | `document_sources` | Связка документ↔источник | — |
 | `analysis_jobs` | Запуски анализа (pending/processing/success/failed/cancelled) | 1:N `suggestions` |
 | `suggestions` | Точечные правки (add/modify/delete) | заготовки `source_reference`/`confidence_score`/`explanation` под будущую верификацию |
-| `audit_logs` | Журнал действий (accept/reject/download) | по `suggestion_id` или `document_id` (взаимно исключающие, оба nullable, корректная комбинация гарантируется CHECK-constraint `ck_audit_logs_target`) |
+| `audit_logs` | Журнал действий (accept/reject/download) | по `suggestion_id` или `document_id` (взаимно исключающие, оба nullable, корректная комбинация гарантируется CHECK-constraint `ck_audit_logs_target`); поле `user_id` всегда заполняется реальным UUID пользователя из DI — заглушка `00000000-…` полностью устранена |
 
 Роли: только `admin` (видит и модифицирует всё) и `user` (только свои проекты через `owner_id`). Точка расширения на будущий `project_members` — единая функция `get_allowed_project`.
 
@@ -129,11 +129,18 @@ POST   /projects/{project_id}/documents/{document_id}/suggestions/{suggestion_id
 POST   /projects/{project_id}/documents/{document_id}/suggestions/bulk-accept
 POST   /projects/{project_id}/documents/{document_id}/suggestions/finalize
 
+GET    /workspace/dashboard                                       (статистика рабочего пространства)
 GET    /system/llm-health                                         (диагностика провайдера)
 GET    /health                                                    (без префикса /api/v1)
 ```
 
-**Пагинация**: все list-эндпоинты (`GET /projects`, `/documents`, `/sources`, `/suggestions`) принимают запросные параметры `limit` (по умолчанию 50, максимум 200) и `offset` (по умолчанию 0), возвращая объект `{"items": [...], "total": N, "limit": L, "offset": O}` (схема `Page[T]` в `app/api/schemas/pagination.py`) вместо плоского списка — без этого объём ответа рос бы линейно без ограничения при росте числа документов/правок у клиента.
+**Пагинация**: все list-эндпоинты (`GET /projects`, `/documents`, `/sources`, `/suggestions`) принимают запросные параметры `limit` (по умолчанию 50, максимум 200) и `offset` (по умолчанию 0), возвращая объект `{"items": [...], "total": N, "limit": L, "offset": O}` (схема `Page[T]` в `app/api/schemas/pagination.py`). `limit`/`offset` передаются напрямую в репозиторий — срезка выполняется на уровне SQL, а не в Python.
+
+**Сериализация списков**: `list_documents` использует `TypeAdapter[list[DocumentResponse]]` — один проход по результату запроса вместо цикличных `model_validate` (устранено после кода-ревью PERF-4).
+
+## Дашборд рабочего пространства
+
+`GET /workspace/dashboard` возвращает агрегированную статистику: общее число документов, документы в ожидании подтверждения, готовые документы и итоговый коэффициент. Данные получаются одним SQL-запросом с `COUNT(*) FILTER(WHERE ...)` вместо трёх отдельных обращений к БД — это устраняет 2 лишних RTT на каждую загрузку дашборда (устранено после кода-ревью PERF-1). `DashboardService` получает корректно инициализированный `DashboardRepository(session)` через DI; zombie-файл `app/services/dashboard_service.py` удалён (устранено CR-1, CR-2).
 
 ## Жизненный цикл документа
 
@@ -157,7 +164,7 @@ PostgreSQL. Активную задачу можно отменить через
 2. `run_analysis_job` переводит job/документ в `processing` и запускает по одной под-задаче `process_source_for_analysis_job` на каждый привязанный источник (через Celery `group`/`chord`).
 3. Каждая под-задача независимо парсит документ, получает текст источника через `SourceConnector`, вызывает `LLMClient.generate_suggestions()` и сохраняет правки.
 4. **Retry/dead-letter — по каждому источнику отдельно**: при сбое LLM/парсинга под-задача ретраится с экспоненциальной задержкой (`LLM_TIMEOUT_SECONDS × 2^retries`) до `LLM_MAX_RETRIES` раз; после исчерпания попыток запись уходит в Redis-список `syncscribe:analysis:dead_letter`.
-5. `finalize_analysis_job` агрегирует результат: `SUCCESS`, если хотя бы один источник дал правки; `FAILED` с кодом `ALL_SOURCES_FAILED` или `NO_SOURCES_ATTACHED` в остальных случаях. При гонке параллельных `analysis_jobs` на одном документе `document.current_analysis_job_id` обновляется только если завершающийся job действительно новее уже сохранённого текущего.
+5. `finalize_analysis_job` агрегирует результат: `SUCCESS`, если хотя бы один источник дал правки; `FAILED` с кодом `ALL_SOURCES_FAILED` или `NO_SOURCES_ATTACHED` в остальных случаях. При гонке параллельных `analysis_jobs` на одном документе `document.current_analysis_job_id` обновляется только если завершающийся job действительно новее уже сохранённого текущего. Дублирующийся блок экспорта вынесен в приватный хэлпер `_run_export()` (устранено CODE-3).
 6. **None-guard'ы**: все три этапа (`_start_job`, `_process_source`, `_finalize_job`) проверяют job/document/source на `None` после `get_by_id` — если запись удалена между постановкой задачи в очередь и выполнением (или Celery повторно доставил задачу после `acks_late`), подзадача возвращает контролируемый `"failed"`-результат вместо `AttributeError`.
 
 ## Абстракции и точки расширения
@@ -183,6 +190,7 @@ PostgreSQL. Активную задачу можно отменить через
 - Структурированные логи без секретов — редактирование рекурсивно обходит вложенные dict/list, а не только верхний уровень `extra`.
 - `X-Request-ID` санитизируется по безопасному шаблону — произвольное входящее значение заголовка не попадает в ответ напрямую.
 - Общий exception handler для доменных ошибок — исключает утечку внутренних деталей (стектрейсов) в ответах API.
+- `apply_review()` принимает `user_id: uuid.UUID` из DI и записывает его в `audit_log` — заглушка `00000000-0000-0000-0000-000000000000` устранена (устранено PERF-2).
 
 ## Осознанные упрощения MVP (зафиксированные ограничения)
 
@@ -218,11 +226,11 @@ SyncBack/
     │   ├── deps.py
     │   ├── upload_utils.py
     │   ├── schemas/{auth,project,document,source,analysis_job,suggestion,pagination}.py
-    │   └── v1/routers/{auth,projects,documents,sources,analysis_jobs,suggestions,system}.py
+    │   └── v1/routers/{auth,projects,documents,sources,analysis_jobs,suggestions,system,workspace}.py
     ├── domain/
     │   ├── exceptions.py
     │   ├── interfaces/{file_storage,llm_client,source_connector,document_parser,document_exporter}.py
-    │   └── services/{auth,project,document,source,audit_log,analysis_job,suggestion,document_export}_service.py
+    │   └── services/{auth,project,document,source,audit_log,analysis_job,suggestion,document_export,dashboard}_service.py
     ├── infrastructure/
     │   ├── db/{base,session,models/*,repositories/*}.py
     │   ├── security/{password_hasher,jwt_handler,login_rate_limiter}.py
