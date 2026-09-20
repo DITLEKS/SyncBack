@@ -1,20 +1,18 @@
-"""Просмотр и точечное подтверждение/отклонение правок, bulk-accept, finalize.
+"""
+Просмотр и точечное подтверждение/отклонение правок, bulk-accept, finalize.
 
-ИСПРАВЛЕНО (rev-3):
-- Баг #1: accept/reject теперь вызывают публичные методы сервиса
-  accept_suggestion() / reject_suggestion() вместо несуществующего decide().
-- Баг #2: убрана _assert_document_awaiting_approval, которая обращалась к
-  приватному _documents репозиторию напрямую и делала лишний SELECT.
-  Проверка статуса AWAITING_APPROVAL выполняется внутри сервиса (через _decide)
-  и пробрасывается как InvalidDocumentStatusError → 409 Conflict.
-- Баг #3: убраны мёртвые импорты DocumentRepository / get_document_service,
-  оставшиеся от предыдущей версии. finalize_review корректно работает в
-  MVP-режиме (export_service=None → ленивый экспорт при /export).
+ИСПРАВЛЕНО (rev-3): accept/reject → публичные методы сервиса;
+убрана _assert_document_awaiting_approval; убраны мёртвые импорты.
+
+P0-2 (rev-4): добавлен PUT /review с оптимистической блокировкой через
+заголовок If-Match. Клиент присылает текущий review_version в виде
+'If-Match: <version>'. При несовпадении → 412 Precondition Failed.
+finalize_review в сервисе инкрементирует review_version атомарно.
 """
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 
 from app.api.deps import get_allowed_project, get_current_user
 from app.api.schemas.document import DocumentResponse
@@ -25,6 +23,7 @@ from app.domain.exceptions import (
     DocumentNotFoundError,
     InvalidDocumentStatusError,
     ReviewNotCompleteError,
+    StaleReviewVersionError,
     SuggestionAlreadyDecidedError,
     SuggestionNotFoundError,
 )
@@ -88,10 +87,6 @@ async def accept_suggestion(
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
     audit_log_service: AuditLogService = Depends(get_audit_log_service),
 ) -> SuggestionResponse:
-    """Принять правку (переход документа в READY не выполняется здесь — только через /finalize).
-
-    Статус AWAITING_APPROVAL проверяется внутри сервиса; при нарушении → 409 Conflict.
-    """
     try:
         suggestion = await suggestion_service.accept_suggestion(
             project.id, document_id, suggestion_id, current_user.id
@@ -115,10 +110,6 @@ async def reject_suggestion(
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
     audit_log_service: AuditLogService = Depends(get_audit_log_service),
 ) -> SuggestionResponse:
-    """Отклонить правку.
-
-    Статус AWAITING_APPROVAL проверяется внутри сервиса; при нарушении → 409 Conflict.
-    """
     try:
         suggestion = await suggestion_service.reject_suggestion(
             project.id, document_id, suggestion_id, current_user.id
@@ -160,16 +151,57 @@ async def finalize_review(
 ) -> DocumentResponse:
     """Перевести документ в READY (переход №8 статусной модели).
 
-    Условие: статус AWAITING_APPROVAL и ни одной правки в PENDING.
-    Если все правки отклонены — документ всё равно переходит в READY.
-
-    MVP: export_service не передаётся → ленивый экспорт при вызове /export.
-    При необходимости строгой материализации — передать export_service явно.
+    MVP: export_service не передаётся → ленивый экспорт при /export.
     """
     try:
         document = await suggestion_service.finalize_review(project.id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return DocumentResponse.model_validate(document)
+
+
+# ---------------------------------------------------------------------------
+# P0-2: PUT /review — финализация с оптимистической блокировкой
+# ---------------------------------------------------------------------------
+
+@router.put("/review", response_model=DocumentResponse)
+async def put_review(
+    document_id: uuid.UUID,
+    project: Project = Depends(get_allowed_project),
+    suggestion_service: SuggestionService = Depends(get_suggestion_service),
+    if_match: str | None = Header(default=None, alias="If-Match"),
+) -> DocumentResponse:
+    """Финализировать review с оптимистической блокировкой.
+
+    Клиент обязан передать заголовок ``If-Match: <review_version>``.
+    Значение должно совпадать с текущим ``review_version`` документа.
+    При несовпадении → **412 Precondition Failed**.
+
+    Эндпоинт идемпотентен при повторном вызове с тем же версионным
+    значением (если документ уже в READY — возвращает 200 без ошибки).
+    """
+    if if_match is None:
+        raise HTTPException(
+            status_code=status.HTTP_428_PRECONDITION_REQUIRED,
+            detail="Заголовок If-Match обязателен для PUT /review",
+        )
+    try:
+        client_version = int(if_match.strip('"').strip())
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Заголовок If-Match должен содержать целочисленный review_version, получено: {if_match!r}",
+        )
+    try:
+        document = await suggestion_service.finalize_review_versioned(
+            project.id, document_id, client_version
+        )
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except StaleReviewVersionError as exc:
+        raise HTTPException(status_code=status.HTTP_412_PRECONDITION_FAILED, detail=str(exc)) from exc
     except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return DocumentResponse.model_validate(document)

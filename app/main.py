@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from app.api.v1.routers.analysis_jobs import router as analysis_jobs_router
 from app.api.v1.routers.auth import router as auth_router
 from app.api.v1.routers.documents import router as documents_router
+from app.api.v1.routers.editor import router as editor_router  # P0-8
 from app.api.v1.routers.my_documents import router as my_documents_router
 from app.api.v1.routers.projects import router as projects_router
 from app.api.v1.routers.sources import router as sources_router
@@ -44,15 +45,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS должен быть первым middleware — до любых других,
-    # чтобы preflight OPTIONS-запросы обрабатывались корректно.
-    #
-    # allow_credentials=True несовместимо с allow_origins=["*"] в браузерах
-    # (браузер блокирует credentials при wildcard-origin — это стандарт CORS).
-    # В local-окружении это не мешает: токены отправляются явно через
-    # Authorization-header, а не через cookies.
-    # В staging/production задайте CORS_ALLOWED_ORIGINS=https://yourapp.com
-    # — тогда credentials работают штатно.
+    # CORS — первый middleware, до любых других.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_allowed_origins,
@@ -75,11 +68,12 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(projects_router, prefix="/api/v1")
-    app.include_router(my_documents_router, prefix="/api/v1")  # P0-4: GET /api/v1/documents
+    app.include_router(my_documents_router, prefix="/api/v1")  # P0-4
     app.include_router(documents_router, prefix="/api/v1")
     app.include_router(sources_router, prefix="/api/v1")
     app.include_router(analysis_jobs_router, prefix="/api/v1")
     app.include_router(suggestions_router, prefix="/api/v1")
+    app.include_router(editor_router, prefix="/api/v1")  # P0-8
     app.include_router(system_router, prefix="/api/v1")
 
     return app
