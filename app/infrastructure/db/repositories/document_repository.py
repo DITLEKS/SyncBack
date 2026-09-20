@@ -5,6 +5,10 @@ P0-2: добавлен метод finalize_and_bump_version() — атомарн
 статуса документа в READY + инкремент review_version в одном запросе.
 Если между SELECT и UPDATE версия изменилась (гонка) — UPDATE не найдёт строку
 (WHERE review_version = :expected) и выбросит StaleReviewVersionError.
+
+fix/review-critical-p0:
+- Добавлен метод bump_review_version() — инкремент review_version без смены статуса.
+  Используется в SuggestionService.apply_review() (PUT /editor/review).
 """
 from __future__ import annotations
 
@@ -70,6 +74,19 @@ class DocumentRepository:
         await self._session.refresh(document)
         return document
 
+    async def list_analyzable_for_project(
+        self, project_id: uuid.UUID
+    ) -> list[Document]:
+        """Вернуть документы проекта в статусах DRAFT или AWAITING_APPROVAL."""
+        result = await self._session.execute(
+            select(Document)
+            .where(
+                Document.project_id == project_id,
+                Document.status.in_((DocumentStatus.DRAFT, DocumentStatus.AWAITING_APPROVAL)),
+            )
+        )
+        return list(result.scalars().all())
+
     async def list_all_for_user(
         self,
         owner_id: uuid.UUID,
@@ -83,7 +100,6 @@ class DocumentRepository:
     ) -> tuple[list[dict], int]:
         """Список документов пользователя с агрегированными счётчиками правок."""
         from app.infrastructure.db.models.project import Project
-        from app.infrastructure.db.models.source import Source
 
         q = (
             select(Document)
@@ -139,6 +155,38 @@ class DocumentRepository:
         if updated is None:
             raise StaleReviewVersionError(
                 "Гонка при финализации: версия документа изменилась параллельным запросом. "
+                "Обновите страницу и повторите."
+            )
+        await self._session.flush()
+        return updated
+
+    async def bump_review_version(self, document: Document) -> Document:
+        """Атомарно инкрементировать review_version без смены статуса документа.
+
+        Используется в apply_review (PUT /editor/review) — пользователь сохраняет
+        часть правок, не завершая review целиком.
+
+        UPDATE documents
+           SET review_version = review_version + 1
+         WHERE id = :id AND review_version = :expected_version
+
+        Если версия изменилась параллельным запросом — StaleReviewVersionError → 409.
+        """
+        expected_version = document.review_version
+        stmt = (
+            update(Document)
+            .where(
+                Document.id == document.id,
+                Document.review_version == expected_version,
+            )
+            .values(review_version=Document.review_version + 1)
+            .returning(Document)
+        )
+        result = await self._session.execute(stmt)
+        updated = result.scalar_one_or_none()
+        if updated is None:
+            raise StaleReviewVersionError(
+                "Гонка при сохранении правок: версия документа изменилась параллельным запросом. "
                 "Обновите страницу и повторите."
             )
         await self._session.flush()
