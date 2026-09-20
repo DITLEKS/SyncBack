@@ -3,9 +3,13 @@
 Каждое исключение соответствует одной бизнес-ситуации и конвертируется
 в HTTP-ответ на уровне роутера или глобального exception handler.
 
-fix/review-critical-p0:
-- Добавлены все исключения, которые импортируются сервисами, но отсутствовали.
-- StaleReviewVersionError = алиас ReviewVersionConflictError (обратная совместимость).
+ИСПРАВЛЕНО (review):
+- Удалены дублирующие объявления классов (InvalidDocumentStatusError,
+  AnalysisJobNotCancellableError, ReviewNotCompleteError).
+- Удалены объявления через несуществующий DomainError.
+- Добавлен StaleReviewVersionError как алиас ReviewVersionConflictError
+  для обратной совместимости с импортами в suggestion_service.py.
+- Добавлен SourceLockError и OptimisticLockError в единственном экземпляре.
 """
 
 
@@ -35,6 +39,12 @@ class FileTooLargeError(SyncBackError):
 
 class UnsupportedFormatError(SyncBackError):
     """Формат файла не поддерживается парсером (например, .doc)."""
+
+
+class SourceLockError(SyncBackError):
+    """Изменение источников запрещено, пока документ находится
+    в статусе IN_PROGRESS или AWAITING_APPROVAL.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -93,32 +103,18 @@ class ReviewNotCompleteError(SyncBackError):
 
 
 class ReviewVersionConflictError(SyncBackError):
-    """P0-2: review_version в БД изменилась пока клиент редактировал документ.
+    """review_version в БД изменилась, пока клиент редактировал документ.
 
     Сигнализирует роутеру вернуть HTTP 409 Conflict.
     """
 
 
-class InvalidDocumentStatusError(DomainError):
-    pass
+# Алиас для обратной совместимости — suggestion_service импортирует оба имени.
+StaleReviewVersionError = ReviewVersionConflictError
 
 
-class AnalysisJobNotCancellableError(DomainError):
-    pass
-
-
-class ReviewNotCompleteError(DomainError):
-    pass
-
-
-class OptimisticLockError(DomainError):
-    """P0-2: версия ревью на клиенте устарела — документ был изменён параллельным запросом.
+class OptimisticLockError(SyncBackError):
+    """Версия ревью на клиенте устарела — документ был изменён параллельным запросом.
 
     Клиент должен перезагрузить состояние (GET /editor) и повторить сохранение.
-    """
-
-
-class SourceLockError(DomainError):
-    """P0-6: изменение источников запрещено, пока документ находится
-    в статусе IN_PROGRESS или AWAITING_APPROVAL.
     """

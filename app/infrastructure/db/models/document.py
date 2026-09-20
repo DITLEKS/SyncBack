@@ -1,6 +1,8 @@
 """
 P0-2: добавлена колонка review_version (Integer, default=0) для
-оптимистической блокировки PUT /review (If-Match / ETag).
+оптимистической блокировки PUT /review.
+
+ИСПРАВЛЕНО (review): удалён дублирующий столбец review_version.
 """
 import uuid
 
@@ -22,13 +24,12 @@ class Document(Base):
     storage_key = Column("storage_key", nullable=False)
     size_bytes = Column("size_bytes", nullable=False)
     uploaded_at = Column("uploaded_at", nullable=False)
-    status = Column(Enum(DocumentStatus, name="document_status"), nullable=False, default=DocumentStatus.DRAFT)
+    status = Column(
+        Enum(DocumentStatus, name="document_status"),
+        nullable=False,
+        default=DocumentStatus.DRAFT,
+    )
     current_analysis_job_id = Column(UUID(as_uuid=True), ForeignKey("analysis_jobs.id"))
-    # P0-2: версия review для оптимистической блокировки.
-    # Инкрементируется при каждом вызове PUT /review (finalize_review).
-    # Клиент передаёт текущее значение в заголовке If-Match; при несовпадении → 412.
-    review_version = Column(Integer, nullable=False, default=0, server_default="0")
-
     # P0-2: версия ревью для оптимистической блокировки.
     # Инкрементируется при каждом атомарном PUT /review.
     # Клиент обязан передать текущее значение; при расхождении — 409.

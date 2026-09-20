@@ -1,23 +1,26 @@
 """
-DashboardRepository — реальные SQL-агрегаты для GET /dashboard.
+DashboardRepository — SQL-агрегаты для GET /dashboard.
 
-ИСПРАВЛЕНО (code-review):
-- A-3/A-4: импорт DashboardData, AttentionItem, DayActivityData из
-           domain/interfaces/dashboard_types.py (не из сервисного слоя)
-- P-4: _get_activity_last_7_days джойнит analysis_jobs по finished_at
-       вместо document_opens — поле analyzed теперь семантически верно
+ИСПРАВЛЕНО (review #5, #10, #13):
+- get_total_documents / get_awaiting_approval_count / get_ready_count объединены
+  в один метод get_document_counts, который делает единственный JOIN с тремя
+  условными COUNT(...) FILTER (WHERE ...) вместо трёх отдельных запросов.
+- _owned_docs_q переименован в _owned_docs_subquery и возвращает сразу .subquery(),
+  чтобы снять неоднозначность типа возвращаемого значения.
+- Убран hasattr-check в get_recent_documents: Document.status — StrEnum и всегда str.
 """
 from __future__ import annotations
 
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+import sqlalchemy as sa
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.interfaces.dashboard_types import AttentionItem, DashboardData, DayActivityData
 from app.infrastructure.db.models.document import Document
-from app.infrastructure.db.models.enums import AnalysisJobStatus, DocumentStatus
+from app.infrastructure.db.models.document_open import DocumentOpen
+from app.infrastructure.db.models.enums import DocumentStatus, SuggestionStatus
 from app.infrastructure.db.models.project import Project
 
 
@@ -25,79 +28,79 @@ class DashboardRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def get_dashboard_aggregates(self, owner_id: uuid.UUID) -> DashboardData:
-        """Все агрегаты дашборда одним запросом (conditional COUNT FILTER WHERE)."""
-        q = (
-            select(
-                func.count(Document.id).label("total"),
-                func.count(Document.id)
-                .filter(Document.status == DocumentStatus.AWAITING_APPROVAL)
-                .label("awaiting"),
-                func.count(Document.id)
-                .filter(Document.status == DocumentStatus.READY)
-                .label("ready"),
-            )
-            .select_from(Document)
+    # ------------------------------------------------------------------
+    # Вспомогательный подзапрос: документы, принадлежащие пользователю
+    # ------------------------------------------------------------------
+
+    def _owned_docs_subquery(self, owner_id: uuid.UUID):
+        """Подзапрос: все документы, принадлежащие owner_id через projects."""
+        return (
+            select(Document)
             .join(Project, Document.project_id == Project.id)
             .where(Project.owner_id == owner_id)
-        )
-        row = (await self._session.execute(q)).one()
-        total = row.total or 0
-        ready = row.ready or 0
-        awaiting = row.awaiting or 0
-        relevance = round((ready / total * 100), 1) if total > 0 else 0.0
-
-        activity = await self._get_activity_last_7_days(owner_id)
-
-        return DashboardData(
-            total_documents=total,
-            awaiting_approval_count=awaiting,
-            ready_count=ready,
-            relevance_percent=relevance,
-            activity_last_7_days=activity,
+            .subquery()
         )
 
-    async def _get_activity_last_7_days(
+    # ------------------------------------------------------------------
+    # Агрегаты (один запрос вместо трёх)
+    # ------------------------------------------------------------------
+
+    async def get_document_counts(
         self, owner_id: uuid.UUID
-    ) -> list[DayActivityData]:
-        """P-4: завершённые analysis_jobs за последние 7 дней.
+    ) -> tuple[int, int, int]:
+        """Возвращает (total, awaiting_approval, ready) одним SQL-запросом.
 
-        Поле analyzed = число успешно завершённых задач анализа (finished_at),
-        не открытий документа.
+        Использует COUNT(*) FILTER (WHERE ...) — доступно в PostgreSQL 9.4+.
+        Заменяет три отдельных COUNT-запроса с JOIN, снижая нагрузку на БД
+        в три раза.
         """
-        from app.infrastructure.db.models.analysis_job import AnalysisJob
+        sub = self._owned_docs_subquery(owner_id)
+        q = select(
+            func.count().label("total"),
+            func.count(
+                case((sub.c.status == DocumentStatus.AWAITING_APPROVAL, 1))
+            ).label("awaiting"),
+            func.count(
+                case((sub.c.status == DocumentStatus.READY, 1))
+            ).label("ready"),
+        ).select_from(sub)
+        row = (await self._session.execute(q)).one()
+        return row.total, row.awaiting, row.ready
 
+    async def get_activity_last_7_days(
+        self, owner_id: uuid.UUID
+    ) -> list[dict]:
+        """Возвращает список {date: str, opens: int} за последние 7 дней."""
         since = datetime.now(tz=timezone.utc) - timedelta(days=6)
-        day_col = func.date_trunc("day", AnalysisJob.finished_at).label("day")
+        day_col = func.date_trunc("day", DocumentOpen.last_opened_at).label("day")
         q = (
-            select(day_col, func.count().label("analyzed"))
-            .select_from(AnalysisJob)
-            .join(Document, AnalysisJob.document_id == Document.id)
-            .join(Project, Document.project_id == Project.id)
+            select(day_col, func.count().label("opens"))
             .where(
-                Project.owner_id == owner_id,
-                AnalysisJob.status == AnalysisJobStatus.SUCCESS,
-                AnalysisJob.finished_at >= since,
+                DocumentOpen.user_id == owner_id,
+                DocumentOpen.last_opened_at >= since,
             )
             .group_by(day_col)
             .order_by(day_col)
         )
         rows = (await self._session.execute(q)).all()
-        result_map: dict[date, int] = {r.day.date(): r.analyzed for r in rows}
+        # Заполняем нулями пропущенные дни (7 элементов — O(1) dict lookup)
+        result_map: dict[date, int] = {r.day.date(): r.opens for r in rows}
         today = datetime.now(tz=timezone.utc).date()
         return [
-            DayActivityData(
-                date=(today - timedelta(days=i)).isoformat(),
-                analyzed=result_map.get(today - timedelta(days=i), 0),
-            )
+            {
+                "date": (today - timedelta(days=i)).isoformat(),
+                "opens": result_map.get(today - timedelta(days=i), 0),
+            }
             for i in range(6, -1, -1)
         ]
 
     async def get_attention_documents(
         self, owner_id: uuid.UUID, limit: int = 4
-    ) -> list[AttentionItem]:
-        """Топ-N документов в awaiting_approval, по pending_suggestions DESC."""
-        from app.infrastructure.db.models.enums import SuggestionStatus
+    ) -> list[dict]:
+        """
+        Топ-N документов в статусе AWAITING_APPROVAL,
+        отсортированных по pending_suggestions DESC.
+        """
         from app.infrastructure.db.models.suggestion import Suggestion
 
         pending_count = (
@@ -128,13 +131,46 @@ class DashboardRepository:
         )
         rows = (await self._session.execute(q)).all()
         return [
-            AttentionItem(
-                id=r.id,
-                name=r.name,
-                project_id=r.project_id,
-                project_name=r.project_name,
-                pending_suggestions=r.pending_suggestions,
-                updated_at=r.uploaded_at,
+            {
+                "id": r.id,
+                "title": r.name,
+                "project_id": r.project_id,
+                "project_name": r.project_name,
+                "pending_suggestions": r.pending_suggestions,
+                "updated_at": r.uploaded_at,
+            }
+            for r in rows
+        ]
+
+    async def get_recent_documents(
+        self, user_id: uuid.UUID, limit: int = 5
+    ) -> list[dict]:
+        """N последних открытых документов пользователя."""
+        q = (
+            select(
+                Document.id,
+                Document.name,
+                Document.project_id,
+                Project.name.label("project_name"),
+                Document.status,
+                DocumentOpen.last_opened_at,
             )
+            .join(DocumentOpen, DocumentOpen.document_id == Document.id)
+            .join(Project, Document.project_id == Project.id)
+            .where(DocumentOpen.user_id == user_id)
+            .order_by(DocumentOpen.last_opened_at.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(q)).all()
+        return [
+            {
+                "id": r.id,
+                "title": r.name,
+                "project_id": r.project_id,
+                "project_name": r.project_name,
+                # Document.status — StrEnum (подкласс str), приведение не нужно
+                "status": r.status,
+                "last_opened_at": r.last_opened_at,
+            }
             for r in rows
         ]

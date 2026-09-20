@@ -1,21 +1,17 @@
 """
-Бизнес-логика задач анализа.
+Сервис управления заданиями анализа.
 
-ИСПРАВЛЕНО (code-review):
-- C-3: create_job не делает двойной SELECT document — проверка idempotency_key
-        переиспользует уже загруженный объект
-- A-1: конструктор принимает IAnalysisJobRepository / IDocumentRepository
-- P-3: bulk_create_jobs_for_project использует asyncio.gather вместо
-        последовательных await — параллельный запуск N задач
-- Q-1: исправлены опечатки в docstring (N→Н, V→В, C→С, Z→З)
-- Q-4: логика started_at/finished_at перенесена из репозитория в update_status
-- Q-7: bulk_create_jobs_for_project возвращает list[BulkJobResult]
+ИСПРАВЛЕНО (review #4, #9, #11):
+- Добавлен _get_document_or_raise — единый хелпер для get_by_id + ownership check.
+  Устраняет дублирование этого паттерна в 4 местах.
+- Бизнес-логика переходов статусов (mark_dispatched, mark_job_queue_unavailable,
+  cancel_job) перенесена из репозитория в сервис: сервис мутирует поля job/document,
+  репозиторий только вызывает save_with_document / save.
+- find_job_by_idempotency_key помечен как внутренний хелпер (убран как публичный
+  метод — вся идемпотентность обработана внутри create_job).
 """
-from __future__ import annotations
-
-import asyncio
 import uuid
-from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy.exc import IntegrityError
 
@@ -25,11 +21,16 @@ from app.domain.exceptions import (
     DocumentNotFoundError,
     InvalidDocumentStatusError,
 )
-from app.domain.interfaces.repository_interfaces import IAnalysisJobRepository, IDocumentRepository
 from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.enums import AnalysisJobStatus, DocumentStatus
+from app.infrastructure.db.repositories.analysis_job_repository import AnalysisJobRepository
+from app.infrastructure.db.repositories.document_repository import DocumentRepository
 
+# Статусы документа, из которых разрешён запуск анализа:
+#   DRAFT              — первичный / повторный запуск (переходы №2, №7→2)
+#   AWAITING_APPROVAL  — повторный запуск после изменений (переход №9)
+#   READY              — разрешён только с force=True (#9 роутер)
 _ANALYSIS_ALLOWED_STATUSES = (
     DocumentStatus.DRAFT,
     DocumentStatus.AWAITING_APPROVAL,
@@ -37,39 +38,26 @@ _ANALYSIS_ALLOWED_STATUSES = (
 )
 
 
-@dataclass
-class BulkJobResult:
-    """Q-7: типизированный результат bulk_create_jobs_for_project."""
-
-    document_id: uuid.UUID
-    job: AnalysisJob | None
-    error: str | None = None
-
-    @property
-    def success(self) -> bool:
-        return self.job is not None
-
-
 class AnalysisJobService:
     def __init__(
         self,
-        analysis_job_repository: IAnalysisJobRepository,
-        document_repository: IDocumentRepository,
-    ):
+        analysis_job_repository: AnalysisJobRepository,
+        document_repository: DocumentRepository,
+    ) -> None:
         self._jobs = analysis_job_repository
         self._documents = document_repository
 
     # ------------------------------------------------------------------
-    # Document helpers
+    # Private helpers
     # ------------------------------------------------------------------
 
-    async def get_document_for_job(
+    async def _get_document_or_raise(
         self, project_id: uuid.UUID, document_id: uuid.UUID
     ) -> Document:
-        """Вернуть ORM-документ для проверки статуса (#9).
+        """Загрузить документ и проверить принадлежность проекту.
 
-        Используется роутером до create_job, чтобы проверить READY-гард
-        без force=True до каких-либо изменений в БД.
+        Выбрасывает DocumentNotFoundError, если документ не найден
+        или не принадлежит указанному проекту.
         """
         document = await self._documents.get_by_id(document_id)
         if document is None or document.project_id != project_id:
@@ -93,19 +81,15 @@ class AnalysisJobService:
         Разрешённые исходные статусы документа (таблица переходов):
           • DRAFT             → переход №2 (первичный/ручной запуск)
           • AWAITING_APPROVAL → переход №9 (повторный запуск)
-          • READY             → разрешен только с force=True (#9),
+          • READY             → разрешён только с force=True (#9),
                                роутер проверяет это до вызова create_job
 
-        C-3: один SELECT на document — idempotency-check переиспользует
-        уже загруженный объект, без повторного get_by_id.
+        При повторном запуске из AWAITING_APPROVAL/READY документ сбрасывается
+        в DRAFT (пайплайн всегда стартует из DRAFT → IN_PROGRESS).
         """
-        document = await self._documents.get_by_id(document_id)
-        if document is None or document.project_id != project_id:
-            raise DocumentNotFoundError(
-                f"Документ {document_id} не найден в проекте {project_id}"
-            )
+        document = await self._get_document_or_raise(project_id, document_id)
 
-        # C-3: idempotency-check без повторного SELECT document
+        # Idempotency-check (P0-7): вернуть существующий job без создания дубля
         if idempotency_key is not None:
             existing = await self._jobs.get_by_idempotency_key(document_id, idempotency_key)
             if existing is not None:
@@ -142,19 +126,35 @@ class AnalysisJobService:
             raise
 
     async def mark_dispatched(self, job: AnalysisJob, task_id: str) -> AnalysisJob:
+        """Зафиксировать отправку задачи в очередь: проставить celery_task_id и
+        перевести документ в IN_PROGRESS, если job ещё активен.
+        """
         document = await self._documents.get_by_id(job.document_id)
         if document is None:
             raise DocumentNotFoundError(f"Документ {job.document_id} не найден")
-        return await self._jobs.mark_dispatched(job, document, task_id)
+        await self._session_refresh(job)
+        job.celery_task_id = task_id
+        if (
+            job.status in (AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING)
+            and document.current_analysis_job_id == job.id
+        ):
+            document.status = DocumentStatus.IN_PROGRESS
+        return await self._jobs.save_with_document(job, document)
 
     async def mark_job_queue_unavailable(
         self, job: AnalysisJob, error_message: str | None = None
     ) -> AnalysisJob:
-        """Очередь недоступна — задача не поставлена, документ остаётся в DRAFT (переход №3)."""
+        """Очередь недоступна — задача не поставлена, документ остаётся в DRAFT."""
         document = await self._documents.get_by_id(job.document_id)
         if document is None:
             raise DocumentNotFoundError(f"Документ {job.document_id} не найден")
-        return await self._jobs.mark_failed_queue_unavailable(job, document, error_message)
+        job.status = AnalysisJobStatus.FAILED
+        job.error_code = "QUEUE_UNAVAILABLE"
+        job.error_message = error_message
+        job.finished_at = datetime.now(UTC)
+        if document.current_analysis_job_id == job.id:
+            document.status = DocumentStatus.DRAFT
+        return await self._jobs.save_with_document(job, document)
 
     async def cancel_job(
         self, project_id: uuid.UUID, document_id: uuid.UUID, job_id: uuid.UUID
@@ -168,7 +168,13 @@ class AnalysisJobService:
         document = await self._documents.get_by_id(document_id)
         if document is None:
             raise DocumentNotFoundError(f"Документ {document_id} не найден")
-        return await self._jobs.cancel(job, document)
+        job.status = AnalysisJobStatus.CANCELLED
+        job.error_code = "ANALYSIS_CANCELLED"
+        job.error_message = "Анализ отменён"
+        job.finished_at = datetime.now(UTC)
+        if document.current_analysis_job_id == job.id:
+            document.status = DocumentStatus.DRAFT
+        return await self._jobs.save_with_document(job, document)
 
     async def get_job(
         self, project_id: uuid.UUID, document_id: uuid.UUID, job_id: uuid.UUID
@@ -178,40 +184,9 @@ class AnalysisJobService:
             raise DocumentNotFoundError(
                 f"Задача анализа {job_id} не найдена для документа {document_id}"
             )
-        document = await self._documents.get_by_id(document_id)
-        if document is None or document.project_id != project_id:
-            raise DocumentNotFoundError(
-                f"Документ {document_id} не найден в проекте {project_id}"
-            )
+        # Ownership check через _get_document_or_raise
+        await self._get_document_or_raise(project_id, document_id)
         return job
-
-    # ------------------------------------------------------------------
-    # Q-4: update_status с бизнес-логикой timestamps (перенесено из репо)
-    # ------------------------------------------------------------------
-
-    async def update_job_status(
-        self,
-        job: AnalysisJob,
-        status: AnalysisJobStatus,
-        error_code: str | None = None,
-        error_message: str | None = None,
-    ) -> AnalysisJob:
-        """Обновить статус задачи с управлением timestamps.
-
-        Q-4: бизнес-правило «когда ставить started_at/finished_at» — здесь,
-        в сервисе, а не в репозитории.
-        """
-        from datetime import UTC, datetime
-
-        now = datetime.now(UTC)
-        job.status = status
-        job.error_code = error_code
-        job.error_message = error_message
-        if status == AnalysisJobStatus.PROCESSING and job.started_at is None:
-            job.started_at = now
-        if status in (AnalysisJobStatus.SUCCESS, AnalysisJobStatus.FAILED, AnalysisJobStatus.CANCELLED):
-            job.finished_at = now
-        return await self._jobs.update_status(job, status)
 
     # ------------------------------------------------------------------
     # Bulk (#10)
@@ -219,30 +194,39 @@ class AnalysisJobService:
 
     async def bulk_create_jobs_for_project(
         self, project_id: uuid.UUID
-    ) -> list[BulkJobResult]:
+    ) -> list[dict]:
         """Запустить анализ для всех документов проекта в статусе draft/awaiting_approval.
 
-        Q-7: возвращает list[BulkJobResult] вместо list[dict].
-        P-3: asyncio.gather — параллельный запуск, не последовательный.
+        Возвращает list[dict] вида:
+          {"document_id": UUID, "job": AnalysisJob}           — успешный запуск
+          {"document_id": UUID, "job": None, "error": str}    — ошибка
+
         Ошибка для одного документа не блокирует остальные.
         """
         analyzable_documents = await self._documents.list_analyzable_for_project(project_id)
-
-        async def _create_one(document: Document) -> BulkJobResult:
+        results: list[dict] = []
+        for document in analyzable_documents:
             try:
                 job = await self.create_job(project_id, document.id)
-                return BulkJobResult(document_id=document.id, job=job)
+                results.append({"document_id": document.id, "job": job})
             except (
                 DocumentNotFoundError,
                 InvalidDocumentStatusError,
                 AnalysisAlreadyRunningError,
             ) as exc:
-                return BulkJobResult(
-                    document_id=document.id,
-                    job=None,
-                    error=exc.__class__.__name__,
+                results.append(
+                    {
+                        "document_id": document.id,
+                        "job": None,
+                        "error": exc.__class__.__name__,
+                    }
                 )
+        return results
 
-        # P-3: параллельный запуск всех задач
-        results = await asyncio.gather(*(_create_one(doc) for doc in analyzable_documents))
-        return list(results)
+    # ------------------------------------------------------------------
+    # Internal: session refresh helper
+    # ------------------------------------------------------------------
+
+    async def _session_refresh(self, obj: object) -> None:
+        """Освежить ORM-объект из БД (делегирует репозиторию через сессию)."""
+        await self._jobs._session.refresh(obj)
