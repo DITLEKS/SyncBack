@@ -1,10 +1,15 @@
 """Просмотр и точечное подтверждение/отклонение правок, bulk-accept, finalize.
 
-ИСПРАВЛЕНО:
-- accept/reject ловят SuggestionAlreadyDecidedError → 409 Conflict.
-- list_suggestions принимает limit/offset → Page.
-- accept/reject явно проверяют статус документа AWAITING_APPROVAL перед решением
-  (get_suggestion_for_document больше не делает эту проверку — см. suggestion_service.py).
+ИСПРАВЛЕНО (rev-3):
+- Баг #1: accept/reject теперь вызывают публичные методы сервиса
+  accept_suggestion() / reject_suggestion() вместо несуществующего decide().
+- Баг #2: убрана _assert_document_awaiting_approval, которая обращалась к
+  приватному _documents репозиторию напрямую и делала лишний SELECT.
+  Проверка статуса AWAITING_APPROVAL выполняется внутри сервиса (через _decide)
+  и пробрасывается как InvalidDocumentStatusError → 409 Conflict.
+- Баг #3: убраны мёртвые импорты DocumentRepository / get_document_service,
+  оставшиеся от предыдущей версии. finalize_review корректно работает в
+  MVP-режиме (export_service=None → ленивый экспорт при /export).
 """
 import logging
 import uuid
@@ -25,7 +30,7 @@ from app.domain.exceptions import (
 )
 from app.domain.services.audit_log_service import AuditLogService
 from app.domain.services.suggestion_service import SuggestionService
-from app.infrastructure.db.models.enums import AuditAction, DocumentStatus, SuggestionStatus
+from app.infrastructure.db.models.enums import AuditAction
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.user import User
 
@@ -49,15 +54,6 @@ async def _log_decision(
         logger.warning(
             "Не удалось записать audit_log для решения по правке",
             extra={"suggestion_id": str(suggestion_id), "user_id": str(user_id)},
-        )
-
-
-def _require_awaiting_approval(document_id: uuid.UUID, document_status: DocumentStatus) -> None:
-    """Бросить 409, если документ не в статусе AWAITING_APPROVAL."""
-    if document_status != DocumentStatus.AWAITING_APPROVAL:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Решения по правкам доступны только в статусе 'awaiting_approval'",
         )
 
 
@@ -92,26 +88,18 @@ async def accept_suggestion(
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
     audit_log_service: AuditLogService = Depends(get_audit_log_service),
 ) -> SuggestionResponse:
+    """Принять правку (переход документа в READY не выполняется здесь — только через /finalize).
+
+    Статус AWAITING_APPROVAL проверяется внутри сервиса; при нарушении → 409 Conflict.
+    """
     try:
-        suggestion = await suggestion_service.get_suggestion_for_document(
-            project.id, document_id, suggestion_id
+        suggestion = await suggestion_service.accept_suggestion(
+            project.id, document_id, suggestion_id, current_user.id
         )
     except (DocumentNotFoundError, SuggestionNotFoundError) as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    # get_suggestion_for_document больше не проверяет статус — делаем это здесь явно
-    from app.infrastructure.db.repositories.document_repository import DocumentRepository
-    from app.core.dependencies import get_document_service  # noqa: F401 — только для аннотации
-    # Получаем документ через отдельный запрос для проверки статуса
-    # Используем project из Depends — он уже загружен
-    # Статус документа нужен только для write-операций; читаем через suggestion.analysis_job_id
-    # Примечание: в реальном приложении лучше передавать document в сервис явно.
-    # Здесь используем факт, что get_suggestion_for_document уже сделал get_document —
-    # дублируем минимальную проверку через отдельный helper.
-    await _assert_document_awaiting_approval(suggestion_service, project.id, document_id)
-    try:
-        suggestion = await suggestion_service.decide(
-            suggestion, current_user.id, SuggestionStatus.ACCEPTED
-        )
+    except InvalidDocumentStatusError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except SuggestionAlreadyDecidedError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     await _log_decision(audit_log_service, current_user.id, suggestion.id, AuditAction.ACCEPT)
@@ -127,17 +115,18 @@ async def reject_suggestion(
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
     audit_log_service: AuditLogService = Depends(get_audit_log_service),
 ) -> SuggestionResponse:
+    """Отклонить правку.
+
+    Статус AWAITING_APPROVAL проверяется внутри сервиса; при нарушении → 409 Conflict.
+    """
     try:
-        suggestion = await suggestion_service.get_suggestion_for_document(
-            project.id, document_id, suggestion_id
+        suggestion = await suggestion_service.reject_suggestion(
+            project.id, document_id, suggestion_id, current_user.id
         )
     except (DocumentNotFoundError, SuggestionNotFoundError) as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    await _assert_document_awaiting_approval(suggestion_service, project.id, document_id)
-    try:
-        suggestion = await suggestion_service.decide(
-            suggestion, current_user.id, SuggestionStatus.REJECTED
-        )
+    except InvalidDocumentStatusError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except SuggestionAlreadyDecidedError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     await _log_decision(audit_log_service, current_user.id, suggestion.id, AuditAction.REJECT)
@@ -169,10 +158,13 @@ async def finalize_review(
     project: Project = Depends(get_allowed_project),
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
 ) -> DocumentResponse:
-    """Перевести документ в READY (переход №8).
+    """Перевести документ в READY (переход №8 статусной модели).
 
     Условие: статус AWAITING_APPROVAL и ни одной правки в PENDING.
     Если все правки отклонены — документ всё равно переходит в READY.
+
+    MVP: export_service не передаётся → ленивый экспорт при вызове /export.
+    При необходимости строгой материализации — передать export_service явно.
     """
     try:
         document = await suggestion_service.finalize_review(project.id, document_id)
@@ -181,15 +173,3 @@ async def finalize_review(
     except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return DocumentResponse.model_validate(document)
-
-
-async def _assert_document_awaiting_approval(
-    suggestion_service: SuggestionService,
-    project_id: uuid.UUID,
-    document_id: uuid.UUID,
-) -> None:
-    """Вспомогательная проверка: документ должен быть в AWAITING_APPROVAL для write-операций."""
-    doc = await suggestion_service._documents.get_by_id(document_id)
-    if doc is None or doc.project_id != project_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Документ не найден")
-    _require_awaiting_approval(document_id, doc.status)
