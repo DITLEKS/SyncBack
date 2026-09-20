@@ -26,6 +26,15 @@ Celery-задачи пайплайна анализа. LLM вызывается 
    не завис в IN_PROGRESS без живого job'а.
 5. _finalize_job: job.partial_success = True выставляется при частичном успехе
    (есть и успешные, и упавшие источники).
+
+ОПТИМИЗАЦИЯ (код-ревью):
+- #1  MinioStorage / ManualUploadConnector / llm_client — module-level синглтоны.
+      Раньше создавались заново в каждом вызове _process_source; теперь один раз.
+- #6  _finalize_job: три прохода по source_results заменены одним.
+- #7  Безопасный r.get('source_id', '?') вместо r['source_id'] в error message.
+- #8  Дублированная проверка CANCELLED вынесена в _is_cancelled(job).
+- #11 _run() — лишняя обёртка удалена, asyncio.run() вызывается напрямую.
+- #12 Проверка CANCELLED перед bulk_create (а не после).
 """
 
 import asyncio
@@ -53,11 +62,20 @@ from app.workers.celery_app import celery_app
 from app.workers.pipeline.suggestion_mapper import map_to_suggestions
 
 logger = logging.getLogger("syncscribe.workers.analysis")
+
+# #1 Module-level singletons: создаются один раз при загрузке модуля,
+# а не в каждом вызове _process_source. MinioStorage и LLM-клиент держат
+# connection pool'ы внутри — пересоздавать их на каждый таск расточительно.
+_settings = get_settings()
 _parser_registry = DocumentParserRegistry()
+_storage = MinioStorage(_settings)
+_connector = ManualUploadConnector(_storage, _parser_registry)
+_llm_client = get_llm_client(_settings)
 
 
-def _run(coro):
-    return asyncio.run(coro)
+# #8 Хелпер, чтобы не дублировать проверку CANCELLED дважды в _process_source.
+def _is_cancelled(job) -> bool:
+    return job.status == AnalysisJobStatus.CANCELLED
 
 
 async def _start_job(job_id: str) -> list[str]:
@@ -94,11 +112,6 @@ async def _start_job(job_id: str) -> list[str]:
 
 
 async def _process_source(job_id: str, source_id: str) -> dict:
-    settings = get_settings()
-    storage = MinioStorage(settings)
-    connector = ManualUploadConnector(storage, _parser_registry)
-    llm_client = get_llm_client(settings)
-
     async with isolated_db_session() as session:
         job_repo = AnalysisJobRepository(session)
         document_repo = DocumentRepository(session)
@@ -113,7 +126,8 @@ async def _process_source(job_id: str, source_id: str) -> dict:
             )
             return {"source_id": source_id, "status": "failed", "error_code": "JOB_NOT_FOUND", "error_message": "Задача анализа не найдена"}
 
-        if getattr(job, "status", None) == AnalysisJobStatus.CANCELLED:
+        # #8 используем хелпер вместо getattr
+        if _is_cancelled(job):
             return {"source_id": source_id, "status": "cancelled"}
 
         document = await document_repo.get_by_id(job.document_id)
@@ -138,18 +152,21 @@ async def _process_source(job_id: str, source_id: str) -> dict:
         )
 
         try:
-            raw_document_bytes = await storage.download(document.storage_key)
+            raw_document_bytes = await _storage.download(document.storage_key)
             parsed_document = _parser_registry.parse_by_filename(document.storage_key, raw_document_bytes)
         except Exception as exc:
             raise DocumentParseError(f"Не удалось распарсить документ {document.id}: {exc}") from exc
 
-        source_text = await connector.fetch(source_ref)
-        batch = await llm_client.generate_suggestions(parsed_document.plain_text, source_text, document.format.value)
+        source_text = await _connector.fetch(source_ref)
+        batch = await _llm_client.generate_suggestions(parsed_document.plain_text, source_text, document.format.value)
 
         suggestions = map_to_suggestions(batch, job.id, source_reference=source.name)
+
+        # #12 Проверяем CANCELLED до записи в БД — иначе bulk_create уже выполнен
         await session.refresh(job)
-        if getattr(job, "status", None) == AnalysisJobStatus.CANCELLED:
+        if _is_cancelled(job):
             return {"source_id": source_id, "status": "cancelled"}
+
         await suggestion_repo.bulk_create(suggestions)
 
     return {"source_id": source_id, "status": "success", "suggestions_count": len(suggestions)}
@@ -157,12 +174,12 @@ async def _process_source(job_id: str, source_id: str) -> dict:
 
 @celery_app.task(bind=True, acks_late=True)
 def process_source_for_analysis_job(self, job_id: str, source_id: str) -> dict:
-    settings = get_settings()
     try:
-        return _run(_process_source(job_id, source_id))
+        # #11 asyncio.run() напрямую — _run() был лишней однострочной обёрткой
+        return asyncio.run(_process_source(job_id, source_id))
     except (LLMTimeoutError, LLMInvalidResponseError, DocumentParseError) as exc:
-        if self.request.retries < settings.llm_max_retries:
-            backoff_seconds = settings.llm_timeout_seconds * (2 ** self.request.retries)
+        if self.request.retries < _settings.llm_max_retries:
+            backoff_seconds = _settings.llm_timeout_seconds * (2 ** self.request.retries)
             raise self.retry(exc=exc, countdown=backoff_seconds) from exc
         dead_letter_store = DeadLetterStore(get_sync_redis_client())
         dead_letter_store.push(job_id, source_id, error_code=type(exc).__name__, error_message=str(exc))
@@ -181,15 +198,24 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
         if job is None:
             logger.error("finalize_analysis_job вызван для несуществующего job_id", extra={"job_id": job_id})
             return
-        if getattr(job, "status", None) == AnalysisJobStatus.CANCELLED:
+        if _is_cancelled(job):  # #8
             return
         document = await document_repo.get_by_id(job.document_id)
         if document is None:
             await job_repo.update_status(job, AnalysisJobStatus.FAILED, "DOCUMENT_NOT_FOUND", "Документ не найден")
             return
-        succeeded = [r for r in source_results if r.get("status") == "success"]
-        failed = [r for r in source_results if r.get("status") == "failed"]
-        suggestions_count = sum(int(r.get("suggestions_count", 0)) for r in succeeded)
+
+        # #6 Один проход вместо трёх: два list comprehension + sum
+        succeeded: list[dict] = []
+        failed: list[dict] = []
+        suggestions_count = 0
+        for r in source_results:
+            if r.get("status") == "success":
+                succeeded.append(r)
+                suggestions_count += int(r.get("suggestions_count", 0))
+            elif r.get("status") == "failed":
+                failed.append(r)
+
         is_current = document.current_analysis_job_id == job.id
 
         if succeeded:
@@ -197,8 +223,9 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
             if failed:
                 # Часть источников упала — помечаем job как частично успешный.
                 job.partial_success = True
+                # #7 r.get('source_id', '?') — защита от отсутствующего ключа
                 message = "Не обработаны источники: " + ", ".join(
-                    f"{r['source_id']} ({r.get('error_code')})" for r in failed
+                    f"{r.get('source_id', '?')} ({r.get('error_code')})" for r in failed
                 )
             await job_repo.update_status(job, AnalysisJobStatus.SUCCESS, error_message=message)
             if is_current:
@@ -206,7 +233,7 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
                     DocumentStatus.AWAITING_APPROVAL if suggestions_count else DocumentStatus.READY
                 )
         elif failed:
-            message = "; ".join(f"{r['source_id']}: {r.get('error_message')}" for r in failed)
+            message = "; ".join(f"{r.get('source_id', '?')}: {r.get('error_message')}" for r in failed)
             await job_repo.update_status(job, AnalysisJobStatus.FAILED, "ALL_SOURCES_FAILED", message)
             if is_current:
                 document.status = DocumentStatus.DRAFT
@@ -255,14 +282,14 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
 
 @celery_app.task(bind=True)
 def finalize_analysis_job(self, source_results: list[dict], job_id: str) -> None:
-    _run(_finalize_job(job_id, source_results))
+    asyncio.run(_finalize_job(job_id, source_results))  # #11
 
 
 @celery_app.task(bind=True)
 def run_analysis_job(self, job_id: str) -> None:
-    source_ids = _run(_start_job(job_id))
+    source_ids = asyncio.run(_start_job(job_id))  # #11
     if not source_ids:
-        _run(_finalize_job(job_id, []))
+        asyncio.run(_finalize_job(job_id, []))  # #11
         return
     header = [process_source_for_analysis_job.s(job_id, source_id) for source_id in source_ids]
     callback = finalize_analysis_job.s(job_id=job_id)
