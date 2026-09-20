@@ -21,6 +21,9 @@ Celery-задачи пайплайна анализа. LLM вызывается 
    каждая из трёх сущностей проверяется отдельно, и подзадача возвращает
    {"status": "failed", "error_code": "...NOT_FOUND"} без retry (повторять нечего — запись
    уже не появится).
+4. _finalize_job: session.commit() обёрнут в try/except — при сбое коммита
+   статус документа откатывается в DRAFT и job помечается FAILED, чтобы документ
+   не завис в IN_PROGRESS без живого job'а.
 """
 
 import asyncio
@@ -186,6 +189,7 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
         failed = [r for r in source_results if r.get("status") == "failed"]
         suggestions_count = sum(int(r.get("suggestions_count", 0)) for r in succeeded)
         is_current = document.current_analysis_job_id == job.id
+
         if succeeded:
             message = None
             if failed:
@@ -211,7 +215,41 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
             )
             if is_current:
                 document.status = DocumentStatus.DRAFT
-        await session.commit()
+
+        # Транзакционный guard: если коммит упал — откатываем документ в DRAFT
+        # и помечаем job FAILED, чтобы документ не завис в IN_PROGRESS без живого job'а.
+        try:
+            await session.commit()
+        except Exception as commit_exc:  # noqa: BLE001
+            logger.exception(
+                "Ошибка коммита при финализации job — откатываем статус документа в DRAFT",
+                extra={"job_id": job_id, "document_id": str(job.document_id)},
+            )
+            await session.rollback()
+            # Пытаемся зафиксировать безопасный статус в отдельной сессии,
+            # чтобы не потерять информацию об ошибке даже если основная сессия
+            # уже в плохом состоянии.
+            try:
+                async with isolated_db_session() as recovery_session:
+                    recovery_job_repo = AnalysisJobRepository(recovery_session)
+                    recovery_doc_repo = DocumentRepository(recovery_session)
+                    recovery_job = await recovery_job_repo.get_by_id(uuid.UUID(job_id))
+                    if recovery_job is not None:
+                        await recovery_job_repo.update_status(
+                            recovery_job,
+                            AnalysisJobStatus.FAILED,
+                            error_code="COMMIT_ERROR",
+                            error_message=f"Ошибка коммита финализации: {commit_exc}",
+                        )
+                    recovery_doc = await recovery_doc_repo.get_by_id(job.document_id)
+                    if recovery_doc is not None and recovery_doc.status == DocumentStatus.IN_PROGRESS:
+                        recovery_doc.status = DocumentStatus.DRAFT
+                        await recovery_session.commit()
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Не удалось восстановить статус документа после ошибки коммита финализации",
+                    extra={"job_id": job_id, "document_id": str(job.document_id)},
+                )
 
 
 @celery_app.task(bind=True)

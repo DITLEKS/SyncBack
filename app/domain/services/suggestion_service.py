@@ -11,6 +11,8 @@ finalize_review и сборка списка принятых изменений
    Это позволяет фронтенду отображать правки предыдущего раунда, пока идёт
    повторный анализ (переход №9). Решения по правкам (decide/bulk_accept) по-
    прежнему ограничены статусом AWAITING_APPROVAL.
+5. decide(): добавлен явный guard на AWAITING_APPROVAL на уровне сервиса —
+   защищает от вызова вне роутера без проверки статуса документа.
 """
 import uuid
 
@@ -68,12 +70,19 @@ class SuggestionService:
         return suggestion
 
     async def decide(
-        self, suggestion: Suggestion, user_id: uuid.UUID, status: SuggestionStatus
+        self, project_id: uuid.UUID, document_id: uuid.UUID, suggestion: Suggestion, user_id: uuid.UUID, status: SuggestionStatus
     ) -> Suggestion:
-        """Принять решение по правке. Вызывается только из accept/reject роутера,
-        который предварительно проверяет статус документа через get_suggestion_for_document
-        → обращение к документу происходит в роутере через get_allowed_project.
+        """Принять решение по правке (accept или reject).
+
+        Guard на AWAITING_APPROVAL добавлен на уровне сервиса: решения по правкам
+        разрешены только пока документ ожидает утверждения. Это делает сервис
+        безопасным независимо от того, откуда он вызывается.
         """
+        document = await self._get_document_or_raise(project_id, document_id)
+        if document.status != DocumentStatus.AWAITING_APPROVAL:
+            raise InvalidDocumentStatusError(
+                "Решения по правкам доступны только в статусе 'awaiting_approval'"
+            )
         updated = await self._suggestions.update_status(suggestion, status, user_id)
         if updated is None:
             raise SuggestionAlreadyDecidedError(f"Правка {suggestion.id} уже была обработана другим запросом")
