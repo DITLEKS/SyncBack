@@ -1,3 +1,6 @@
+"""
+P0-3: добавлены поля block_id, start_offset, end_offset в SuggestionResponse.
+"""
 import uuid
 from datetime import datetime
 
@@ -8,6 +11,7 @@ class SuggestionResponse(BaseModel):
     id: uuid.UUID
     analysis_job_id: uuid.UUID
     section_ref: str
+    # P0-3: якоря правки
     block_id: str | None = None
     start_offset: int | None = None
     end_offset: int | None = None
@@ -26,13 +30,3 @@ class SuggestionResponse(BaseModel):
 
 class BulkAcceptResponse(BaseModel):
     accepted_count: int
-
-
-class ReviewFinalizeRequest(BaseModel):
-    review_version: int
-
-
-class ReviewFinalizeResponse(BaseModel):
-    document_id: uuid.UUID
-    review_version: int
-    status: str

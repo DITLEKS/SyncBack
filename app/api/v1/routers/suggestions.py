@@ -1,6 +1,13 @@
-"""Просмотр и точечное подтверждение/отклонение правок, bulk-accept, finalize.
+"""
+Просмотр и точечное подтверждение/отклонение правок, bulk-accept, finalize.
 
-P0-2: добавлен PUT /review с If-Match + review_version.
+ИСПРАВЛЕНО (rev-3): accept/reject → публичные методы сервиса;
+убрана _assert_document_awaiting_approval; убраны мёртвые импорты.
+
+P0-2 (rev-4): добавлен PUT /review с оптимистической блокировкой через
+заголовок If-Match. Клиент присылает текущий review_version в виде
+'If-Match: <version>'. При несовпадении → 412 Precondition Failed.
+finalize_review в сервисе инкрементирует review_version атомарно.
 """
 import logging
 import uuid
@@ -10,18 +17,17 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from app.api.deps import get_allowed_project, get_current_user
 from app.api.schemas.document import DocumentResponse
 from app.api.schemas.pagination import Page
-from app.api.schemas.suggestion import BulkAcceptResponse, ReviewFinalizeRequest, ReviewFinalizeResponse, SuggestionResponse
-from app.core.dependencies import get_audit_log_service, get_document_service, get_suggestion_service
+from app.api.schemas.suggestion import BulkAcceptResponse, SuggestionResponse
+from app.core.dependencies import get_audit_log_service, get_suggestion_service
 from app.domain.exceptions import (
     DocumentNotFoundError,
     InvalidDocumentStatusError,
     ReviewNotCompleteError,
-    ReviewVersionConflictError,
+    StaleReviewVersionError,
     SuggestionAlreadyDecidedError,
     SuggestionNotFoundError,
 )
 from app.domain.services.audit_log_service import AuditLogService
-from app.domain.services.document_service import DocumentService
 from app.domain.services.suggestion_service import SuggestionService
 from app.infrastructure.db.models.enums import AuditAction
 from app.infrastructure.db.models.project import Project
@@ -143,6 +149,10 @@ async def finalize_review(
     project: Project = Depends(get_allowed_project),
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
 ) -> DocumentResponse:
+    """Перевести документ в READY (переход №8 статусной модели).
+
+    MVP: export_service не передаётся → ленивый экспорт при /export.
+    """
     try:
         document = await suggestion_service.finalize_review(project.id, document_id)
     except DocumentNotFoundError as exc:
@@ -152,32 +162,46 @@ async def finalize_review(
     return DocumentResponse.model_validate(document)
 
 
-@router.put("/review", response_model=ReviewFinalizeResponse)
+# ---------------------------------------------------------------------------
+# P0-2: PUT /review — финализация с оптимистической блокировкой
+# ---------------------------------------------------------------------------
+
+@router.put("/review", response_model=DocumentResponse)
 async def put_review(
     document_id: uuid.UUID,
-    payload: ReviewFinalizeRequest,
-    if_match: str | None = Header(default=None, alias="If-Match"),
     project: Project = Depends(get_allowed_project),
-    document_service: DocumentService = Depends(get_document_service),
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
-) -> ReviewFinalizeResponse:
+    if_match: str | None = Header(default=None, alias="If-Match"),
+) -> DocumentResponse:
+    """Финализировать review с оптимистической блокировкой.
+
+    Клиент обязан передать заголовок ``If-Match: <review_version>``.
+    Значение должно совпадать с текущим ``review_version`` документа.
+    При несовпадении → **412 Precondition Failed**.
+
+    Эндпоинт идемпотентен при повторном вызове с тем же версионным
+    значением (если документ уже в READY — возвращает 200 без ошибки).
+    """
+    if if_match is None:
+        raise HTTPException(
+            status_code=status.HTTP_428_PRECONDITION_REQUIRED,
+            detail="Заголовок If-Match обязателен для PUT /review",
+        )
     try:
-        document = await document_service.get_document(project.id, document_id)
+        client_version = int(if_match.strip('"').strip())
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Заголовок If-Match должен содержать целочисленный review_version, получено: {if_match!r}",
+        )
+    try:
+        document = await suggestion_service.finalize_review_versioned(
+            project.id, document_id, client_version
+        )
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-
-    expected = str(document.review_version)
-    if if_match is None or if_match.strip('"') != expected or payload.review_version != document.review_version:
-        raise HTTPException(status_code=status.HTTP_412_PRECONDITION_FAILED, detail="review_version conflict")
-
-    try:
-        document = await suggestion_service.finalize_review(project.id, document_id)
-    except DocumentNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except ReviewVersionConflictError as exc:
+    except StaleReviewVersionError as exc:
         raise HTTPException(status_code=status.HTTP_412_PRECONDITION_FAILED, detail=str(exc)) from exc
     except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-
-    document.review_version = (document.review_version or 1) + 1
-    return ReviewFinalizeResponse(document_id=document.id, review_version=document.review_version, status=str(document.status))
+    return DocumentResponse.model_validate(document)

@@ -45,10 +45,7 @@ class SuggestionNotFoundError(DomainError):
 
 
 class SuggestionAlreadyDecidedError(DomainError):
-    """ИСПРАВЛЕНО: новое исключение для защиты от гонки при двойном accept/reject одной
-    и той же правки — выбрасывается, когда атомарный UPDATE в SuggestionRepository не нашёл
-    строку в статусе PENDING (значит, её уже успел обработать другой запрос).
-    """
+    """Выбрасывается при гонке двойного accept/reject одной правки."""
 
 
 class UnsupportedFileFormatError(DomainError):
@@ -64,7 +61,7 @@ class AnalysisJobNotFoundError(DomainError):
 
 
 class DocumentParseError(DomainError):
-    """Файл битый или не парсится — статус документа/job переводится в error с этим кодом."""
+    """Файл битый или не парсится."""
 
 
 class LLMTimeoutError(DomainError):
@@ -91,5 +88,13 @@ class ReviewNotCompleteError(DomainError):
     pass
 
 
-class ReviewVersionConflictError(DomainError):
+class UnsupportedFormatError(DomainError):
     pass
+
+
+# P0-2: оптимистическая блокировка review
+class StaleReviewVersionError(DomainError):
+    """PUT /review: клиент прислал устаревший review_version (If-Match не совпал).
+
+    HTTP-слой должен вернуть 412 Precondition Failed.
+    """

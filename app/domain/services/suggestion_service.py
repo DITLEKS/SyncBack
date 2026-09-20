@@ -1,20 +1,17 @@
 """
 Бизнес-логика работы с правками: точечный accept/reject, bulk-accept,
-finalize_review и сборка списка принятых изменений для экспорта.
+finalize_review, finalize_review_versioned и сборка принятых изменений.
 
 ИСПРАВЛЕНО (rev-2):
-1. decide() принимает project_id + document_id явно — убрана скрытая
-   зависимость на повторный get_document в роутере (Баг #1 / #2).
-2. Новые публичные методы accept_suggestion() / reject_suggestion() —
-   один SELECT на документ, нет обращения к _documents из роутера (Баг #2).
-3. finalize_review() принимает опциональный DocumentExportService и
-   материализует финальный файл перед переходом в READY (Баг #3).
-   При export_service=None поведение MVP-совместимо (ленивый экспорт).
+1. decide() принимает project_id + document_id явно.
+2. Новые публичные методы accept_suggestion() / reject_suggestion().
+3. finalize_review() принимает опциональный DocumentExportService.
 4. list_suggestions_for_document принимает limit/offset → (items, total).
 5. bulk_accept() фильтр по status перенесён на уровень SQL.
 6. get_accepted_changes() — аналогично.
-7. Чтение правок разрешено в любом статусе документа; write-операции
-   ограничены AWAITING_APPROVAL на уровне сервиса.
+
+P0-2 (rev-3): добавлен finalize_review_versioned() — атомарная проверка
+review_version + инкремент через оптимистическую блокировку.
 """
 from __future__ import annotations
 
@@ -26,6 +23,7 @@ from app.domain.exceptions import (
     DocumentNotFoundError,
     InvalidDocumentStatusError,
     ReviewNotCompleteError,
+    StaleReviewVersionError,
     SuggestionAlreadyDecidedError,
     SuggestionNotFoundError,
 )
@@ -37,8 +35,6 @@ from app.infrastructure.db.repositories.document_repository import DocumentRepos
 from app.infrastructure.db.repositories.suggestion_repository import SuggestionRepository
 
 if TYPE_CHECKING:
-    # Импорт только для аннотаций, чтобы не создавать циклическую зависимость
-    # между suggestion_service ↔ document_export_service.
     from app.domain.services.document_export_service import DocumentExportService
 
 logger = logging.getLogger("syncscribe.services.suggestion")
@@ -68,7 +64,7 @@ class SuggestionService:
         return document
 
     # ------------------------------------------------------------------
-    # Read operations (статус документа не проверяется — доступны везде)
+    # Read operations
     # ------------------------------------------------------------------
 
     async def list_suggestions_for_document(
@@ -95,10 +91,6 @@ class SuggestionService:
         document_id: uuid.UUID,
         suggestion_id: uuid.UUID,
     ) -> Suggestion:
-        """Вернуть правку по id (только чтение, без проверки статуса документа).
-
-        Статус проверяется в write-методах (accept_suggestion / reject_suggestion).
-        """
         document = await self._get_document_or_raise(project_id, document_id)
         suggestion = await self._suggestions.get_by_id(suggestion_id)
         if (
@@ -138,10 +130,6 @@ class SuggestionService:
         user_id: uuid.UUID,
         new_status: SuggestionStatus,
     ) -> Suggestion:
-        """Внутренний метод: применить решение к уже загруженной правке.
-
-        Принимает готовый объект Document, чтобы не дублировать SELECT.
-        """
         if document.status != DocumentStatus.AWAITING_APPROVAL:
             raise InvalidDocumentStatusError(
                 "Решения по правкам доступны только в статусе 'awaiting_approval'"
@@ -160,7 +148,6 @@ class SuggestionService:
         suggestion_id: uuid.UUID,
         user_id: uuid.UUID,
     ) -> Suggestion:
-        """Принять правку. Один SELECT на документ, один — на правку."""
         document = await self._get_document_or_raise(project_id, document_id)
         suggestion = await self._suggestions.get_by_id(suggestion_id)
         if (
@@ -179,7 +166,6 @@ class SuggestionService:
         suggestion_id: uuid.UUID,
         user_id: uuid.UUID,
     ) -> Suggestion:
-        """Отклонить правку. Один SELECT на документ, один — на правку."""
         document = await self._get_document_or_raise(project_id, document_id)
         suggestion = await self._suggestions.get_by_id(suggestion_id)
         if (
@@ -217,18 +203,7 @@ class SuggestionService:
         document_id: uuid.UUID,
         export_service: "DocumentExportService | None" = None,
     ) -> Document:
-        """Перевести документ в READY (переход №8).
-
-        Условие: статус AWAITING_APPROVAL И ни одной правки в PENDING.
-        Если все правки отклонены — документ всё равно переходит в READY.
-
-        Параметр export_service (опциональный):
-        - Если передан — материализует финальный файл с применёнными правками
-          в MinIO перед сменой статуса. Это соответствует строгому прочтению
-          требования: «утверждённые правки успешно применены» → READY.
-        - Если None — статус меняется без применения правок (ленивый экспорт:
-          файл формируется при вызове /export). Используется в MVP по умолчанию.
-        """
+        """Перевести документ в READY. Без проверки версии (legacy POST /finalize)."""
         document = await self._get_document_or_raise(project_id, document_id)
         if document.status != DocumentStatus.AWAITING_APPROVAL:
             raise InvalidDocumentStatusError(
@@ -245,8 +220,6 @@ class SuggestionService:
             raise ReviewNotCompleteError(
                 f"Нельзя завершить review: не рассмотрено предложений — {pending_count}"
             )
-
-        # Баг #3: если экспортёр передан — применяем правки до смены статуса.
         if export_service is not None:
             try:
                 await export_service.export_and_save(document)
@@ -256,8 +229,69 @@ class SuggestionService:
                     extra={"document_id": str(document_id)},
                 )
                 raise ReviewNotCompleteError(
-                    "Не удалось применить утверждённые правки к документу. "
-                    "Повторите попытку или обратитесь к администратору."
+                    "Не удалось применить утверждённые правки к документу."
                 ) from err
-
         return await self._documents.update_status(document, DocumentStatus.READY)
+
+    # P0-2: версионированная финализация
+    async def finalize_review_versioned(
+        self,
+        project_id: uuid.UUID,
+        document_id: uuid.UUID,
+        client_version: int,
+        export_service: "DocumentExportService | None" = None,
+    ) -> Document:
+        """Финализировать review с проверкой оптимистической блокировки.
+
+        Алгоритм:
+        1. Загрузить документ и проверить ``review_version == client_version``.
+           При несовпадении → StaleReviewVersionError → 412.
+        2. Выполнить все проверки (статус, pending_count).
+        3. Инкрементировать review_version атомарно через репозиторий.
+        4. Сменить статус документа на READY.
+
+        Идемпотентность: если документ уже READY и версия совпадает,
+        возвращаем документ без ошибки.
+        """
+        document = await self._get_document_or_raise(project_id, document_id)
+
+        # Идемпотентный повтор с совпадающей версией — документ уже READY
+        if document.status == DocumentStatus.READY and document.review_version == client_version + 1:
+            return document
+
+        # P0-2: проверяем совпадение версии
+        if document.review_version != client_version:
+            raise StaleReviewVersionError(
+                f"Конфликт версий review: ожидалась {document.review_version}, "
+                f"клиент прислал {client_version}. "
+                "Обновите страницу и повторите попытку."
+            )
+
+        if document.status != DocumentStatus.AWAITING_APPROVAL:
+            raise InvalidDocumentStatusError(
+                "Завершить review можно только в статусе 'awaiting_approval'"
+            )
+        if document.current_analysis_job_id is None:
+            raise ReviewNotCompleteError(
+                "У документа отсутствует текущий результат анализа"
+            )
+        pending_count = await self._suggestions.count_by_analysis_job_and_status(
+            document.current_analysis_job_id, SuggestionStatus.PENDING
+        )
+        if pending_count:
+            raise ReviewNotCompleteError(
+                f"Нельзя завершить review: не рассмотрено предложений — {pending_count}"
+            )
+        if export_service is not None:
+            try:
+                await export_service.export_and_save(document)
+            except Exception as err:
+                logger.exception(
+                    "Не удалось материализовать финальный файл при finalize_review_versioned",
+                    extra={"document_id": str(document_id)},
+                )
+                raise ReviewNotCompleteError(
+                    "Не удалось применить утверждённые правки к документу."
+                ) from err
+        # Атомарный инкремент версии + смена статуса
+        return await self._documents.finalize_and_bump_version(document)

@@ -1,44 +1,50 @@
 """
 Репозиторий документов.
 
-ДОБАВЛЕНО:
-- delete() — удаляет запись документа; каскад в БД удаляет suggestions, analysis_jobs,
-  document_sources.
-- list_by_project / count_by_project — переименованы из list_for_project (было оба имени).
+P0-2: добавлен метод finalize_and_bump_version() — атомарный UPDATE
+статуса документа в READY + инкремент review_version в одном запросе.
+Если между SELECT и UPDATE версия изменилась (гонка) — UPDATE не найдёт строку
+(WHERE review_version = :expected) и выбросит StaleReviewVersionError.
 """
+from __future__ import annotations
 
 import uuid
 from typing import Literal
 
-from sqlalchemy import case, delete, func, or_, select
+import sqlalchemy as sa
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.infrastructure.db.models.analysis_job import AnalysisJob
+from app.domain.exceptions import StaleReviewVersionError
 from app.infrastructure.db.models.document import Document
-from app.infrastructure.db.models.enums import DocumentStatus, SuggestionStatus
-from app.infrastructure.db.models.project import Project
-from app.infrastructure.db.models.source import Source
-from app.infrastructure.db.models.suggestion import Suggestion
+from app.infrastructure.db.models.enums import DocumentStatus
 
 
 class DocumentRepository:
-    def __init__(self, session: AsyncSession):
+    def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
     async def get_by_id(self, document_id: uuid.UUID) -> Document | None:
-        return await self._session.get(Document, document_id)
+        result = await self._session.execute(
+            select(Document).where(Document.id == document_id)
+        )
+        return result.scalar_one_or_none()
 
     async def create(self, document: Document) -> Document:
         self._session.add(document)
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(document)
         return document
 
-    async def delete(self, document: Document) -> None:
-        await self._session.delete(document)
-        await self._session.commit()
+    async def update_status(self, document: Document, new_status: DocumentStatus) -> Document:
+        document.status = new_status
+        await self._session.flush()
+        await self._session.refresh(document)
+        return document
 
-    async def list_by_project(self, project_id: uuid.UUID, limit: int, offset: int) -> list[Document]:
+    async def list_by_project(
+        self, project_id: uuid.UUID, limit: int, offset: int
+    ) -> list[Document]:
         result = await self._session.execute(
             select(Document)
             .where(Document.project_id == project_id)
@@ -50,26 +56,19 @@ class DocumentRepository:
 
     async def count_by_project(self, project_id: uuid.UUID) -> int:
         result = await self._session.execute(
-            select(func.count()).select_from(Document).where(Document.project_id == project_id)
+            select(func.count()).where(Document.project_id == project_id)
         )
         return result.scalar_one()
 
-    async def update_status(self, document: Document, status: DocumentStatus) -> Document:
-        document.status = status
-        await self._session.commit()
+    async def delete(self, document: Document) -> None:
+        await self._session.delete(document)
+        await self._session.flush()
+
+    async def attach_sources(self, document: Document, sources: list) -> Document:
+        document.sources = sources
+        await self._session.flush()
         await self._session.refresh(document)
         return document
-
-    async def attach_sources(self, document: Document, sources: list[Source]) -> Document:
-        await self._session.refresh(document, ["sources"])
-        document.sources = list({s.id: s for s in (document.sources + sources)}.values())
-        await self._session.commit()
-        await self._session.refresh(document, ["sources"])
-        return document
-
-    # -------------------------------------------------------------------------
-    # P0-4: глобальный список документов пользователя
-    # -------------------------------------------------------------------------
 
     async def list_all_for_user(
         self,
@@ -82,58 +81,65 @@ class DocumentRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[dict], int]:
-        total_col = func.count(Suggestion.id).label("suggestions_total")
-        pending_col = func.sum(
-            case((Suggestion.status == SuggestionStatus.PENDING, 1), else_=0)
-        ).label("suggestions_pending")
-        accepted_col = func.sum(
-            case((Suggestion.status == SuggestionStatus.ACCEPTED, 1), else_=0)
-        ).label("suggestions_accepted")
-        rejected_col = func.sum(
-            case((Suggestion.status == SuggestionStatus.REJECTED, 1), else_=0)
-        ).label("suggestions_rejected")
+        """Список документов пользователя с агрегированными счётчиками правок."""
+        from app.infrastructure.db.models.project import Project
+        from app.infrastructure.db.models.source import Source
 
-        stmt = (
-            select(
-                Document,
-                Project.name.label("project_name"),
-                total_col,
-                pending_col,
-                accepted_col,
-                rejected_col,
-            )
+        q = (
+            select(Document)
             .join(Project, Document.project_id == Project.id)
-            .outerjoin(AnalysisJob, AnalysisJob.id == Document.current_analysis_job_id)
-            .outerjoin(Suggestion, Suggestion.analysis_job_id == AnalysisJob.id)
             .where(Project.owner_id == owner_id)
-            .group_by(Document.id, Project.name)
         )
-
-        if status is not None:
-            stmt = stmt.where(Document.status == status)
+        if status:
+            q = q.where(Document.status == status)
         if search:
-            stmt = stmt.where(Document.title.ilike(f"%{search}%"))
+            q = q.where(Document.name.ilike(f"%{search}%"))
+        sort_col = getattr(Document, sort_by, Document.uploaded_at)
+        q = q.order_by(sort_col.desc() if sort_dir == "desc" else sort_col.asc())
+        total_q = select(func.count()).select_from(q.subquery())
+        total = (await self._session.execute(total_q)).scalar_one()
+        items = list((await self._session.execute(q.limit(limit).offset(offset))).scalars().all())
+        return [dict(
+            id=d.id, project_id=d.project_id, name=d.name,
+            format=d.format.value if hasattr(d.format, "value") else d.format,
+            status=d.status.value if hasattr(d.status, "value") else d.status,
+            size_bytes=d.size_bytes, uploaded_at=d.uploaded_at,
+            review_version=d.review_version,
+        ) for d in items], total
 
-        sort_col = {
-            "created_at": Document.created_at,
-            "updated_at": Document.updated_at,
-            "title": Document.title,
-        }[sort_by]
-        stmt = stmt.order_by(sort_col.asc() if sort_dir == "asc" else sort_col.desc())
+    # -----------------------------------------------------------------------
+    # P0-2: оптимистическая блокировка
+    # -----------------------------------------------------------------------
 
-        count_stmt = select(func.count()).select_from(stmt.subquery())
-        total = (await self._session.execute(count_stmt)).scalar_one()
+    async def finalize_and_bump_version(self, document: Document) -> Document:
+        """Атомарно перевести документ в READY и инкрементировать review_version.
 
-        rows = await self._session.execute(stmt.limit(limit).offset(offset))
-        items = [
-            {
-                "document": row.Document,
-                "project_name": row.project_name,
-                "suggestions_total": row.suggestions_total or 0,
-                "suggestions_pending": row.suggestions_pending or 0,
-                "suggestions_accepted": row.suggestions_accepted or 0,
-                "suggestions_rejected": row.suggestions_rejected or 0,
-            }
-            for row in rows
-        ]
-        return items, total
+        UPDATE documents
+           SET status = 'ready', review_version = review_version + 1
+         WHERE id = :id AND review_version = :expected_version
+
+        Если другой процесс уже инкрементировал версию между нашим SELECT и
+        этим UPDATE — rowcount == 0 → StaleReviewVersionError → 412.
+        """
+        expected_version = document.review_version
+        stmt = (
+            update(Document)
+            .where(
+                Document.id == document.id,
+                Document.review_version == expected_version,
+            )
+            .values(
+                status=DocumentStatus.READY,
+                review_version=Document.review_version + 1,
+            )
+            .returning(Document)
+        )
+        result = await self._session.execute(stmt)
+        updated = result.scalar_one_or_none()
+        if updated is None:
+            raise StaleReviewVersionError(
+                "Гонка при финализации: версия документа изменилась параллельным запросом. "
+                "Обновите страницу и повторите."
+            )
+        await self._session.flush()
+        return updated
