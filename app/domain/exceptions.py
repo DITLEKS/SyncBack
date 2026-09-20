@@ -1,100 +1,40 @@
-class DomainError(Exception):
-    """Базовый класс для всех доменных ошибок SyncScribe."""
+"""Доменные исключения SyncBack.
+
+Каждое исключение соответствует одной бизнес-ситуации и конвертируется
+в HTTP-ответ на уровне роутера или глобального exception handler.
+"""
 
 
-class EmailAlreadyRegisteredError(DomainError):
-    pass
+class SyncBackError(Exception):
+    """Базовый класс для всех доменных исключений."""
 
 
-class InvalidCredentialsError(DomainError):
-    pass
+class DocumentNotFoundError(SyncBackError):
+    """Документ не найден или не принадлежит проекту."""
 
 
-class AccountTemporarilyLockedError(DomainError):
-    def __init__(self, retry_after_seconds: int):
-        self.retry_after_seconds = retry_after_seconds
-        super().__init__(f"Аккаунт временно заблокирован, повтор через {retry_after_seconds} сек.")
+class ProjectNotFoundError(SyncBackError):
+    """Проект не найден или недоступен текущему пользователю."""
 
 
-class InvalidTokenError(DomainError):
-    pass
+class SourceNotFoundError(SyncBackError):
+    """Источник не найден или не принадлежит проекту."""
 
 
-class UserNotFoundError(DomainError):
-    pass
+class FileTooLargeError(SyncBackError):
+    """Загружаемый файл превышает допустимый размер."""
 
 
-class ProjectNotFoundError(DomainError):
-    pass
+class UnsupportedFormatError(SyncBackError):
+    """Формат файла не поддерживается парсером (например, .doc)."""
 
 
-class ProjectAccessDeniedError(DomainError):
-    pass
+class AnalysisJobNotFoundError(SyncBackError):
+    """Задание анализа не найдено."""
 
 
-class DocumentNotFoundError(DomainError):
-    pass
+class ReviewVersionConflictError(SyncBackError):
+    """P0-2: review_version в БД изменилась пока клиент редактировал документ.
 
-
-class SourceNotFoundError(DomainError):
-    pass
-
-
-class SuggestionNotFoundError(DomainError):
-    pass
-
-
-class SuggestionAlreadyDecidedError(DomainError):
-    """Выбрасывается при гонке двойного accept/reject одной правки."""
-
-
-class UnsupportedFileFormatError(DomainError):
-    pass
-
-
-class FileTooLargeError(DomainError):
-    pass
-
-
-class AnalysisJobNotFoundError(DomainError):
-    pass
-
-
-class DocumentParseError(DomainError):
-    """Файл битый или не парсится."""
-
-
-class LLMTimeoutError(DomainError):
-    pass
-
-
-class LLMInvalidResponseError(DomainError):
-    pass
-
-
-class AnalysisAlreadyRunningError(DomainError):
-    pass
-
-
-class InvalidDocumentStatusError(DomainError):
-    pass
-
-
-class AnalysisJobNotCancellableError(DomainError):
-    pass
-
-
-class ReviewNotCompleteError(DomainError):
-    pass
-
-
-class UnsupportedFormatError(DomainError):
-    pass
-
-
-# P0-2: оптимистическая блокировка review
-class StaleReviewVersionError(DomainError):
-    """PUT /review: клиент прислал устаревший review_version (If-Match не совпал).
-
-    HTTP-слой должен вернуть 412 Precondition Failed.
+    Сигнализирует роутеру вернуть HTTP 409 Conflict.
     """
