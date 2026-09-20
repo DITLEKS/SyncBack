@@ -9,17 +9,21 @@
    DocumentSection) использовался только внутри Celery-пайплайна анализа и не отдавался
    наружу. Без этого фронтенд не может сопоставить suggestion.section_ref с конкретным
    местом в тексте для инлайн-отображения правок в редакторе.
+ДОБАВЛЕНО (P0-4):
+3. list_all_for_user() — проксирующий метод для глобального списка документов
+   с счётчиками правок.
 """
 
 import uuid
 from pathlib import Path
+from typing import Literal
 
 from app.core.config import Settings, get_settings
 from app.domain.exceptions import DocumentNotFoundError, FileTooLargeError, UnsupportedFileFormatError
 from app.domain.interfaces.document_parser import ParsedDocument
 from app.domain.interfaces.file_storage import FileStorage
 from app.infrastructure.db.models.document import Document
-from app.infrastructure.db.models.enums import DocumentFormat
+from app.infrastructure.db.models.enums import DocumentFormat, DocumentStatus
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.repositories.document_repository import DocumentRepository
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
@@ -103,3 +107,29 @@ class DocumentService:
 
     async def attach_sources(self, document: Document, sources: list) -> Document:
         return await self._documents.attach_sources(document, sources)
+
+    # -------------------------------------------------------------------------
+    # P0-4: глобальный список документов пользователя
+    # -------------------------------------------------------------------------
+
+    async def list_all_for_user(
+        self,
+        owner_id: uuid.UUID,
+        *,
+        status: DocumentStatus | None = None,
+        search: str | None = None,
+        sort_by: Literal["created_at", "updated_at", "title"] = "updated_at",
+        sort_dir: Literal["asc", "desc"] = "desc",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """Список всех документов пользователя с агрегированными счётчиками правок."""
+        return await self._documents.list_all_for_user(
+            owner_id,
+            status=status,
+            search=search,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+            limit=limit,
+            offset=offset,
+        )

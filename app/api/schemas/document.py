@@ -4,6 +4,9 @@
 DocumentContentResponse/DocumentSectionResponse — распарсенный текст документа с позициями
 секций для инлайн-отображения правок во фронтенде (сопоставляются с
 s.section_ref у Suggestion).
+
+ДОБАВЛЕНО (P0-4): DocumentListItem, DocumentListProject, SuggestionCounters —
+  схемы для GET /api/v1/documents (глобальный список документов).
 """
 
 import uuid
@@ -45,3 +48,53 @@ class DocumentSectionResponse(BaseModel):
 class DocumentContentResponse(BaseModel):
     plain_text: str
     sections: list[DocumentSectionResponse]
+
+
+# ---------------------------------------------------------------------------
+# P0-4: глобальный список документов
+# ---------------------------------------------------------------------------
+
+
+class DocumentListProject(BaseModel):
+    """Краткая информация о проекте в контексте элемента глобального списка."""
+
+    id: uuid.UUID
+    name: str
+
+
+class SuggestionCounters(BaseModel):
+    """Агрегированные счётчики правок для последнего анализа документа."""
+
+    total: int = 0
+    pending: int = 0
+    accepted: int = 0
+    rejected: int = 0
+
+
+class DocumentListItem(BaseModel):
+    """
+    Элемент глобального списка документов.
+
+    Используется в GET /api/v1/documents — отображает метаданные документа,
+    проект, статус и счётчики правок без необходимости отдельных запросов
+    к /projects/{id}/documents/{id}/suggestions.
+    """
+
+    id: uuid.UUID
+    title: str
+    format: str
+    status: DocumentStatus
+    current_analysis_job_id: uuid.UUID | None
+    created_at: datetime
+    updated_at: datetime
+    project: DocumentListProject
+    suggestions: SuggestionCounters
+
+
+class DocumentListPage(BaseModel):
+    """Страница глобального списка документов."""
+
+    items: list[DocumentListItem]
+    total: int
+    limit: int
+    offset: int

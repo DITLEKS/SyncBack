@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from app.api.v1.routers.analysis_jobs import router as analysis_jobs_router
 from app.api.v1.routers.auth import router as auth_router
 from app.api.v1.routers.documents import router as documents_router
+from app.api.v1.routers.my_documents import router as my_documents_router
 from app.api.v1.routers.projects import router as projects_router
 from app.api.v1.routers.sources import router as sources_router
 from app.api.v1.routers.suggestions import router as suggestions_router
@@ -47,6 +48,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(projects_router, prefix="/api/v1")
+    app.include_router(my_documents_router, prefix="/api/v1")  # P0-4: GET /api/v1/documents
     app.include_router(documents_router, prefix="/api/v1")
     app.include_router(sources_router, prefix="/api/v1")
     app.include_router(analysis_jobs_router, prefix="/api/v1")
