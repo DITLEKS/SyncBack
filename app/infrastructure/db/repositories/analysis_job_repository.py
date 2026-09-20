@@ -16,6 +16,18 @@ class AnalysisJobRepository:
     async def get_by_id(self, job_id: uuid.UUID) -> AnalysisJob | None:
         return await self._session.get(AnalysisJob, job_id)
 
+    async def get_by_idempotency_key(
+        self, document_id: uuid.UUID, idempotency_key: str
+    ) -> AnalysisJob | None:
+        """Найти job по (document_id, idempotency_key). Возвращает None, если не найден."""
+        result = await self._session.execute(
+            select(AnalysisJob).where(
+                AnalysisJob.document_id == document_id,
+                AnalysisJob.idempotency_key == idempotency_key,
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def get_active_by_document_id(self, document_id: uuid.UUID) -> AnalysisJob | None:
         result = await self._session.execute(
             select(AnalysisJob)

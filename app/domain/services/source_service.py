@@ -3,9 +3,12 @@
 
 ИСПРАВЛЕНО: list_sources теперь принимает limit/offset и возвращает
 (items, total) вместо всего списка целиком.
+
+P0-6: create_text_source / create_file_source принимают scope и передают в ORM.
 """
 
 import uuid
+from typing import Literal
 
 from app.core.config import Settings, get_settings
 from app.domain.exceptions import FileTooLargeError, SourceNotFoundError
@@ -13,7 +16,15 @@ from app.domain.interfaces.file_storage import FileStorage
 from app.infrastructure.db.models.enums import SourceType
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.source import Source
+from app.infrastructure.db.models.source_scope import SourceScope
 from app.infrastructure.db.repositories.source_repository import SourceRepository
+
+_ScopeLiteral = Literal["project", "document"]
+
+_SCOPE_MAP: dict[str, SourceScope] = {
+    "project": SourceScope.PROJECT,
+    "document": SourceScope.DOCUMENT,
+}
 
 
 class SourceService:
@@ -28,13 +39,32 @@ class SourceService:
         self._settings = settings or get_settings()
 
     async def create_text_source(
-        self, project: Project, name: str, source_type: SourceType, text_content: str | None, url: str | None
+        self,
+        project: Project,
+        name: str,
+        source_type: SourceType,
+        text_content: str | None,
+        url: str | None,
+        scope: _ScopeLiteral = "project",
     ) -> Source:
-        source = Source(project_id=project.id, name=name, type=source_type, text_content=text_content, url=url)
+        source = Source(
+            project_id=project.id,
+            name=name,
+            type=source_type,
+            text_content=text_content,
+            url=url,
+            scope=_SCOPE_MAP[scope],
+        )
         return await self._sources.create(source)
 
     async def create_file_source(
-        self, project: Project, name: str, filename: str, content: bytes, content_type: str
+        self,
+        project: Project,
+        name: str,
+        filename: str,
+        content: bytes,
+        content_type: str,
+        scope: _ScopeLiteral = "project",
     ) -> Source:
         if len(content) > self._settings.max_upload_size_bytes:
             raise FileTooLargeError(f"Файл превышает лимит {self._settings.max_upload_size_mb} МБ")
@@ -43,7 +73,14 @@ class SourceService:
         storage_key = f"projects/{project.id}/sources/{source_id}/{filename}"
         await self._storage.upload(storage_key, content, content_type)
 
-        source = Source(id=source_id, project_id=project.id, name=name, type=SourceType.FILE, storage_key=storage_key)
+        source = Source(
+            id=source_id,
+            project_id=project.id,
+            name=name,
+            type=SourceType.FILE,
+            storage_key=storage_key,
+            scope=_SCOPE_MAP[scope],
+        )
         try:
             return await self._sources.create(source)
         except Exception:

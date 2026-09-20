@@ -26,8 +26,17 @@ class AnalysisJobService:
         self._jobs = analysis_job_repository
         self._documents = document_repository
 
-    async def create_job(self, project_id: uuid.UUID, document_id: uuid.UUID) -> AnalysisJob:
+    async def create_job(
+        self,
+        project_id: uuid.UUID,
+        document_id: uuid.UUID,
+        idempotency_key: str | None = None,
+    ) -> AnalysisJob:
         """Создать задачу анализа.
+
+        Если передан idempotency_key и job с таким ключом уже существует для
+        данного документа — возвращает существующий job без создания нового
+        (HTTP-роутер должен отдать 200 вместо 201 в этом случае).
 
         Разрешённые исходные статусы документа (таблица переходов):
           • DRAFT             → переход №2 (первичный/ручной запуск)
@@ -46,6 +55,15 @@ class AnalysisJobService:
         document = await self._documents.get_by_id(document_id)
         if document is None or document.project_id != project_id:
             raise DocumentNotFoundError(f"Документ {document_id} не найден в проекте {project_id}")
+
+        # --- Idempotency-check (P0-7) ---
+        # Выполняем до проверки статуса документа: если ключ уже знаком,
+        # повторно запускать анализ не нужно вне зависимости от текущего статуса.
+        if idempotency_key is not None:
+            existing = await self._jobs.get_by_idempotency_key(document_id, idempotency_key)
+            if existing is not None:
+                return existing
+
         if document.status not in _ANALYSIS_ALLOWED_STATUSES:
             raise InvalidDocumentStatusError(
                 f"Анализ можно запустить только для документа в статусе "
@@ -64,7 +82,12 @@ class AnalysisJobService:
         if document.status != DocumentStatus.DRAFT:
             document = await self._documents.update_status(document, DocumentStatus.DRAFT)
 
-        job = AnalysisJob(id=uuid.uuid4(), document_id=document.id, status=AnalysisJobStatus.PENDING)
+        job = AnalysisJob(
+            id=uuid.uuid4(),
+            document_id=document.id,
+            status=AnalysisJobStatus.PENDING,
+            idempotency_key=idempotency_key,
+        )
         try:
             return await self._jobs.create_for_document(job, document)
         except IntegrityError as exc:
