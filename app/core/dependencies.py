@@ -2,6 +2,7 @@
 DI-фабрики зависимостей FastAPI.
 
 ProjectService теперь принимает file_storage — нужен для delete_project().
+DashboardService добавлен для P0-#1-3.
 """
 
 from functools import lru_cache
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.domain.services.audit_log_service import AuditLogService
+from app.domain.services.dashboard_service import DashboardService
 from app.domain.services.document_export_service import DocumentExportService
 from app.domain.services.document_service import DocumentService
 from app.domain.services.project_service import ProjectService
@@ -132,3 +134,11 @@ async def get_login_rate_limiter() -> LoginRateLimiter:
         max_attempts=settings.login_max_attempts,
         lockout_seconds=settings.login_lockout_seconds,
     )
+
+
+# P0-#1-3: DashboardService
+async def get_dashboard_service() -> DashboardService:
+    """Возвращает DashboardService без репозиториев (stub-режим).
+    Заменить аргументами когда будет добавлен DashboardRepository.
+    """
+    return DashboardService()

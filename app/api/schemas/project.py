@@ -26,5 +26,8 @@ class ProjectResponse(BaseModel):
     description: str | None
     owner_id: uuid.UUID
     created_at: datetime
+    # P0-4: счётчики для карточки проекта
+    document_count: int = 0
+    source_count: int = 0
 
     model_config = {"from_attributes": True}

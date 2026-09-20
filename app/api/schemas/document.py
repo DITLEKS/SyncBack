@@ -1,42 +1,32 @@
 """
-Схемы документов.
-
-DocumentContentResponse/DocumentSectionResponse — распарсенный текст документа с позициями
-секций для инлайн-отображения правок во фронтенде (сопоставляются с
-s.section_ref у Suggestion).
-
-ДОБАВЛЕНО (P0-4): DocumentListItem, DocumentListProject, SuggestionCounters —
-  схемы для GET /api/v1/documents (глобальный список документов).
+P0-2: добавлен review_version в DocumentResponse для оптимистической блокировки.
+P0-6: добавлен UploadDocumentRequest — загрузка документа с явным project_id
+      (нужно для маршрута «Мои документы» → кнопка «Загрузить документ»).
 """
-
 import uuid
 from datetime import datetime
+from typing import Optional
 
-from pydantic import BaseModel, Field
-
-from app.infrastructure.db.models.enums import DocumentStatus
+from pydantic import BaseModel
 
 
 class DocumentResponse(BaseModel):
     id: uuid.UUID
     project_id: uuid.UUID
-    title: str
+    name: str
     format: str
-    status: DocumentStatus
-    current_analysis_job_id: uuid.UUID | None
-    created_at: datetime
-    updated_at: datetime
-
+    size_bytes: int
+    uploaded_at: datetime
+    status: str
+    current_analysis_job_id: uuid.UUID | None = None
+    # P0-2: версия для If-Match / ETag
+    review_version: int = 0
     model_config = {"from_attributes": True}
 
 
-class DocumentDownloadResponse(BaseModel):
-    download_url: str
-    expires_in: int
-
-
-class AttachSourcesRequest(BaseModel):
-    source_ids: list[uuid.UUID] = Field(min_length=1)
+class DocumentContentResponse(BaseModel):
+    plain_text: str
+    sections: list["DocumentSectionResponse"]
 
 
 class DocumentSectionResponse(BaseModel):
@@ -45,46 +35,35 @@ class DocumentSectionResponse(BaseModel):
     end_offset: int
 
 
-class DocumentContentResponse(BaseModel):
-    plain_text: str
-    sections: list[DocumentSectionResponse]
+class DocumentDownloadResponse(BaseModel):
+    download_url: str
+    expires_in: int
 
 
-# ---------------------------------------------------------------------------
-# P0-4: глобальный список документов
-# ---------------------------------------------------------------------------
+class AttachSourcesRequest(BaseModel):
+    source_ids: list[uuid.UUID]
 
+
+# ── P0-6 ──────────────────────────────────────────────────────────────────────
 
 class DocumentListProject(BaseModel):
-    """Краткая информация о проекте в контексте элемента глобального списка."""
-
     id: uuid.UUID
     name: str
 
 
 class SuggestionCounters(BaseModel):
-    """Агрегированные счётчики правок для последнего анализа документа."""
-
-    total: int = 0
-    pending: int = 0
-    accepted: int = 0
-    rejected: int = 0
+    total: int
+    pending: int
+    accepted: int
+    rejected: int
 
 
 class DocumentListItem(BaseModel):
-    """
-    Элемент глобального списка документов.
-
-    Используется в GET /api/v1/documents — отображает метаданные документа,
-    проект, статус и счётчики правок без необходимости отдельных запросов
-    к /projects/{id}/documents/{id}/suggestions.
-    """
-
     id: uuid.UUID
     title: str
     format: str
-    status: DocumentStatus
-    current_analysis_job_id: uuid.UUID | None
+    status: str
+    current_analysis_job_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
     project: DocumentListProject
@@ -92,8 +71,6 @@ class DocumentListItem(BaseModel):
 
 
 class DocumentListPage(BaseModel):
-    """Страница глобального списка документов."""
-
     items: list[DocumentListItem]
     total: int
     limit: int
