@@ -21,6 +21,23 @@ class AuditLogService:
         entry = AuditLog(user_id=user_id, document_id=document_id, action=AuditAction.DOWNLOAD)
         return await self._audit_logs.create(entry)
 
-    async def log_suggestion_decision(self, user_id: uuid.UUID, suggestion_id: uuid.UUID, action: AuditAction) -> AuditLog:
+    async def log_suggestion_decision(
+        self, user_id: uuid.UUID, suggestion_id: uuid.UUID, action: AuditAction
+    ) -> AuditLog:
         entry = AuditLog(user_id=user_id, suggestion_id=suggestion_id, action=action)
         return await self._audit_logs.create(entry)
+
+    async def bulk_log_suggestion_decisions(
+        self,
+        user_id: uuid.UUID,
+        decisions: list[tuple[uuid.UUID, AuditAction]],
+    ) -> None:
+        """#3 Записывает все решения одним коммитом вместо N отдельных await.
+
+        decisions: [(suggestion_id, AuditAction), ...]
+        """
+        entries = [
+            AuditLog(user_id=user_id, suggestion_id=suggestion_id, action=action)
+            for suggestion_id, action in decisions
+        ]
+        await self._audit_logs.bulk_create(entries)
