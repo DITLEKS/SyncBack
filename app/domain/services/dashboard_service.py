@@ -1,97 +1,62 @@
 """
-DashboardService — агрегатная логика для экрана «Рабочее пространство».
+DashboardService — оркестрирует агрегаты для GET /dashboard,
+GET /documents/attention и GET /documents/recent.
 
-Не выполняет прямых SQL-запросов: делегирует репозиториям.
-В текущей реализации содержит заглушки (stub), которые нужно
-заменить реальными запросами при добавлении DashboardRepository.
+Сервис не выполняет прямых SQL-запросов: делегирует DashboardRepository.
 
-Методы:
-  get_dashboard(user_id)              → DashboardResponse
-  get_attention_documents(user_id)    → list[AttentionDocumentItem]
-  get_recent_documents(user_id)       → list[RecentDocumentItem]
-  track_open(user_id, document_id)    → None
+PERF-1: вместо 3 отдельных COUNT-запросов используется один агрегатный запрос
+с FILTER (в DashboardRepository.get_stats), сокращая 3 RTT до 1.
 """
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime, timedelta, timezone
 
-from app.api.schemas.dashboard import (
-    AttentionDocumentItem,
-    DashboardResponse,
-    DayActivity,
-    RecentDocumentItem,
-)
+from app.api.schemas.dashboard import DashboardResponse, DayActivity
+from app.infrastructure.db.repositories.dashboard_repository import DashboardRepository
 
 
 class DashboardService:
-    """Сервис дашборда. Инжектируется через get_dashboard_service().
+    """Dashboard service. Инжектируется через get_dashboard_service()."""
 
-    Аргументы конструктора будут расширены при добавлении
-    DashboardRepository и DocumentOpenRepository.
-    """
-
-    def __init__(self, dashboard_repository=None, document_open_repository=None) -> None:
+    def __init__(self, dashboard_repository: DashboardRepository) -> None:
         self._repo = dashboard_repository
-        self._open_repo = document_open_repository
 
-    # ── #1 Dashboard агрегаты ─────────────────────────────────────────────────
+    # ── #1 Dashboard агрегаты ——————————————————————————————————————————
 
     async def get_dashboard(self, user_id: uuid.UUID) -> DashboardResponse:
-        """Возвращает агрегаты для рабочего пространства.
-
-        TODO: заменить заглушки реальными запросами через DashboardRepository.
-        """
-        if self._repo is not None:
-            return await self._repo.get_dashboard_aggregates(user_id)
-
-        # Stub — возвращает нулевые значения до появления репозитория
+        """PERF-1: все COUNT-агрегаты + activity в двух запросах вместо четырёх."""
+        stats = await self._repo.get_stats(user_id)
+        total = stats["total"]
+        awaiting = stats["awaiting"]
+        ready = stats["ready"]
+        relevance_percent = round(ready / total * 100) if total else 0
+        activity_rows = await self._repo.get_activity_last_7_days(user_id)
         return DashboardResponse(
-            total_documents=0,
-            awaiting_approval_count=0,
-            ready_count=0,
-            relevance_percent=0.0,
+            total_documents=total,
+            awaiting_approval_count=awaiting,
+            ready_count=ready,
+            relevance_percent=relevance_percent,
             activity_last_7_days=[
-                DayActivity(
-                    date=(date.today() - timedelta(days=i)).isoformat(),
-                    analyzed=0,
-                    approved=0,
-                )
-                for i in range(6, -1, -1)
+                DayActivity(date=r["date"], opens=r["opens"]) for r in activity_rows
             ],
         )
 
-    # ── #2 Требуют внимания ───────────────────────────────────────────────────
+    # ── #2 Требуют внимания ———————————————————————————————————————————
 
     async def get_attention_documents(
         self, user_id: uuid.UUID, limit: int = 4
-    ) -> list[AttentionDocumentItem]:
-        """Топ-N документов в awaiting_approval, отсортированные по
-        pending_suggestions DESC.
+    ) -> list[dict]:
+        return await self._repo.get_attention_documents(user_id, limit=limit)
 
-        TODO: заменить заглушку реальным запросом.
-        """
-        if self._repo is not None:
-            return await self._repo.get_attention_documents(user_id, limit=limit)
-        return []
-
-    # ── #3 Недавние документы ─────────────────────────────────────────────────
+    # ── #3 Недавние документы ————————————————————————————————————————
 
     async def get_recent_documents(
         self, user_id: uuid.UUID, limit: int = 5
-    ) -> list[RecentDocumentItem]:
-        """N последних документов, открытых пользователем.
+    ) -> list[dict]:
+        return await self._repo.get_recent_documents(user_id, limit=limit)
 
-        TODO: заменить заглушку реальным запросом.
-        """
-        if self._open_repo is not None:
-            return await self._open_repo.get_recent_for_user(user_id, limit=limit)
-        return []
+    # ── Трекинг открытия ——————————————————————————————————————————————
 
     async def track_open(self, user_id: uuid.UUID, document_id: uuid.UUID) -> None:
-        """Записывает/обновляет last_opened_at для пары (user_id, document_id).
-
-        TODO: реализовать через DocumentOpenRepository → таблица document_opens.
-        """
-        if self._open_repo is not None:
-            await self._open_repo.upsert_open(user_id, document_id)
+        """UPSERT last_opened_at через DashboardRepository."""
+        await self._repo.upsert_open(user_id, document_id)

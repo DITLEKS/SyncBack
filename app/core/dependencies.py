@@ -1,8 +1,8 @@
 """
 DI-фабрики зависимостей FastAPI.
 
-ProjectService теперь принимает file_storage — нужен для delete_project().
-DashboardService добавлен для P0-#1-3.
+ProjectService принимает file_storage — нужен для delete_project().
+DashboardService подключён с реальным DashboardRepository (CR-2).
 """
 
 from functools import lru_cache
@@ -22,6 +22,7 @@ from app.domain.services.suggestion_service import SuggestionService
 from app.infrastructure.cache.redis_client import get_redis_client
 from app.infrastructure.db.repositories.analysis_job_repository import AnalysisJobRepository
 from app.infrastructure.db.repositories.audit_log_repository import AuditLogRepository
+from app.infrastructure.db.repositories.dashboard_repository import DashboardRepository
 from app.infrastructure.db.repositories.document_repository import DocumentRepository
 from app.infrastructure.db.repositories.project_repository import ProjectRepository
 from app.infrastructure.db.repositories.source_repository import SourceRepository
@@ -136,9 +137,10 @@ async def get_login_rate_limiter() -> LoginRateLimiter:
     )
 
 
-# P0-#1-3: DashboardService
-async def get_dashboard_service() -> DashboardService:
-    """Возвращает DashboardService без репозиториев (stub-режим).
-    Заменить аргументами когда будет добавлен DashboardRepository.
-    """
-    return DashboardService()
+async def get_dashboard_service(
+    session: AsyncSession = Depends(get_db),
+) -> DashboardService:
+    """CR-2: реальный DashboardRepository с сессией вместо заглушки."""
+    return DashboardService(
+        dashboard_repository=DashboardRepository(session),
+    )

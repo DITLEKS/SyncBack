@@ -2,10 +2,11 @@
 DashboardRepository — реальные SQL-агрегаты для GET /dashboard.
 
 Запросы:
-  - total_documents           COUNT всех документов пользователя
-  - awaiting_approval_count   COUNT документов в статусе AWAITING_APPROVAL
-  - ready_count               COUNT документов в статусе READY
+  - get_stats                 единый COUNT(*) FILTER вместо трёх отдельных (PERF-1)
   - activity_last_7_days      GROUP BY date за последние 7 дней (из document_opens)
+  - get_attention_documents   Топ-N AWAITING_APPROVAL по pending_suggestions DESC
+  - get_recent_documents      5 последних открытых документов
+  - upsert_open               ON CONFLICT DO UPDATE last_opened_at
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import sqlalchemy as sa
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.db.models.document import Document
@@ -39,33 +41,44 @@ class DashboardRepository:
         )
 
     # ------------------------------------------------------------------
-    # Агрегаты
+    # PERF-1: единый агрегатный запрос вместо трёх отдельных COUNT
     # ------------------------------------------------------------------
 
-    async def get_total_documents(self, owner_id: uuid.UUID) -> int:
-        q = select(func.count()).select_from(self._owned_docs_q(owner_id).subquery())
-        return (await self._session.execute(q)).scalar_one()
+    async def get_stats(self, owner_id: uuid.UUID) -> dict:
+        """Возвращает {total, awaiting, ready} за один SQL-запрос.
 
-    async def get_awaiting_approval_count(self, owner_id: uuid.UUID) -> int:
-        base = self._owned_docs_q(owner_id).where(
-            Document.status == DocumentStatus.AWAITING_APPROVAL
+        Использует COUNT(*) FILTER (аналог CASE WHEN) вместо 3 отдельных подзапросов,
+        что убирает 2 лишних RTT при каждой загрузке дашборда.
+        """
+        q = (
+            select(
+                func.count().label("total"),
+                func.count().filter(
+                    Document.status == DocumentStatus.AWAITING_APPROVAL
+                ).label("awaiting"),
+                func.count().filter(
+                    Document.status == DocumentStatus.READY
+                ).label("ready"),
+            )
+            .select_from(
+                select(Document.status)
+                .join(Project, Document.project_id == Project.id)
+                .where(Project.owner_id == owner_id)
+                .subquery()
+            )
         )
-        q = select(func.count()).select_from(base.subquery())
-        return (await self._session.execute(q)).scalar_one()
+        row = (await self._session.execute(q)).one()
+        return {"total": row.total, "awaiting": row.awaiting, "ready": row.ready}
 
-    async def get_ready_count(self, owner_id: uuid.UUID) -> int:
-        base = self._owned_docs_q(owner_id).where(
-            Document.status == DocumentStatus.READY
-        )
-        q = select(func.count()).select_from(base.subquery())
-        return (await self._session.execute(q)).scalar_one()
+    # ------------------------------------------------------------------
+    # Activity
+    # ------------------------------------------------------------------
 
     async def get_activity_last_7_days(
         self, owner_id: uuid.UUID
     ) -> list[dict]:
-        """Возвращает список {date: str, opens: int} за последние 7 дней."""
+        """Возвращает [{date: str, opens: int}] за последние 7 дней."""
         since = datetime.now(tz=timezone.utc) - timedelta(days=6)
-        # Приводим timestamp к дате в UTC
         day_col = func.date_trunc("day", DocumentOpen.last_opened_at).label("day")
         q = (
             select(day_col, func.count().label("opens"))
@@ -77,7 +90,6 @@ class DashboardRepository:
             .order_by(day_col)
         )
         rows = (await self._session.execute(q)).all()
-        # Заполняем нулями пропущенные дни
         result_map: dict[date, int] = {r.day.date(): r.opens for r in rows}
         today = datetime.now(tz=timezone.utc).date()
         return [
@@ -88,13 +100,14 @@ class DashboardRepository:
             for i in range(6, -1, -1)
         ]
 
+    # ------------------------------------------------------------------
+    # Attention documents
+    # ------------------------------------------------------------------
+
     async def get_attention_documents(
         self, owner_id: uuid.UUID, limit: int = 4
     ) -> list[dict]:
-        """
-        Топ-N документов в статусе AWAITING_APPROVAL,
-        отсортированных по pending_suggestions DESC.
-        """
+        """Топ-N документов в AWAITING_APPROVAL, отсортированных по pending_suggestions DESC."""
         from app.infrastructure.db.models.suggestion import Suggestion
         from app.infrastructure.db.models.enums import SuggestionStatus
 
@@ -137,10 +150,14 @@ class DashboardRepository:
             for r in rows
         ]
 
+    # ------------------------------------------------------------------
+    # Recent documents
+    # ------------------------------------------------------------------
+
     async def get_recent_documents(
         self, user_id: uuid.UUID, limit: int = 5
     ) -> list[dict]:
-        """5 последних открытых документов пользователя."""
+        """N последних открытых документов пользователя."""
         q = (
             select(
                 Document.id,
@@ -168,3 +185,26 @@ class DashboardRepository:
             }
             for r in rows
         ]
+
+    # ------------------------------------------------------------------
+    # Track open (extracted from deleted app/services/dashboard_service.py)
+    # ------------------------------------------------------------------
+
+    async def upsert_open(self, user_id: uuid.UUID, document_id: uuid.UUID) -> None:
+        """Упсерт last_opened_at атомарно (PostgreSQL ON CONFLICT DO UPDATE)."""
+        now = datetime.now(tz=timezone.utc)
+        stmt = (
+            pg_insert(DocumentOpen)
+            .values(
+                id=uuid.uuid4(),
+                user_id=user_id,
+                document_id=document_id,
+                last_opened_at=now,
+            )
+            .on_conflict_do_update(
+                constraint="uq_document_opens_user_document",
+                set_={"last_opened_at": now},
+            )
+        )
+        await self._session.execute(stmt)
+        await self._session.flush()

@@ -3,10 +3,10 @@
 finalize_review, атомарное сохранение сессии ревью (P0-2) и сборка
 списка принятых изменений для экспорта.
 
-ИСПРАВЛЕНО (P0-#13):
-- bulk_accept() теперь возвращает tuple[list[Suggestion], Document], чтобы
-  роутер мог заполнить BulkAcceptResponse.document_status и .review_version
-  без лишнего GET-запроса.
+ИСПРАВЛЕНО:
+- PERF-2: apply_review принимает user_id; больше нет uuid(int=0) в audit_log.
+- CODE-3: дублированный export-блок вынесен в _run_export().
+- P0-#13: bulk_accept() возвращает BulkAcceptResult(правки, документ).
 """
 from __future__ import annotations
 
@@ -94,6 +94,24 @@ class SuggestionService:
                 f"Правка {suggestion_id} не найдена для документа {document.id}"
             )
         return suggestion
+
+    async def _run_export(
+        self,
+        document: Document,
+        export_service: "DocumentExportService",
+    ) -> None:
+        """CODE-3: единый экспорт-блок, ранее дублировавшийся в finalize_review
+        и atomic_review_save. Бросает ReviewNotCompleteError при ошибке."""
+        try:
+            await export_service.export_and_save(document)
+        except Exception as err:
+            logger.exception(
+                "Не удалось материализовать финальный файл",
+                extra={"document_id": str(document.id)},
+            )
+            raise ReviewNotCompleteError(
+                "Не удалось применить утверждённые правки к документу."
+            ) from err
 
     # ------------------------------------------------------------------
     # Read operations
@@ -193,12 +211,7 @@ class SuggestionService:
         document_id: uuid.UUID,
         user_id: uuid.UUID,
     ) -> BulkAcceptResult:
-        """Бульковое принятие всех pending-правок.
-
-        P0-#13: возвращает BulkAcceptResult(правки, документ), чтобы
-        роутер мог вернуть document_status и review_version в одном ответе,
-        без дополнительного GET /editor.
-        """
+        """P0-#13: возвращает BulkAcceptResult(правки, документ)."""
         document = await self._get_document_or_raise(project_id, document_id)
         if document.status != DocumentStatus.AWAITING_APPROVAL:
             raise InvalidDocumentStatusError(
@@ -212,8 +225,6 @@ class SuggestionService:
         accepted = await self._suggestions.bulk_update_status(
             pending_ids, SuggestionStatus.ACCEPTED, user_id
         )
-        # Перечитываем документ после операции, чтобы получить
-        # актуальный status и review_version.
         refreshed = await self._documents.get_by_id(document_id)
         return BulkAcceptResult(
             suggestions=accepted,
@@ -221,32 +232,20 @@ class SuggestionService:
         )
 
     # ------------------------------------------------------------------
-    # P0-2 (rev-4): apply_review — атомарное применение accepted/rejected
+    # P0-2 (rev-4): apply_review
     # ------------------------------------------------------------------
 
     async def apply_review(
         self,
         project_id: uuid.UUID,
         document_id: uuid.UUID,
+        user_id: uuid.UUID,
         accepted_ids: list[uuid.UUID],
         rejected_ids: list[uuid.UUID],
         current_review_version: int,
     ) -> int:
-        """Атомарно применить списки принятых и отклонённых правок.
-
-        Алгоритм:
-        1. Загрузить документ и проверить review_version == current_review_version.
-           При несовпадении → ReviewVersionConflictError → роутер вернёт 409.
-        2. Применить bulk UPDATE для accepted_ids и rejected_ids.
-           Правки уже в ACCEPTED/REJECTED пропускаются атомарно (WHERE status = PENDING).
-        3. Инкрементировать review_version через finalize_and_bump_version или
-           отдельный update_review_version (только версия, без смены статуса).
-
-        Возвращает новую review_version.
-
-        Примечание: этот метод не требует, чтобы document.status == AWAITING_APPROVAL,
-        так как PUT /editor/review — «частичное» сохранение, а не финализация.
-        """
+        """PERF-2: user_id теперь обязателен — записывается реальный актор
+        вместо 00000000-0000-0000-0000-000000000000 в audit_log."""
         document = await self._get_document_or_raise(project_id, document_id)
 
         if document.review_version != current_review_version:
@@ -256,20 +255,15 @@ class SuggestionService:
                 "Обновите страницу и повторите попытку."
             )
 
-        # Применяем bulk-обновления (WHERE status = PENDING — защита от гонки)
         if accepted_ids:
-            # user_id не передаётся в apply_review; правки без автора — допустимо
-            # для bulk-операции из PUT /editor/review (нет явного user_id в теле).
-            # TODO: передавать user_id из depends когда будет auth на этом эндпоинте.
             await self._suggestions.bulk_update_status(
-                accepted_ids, SuggestionStatus.ACCEPTED, uuid.UUID(int=0)
+                accepted_ids, SuggestionStatus.ACCEPTED, user_id
             )
         if rejected_ids:
             await self._suggestions.bulk_update_status(
-                rejected_ids, SuggestionStatus.REJECTED, uuid.UUID(int=0)
+                rejected_ids, SuggestionStatus.REJECTED, user_id
             )
 
-        # Инкрементируем review_version атомарно
         updated_document = await self._documents.bump_review_version(document)
         return updated_document.review_version
 
@@ -283,10 +277,7 @@ class SuggestionService:
         document_id: uuid.UUID,
         export_service: "DocumentExportService | None" = None,
     ) -> Document:
-        """Перевести документ в READY (переход №8).
-
-        Условие: статус AWAITING_APPROVAL И ни одной правки в PENDING.
-        """
+        """CODE-3: использует _run_export() вместо встроенного try/except."""
         document = await self._get_document_or_raise(project_id, document_id)
         if document.status != DocumentStatus.AWAITING_APPROVAL:
             raise InvalidDocumentStatusError(
@@ -303,18 +294,8 @@ class SuggestionService:
             raise ReviewNotCompleteError(
                 f"Нельзя завершить review: не рассмотрено предложений — {pending_count}"
             )
-
         if export_service is not None:
-            try:
-                await export_service.export_and_save(document)
-            except Exception as err:
-                logger.exception(
-                    "Не удалось материализовать финальный файл при finalize_review",
-                    extra={"document_id": str(document_id)},
-                )
-                raise ReviewNotCompleteError(
-                    "Не удалось применить утверждённые правки к документу."
-                ) from err
+            await self._run_export(document, export_service)
         return await self._documents.update_status(document, DocumentStatus.READY)
 
     # ------------------------------------------------------------------
@@ -331,7 +312,7 @@ class SuggestionService:
         finalize: bool = True,
         export_service: "DocumentExportService | None" = None,
     ) -> ReviewSaveResult:
-        """Атомарное сохранение всех решений ревью за один вызов."""
+        """CODE-3: использует _run_export() вместо встроенного try/except."""
         document = await self._get_document_or_raise(project_id, document_id)
 
         if document.status != DocumentStatus.AWAITING_APPROVAL:
@@ -373,16 +354,7 @@ class SuggestionService:
         finalized = False
         if finalize and pending_count == 0:
             if export_service is not None:
-                try:
-                    await export_service.export_and_save(document)
-                except Exception as err:
-                    logger.exception(
-                        "Не удалось материализовать финальный файл при atomic_review_save",
-                        extra={"document_id": str(document_id)},
-                    )
-                    raise ReviewNotCompleteError(
-                        "Не удалось применить утверждённые правки к документу."
-                    ) from err
+                await self._run_export(document, export_service)
             document = await self._documents.update_status(document, DocumentStatus.READY)
             finalized = True
 
