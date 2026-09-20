@@ -1,9 +1,15 @@
-"""Запуск, просмотр и отмена задач анализа документа."""
+"""Запуск, просмотр и отмена задач анализа документа.
+
+P0-7: POST принимает опциональный заголовок Idempotency-Key.
+Если для данного документа уже существует job с тем же ключом
+(хранится в job.idempotency_key), возвращаем существующий job
+со статусом HTTP 200 вместо создания дубля.
+"""
 
 import uuid
 from contextlib import suppress
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 
 from app.api.deps import get_allowed_project
 from app.api.schemas.analysis_job import AnalysisJobResponse
@@ -29,9 +35,26 @@ async def start_analysis_job(
     document_id: uuid.UUID,
     project: Project = Depends(get_allowed_project),
     service: AnalysisJobService = Depends(get_analysis_job_service),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),  # P0-7
 ) -> AnalysisJobResponse:
+    # P0-7: идемпотентный повторный запрос — вернуть существующий job
+    if idempotency_key:
+        existing = await service.find_job_by_idempotency_key(
+            project.id, document_id, idempotency_key
+        )
+        if existing is not None:
+            # HTTP 200 (не 201) — ресурс не создан повторно
+            from fastapi.responses import JSONResponse
+            from fastapi.encoders import jsonable_encoder
+            return JSONResponse(
+                status_code=status.HTTP_200_OK,
+                content=jsonable_encoder(AnalysisJobResponse.model_validate(existing)),
+            )
+
     try:
-        job = await service.create_job(project.id, document_id)
+        job = await service.create_job(
+            project.id, document_id, idempotency_key=idempotency_key
+        )
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (AnalysisAlreadyRunningError, InvalidDocumentStatusError) as exc:

@@ -20,7 +20,12 @@ class UserRole(enum.StrEnum):
 
 
 class DocumentFormat(enum.StrEnum):
-    DOC = "doc"
+    # .doc (OLE2 / Word 97-2003) исключён из допустимых форматов загрузки:
+    # python-docx поддерживает только .docx (OpenXML). Значение оставлено
+    # в enum для обратной совместимости с уже сохранёнными записями в БД,
+    # но DocumentParserRegistry выбрасывает UnsupportedFormatError при попытке
+    # распарсить такой файл.
+    DOC = "doc"  # не поддерживается парсером — только для legacy-совместимости
     DOCX = "docx"
     TXT = "txt"
     MARKDOWN = "markdown"
@@ -43,6 +48,7 @@ class AnalysisJobStatus(enum.StrEnum):
     PENDING = "pending"
     PROCESSING = "processing"
     SUCCESS = "success"
+    PARTIAL_SUCCESS = "partial_success"  # P0-7: финализация с частичным результатом
     FAILED = "failed"
     CANCELLED = "cancelled"
 

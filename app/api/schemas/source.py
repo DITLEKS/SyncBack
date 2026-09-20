@@ -1,6 +1,9 @@
 """
 Схемы источников. Загрузка файла-источника идёт отдельным multipart-эндпоинтом
 (см. api/v1/routers/sources.py), поэтому здесь описаны только note/link.
+
+P0-6: добавлен scope — разделение источников на уровень проекта (project) и
+уровень конкретного документа (document). По умолчанию scope=project.
 """
 
 import uuid
@@ -15,6 +18,7 @@ class SourceCreateRequest(BaseModel):
     type: Literal["note", "link"]
     text_content: str | None = Field(default=None, max_length=200_000)
     url: str | None = Field(default=None, max_length=2048)
+    scope: Literal["project", "document"] = "project"  # P0-6
 
     @model_validator(mode="after")
     def check_payload_matches_type(self) -> "SourceCreateRequest":
@@ -30,6 +34,7 @@ class SourceResponse(BaseModel):
     project_id: uuid.UUID
     name: str
     type: str
+    scope: str  # P0-6: "project" | "document"
     uploaded_at: datetime
 
     model_config = {"from_attributes": True}
