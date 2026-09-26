@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.domain.services.audit_log_service import AuditLogService
+from app.domain.services.auth_service import AuthService
 from app.domain.services.dashboard_service import DashboardService
 from app.domain.services.document_export_service import DocumentExportService
 from app.domain.services.document_service import DocumentService
@@ -27,17 +28,15 @@ from app.infrastructure.db.repositories.document_repository import DocumentRepos
 from app.infrastructure.db.repositories.project_repository import ProjectRepository
 from app.infrastructure.db.repositories.source_repository import SourceRepository
 from app.infrastructure.db.repositories.suggestion_repository import SuggestionRepository
-from app.infrastructure.db.session import get_db
+from app.infrastructure.db.session import get_db_session
 from app.infrastructure.exporters.exporter_registry import DocumentExporterRegistry
-from app.infrastructure.llm.factory import create_llm_client
+from app.infrastructure.llm.factory import get_llm_client
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
+from app.infrastructure.security.jwt_handler import JWTHandler
 from app.infrastructure.security.login_rate_limiter import LoginRateLimiter
+from app.infrastructure.security.password_hasher import PasswordHasher
 from app.infrastructure.storage.minio_storage import MinioStorage
 
-
-# ---------------------------------------------------------------------------
-# Stateless singletons
-# ---------------------------------------------------------------------------
 
 @lru_cache
 def _get_minio_storage() -> MinioStorage:
@@ -54,12 +53,20 @@ def _get_exporter_registry() -> DocumentExporterRegistry:
     return DocumentExporterRegistry()
 
 
-# ---------------------------------------------------------------------------
-# Per-request services
-# ---------------------------------------------------------------------------
+def get_project_repository(
+    session: AsyncSession = Depends(get_db_session),
+) -> ProjectRepository:
+    return ProjectRepository(session)
+
+
+def get_user_repository(session: AsyncSession = Depends(get_db_session)):
+    from app.infrastructure.db.repositories.user_repository import UserRepository
+
+    return UserRepository(session)
+
 
 async def get_project_service(
-    session: AsyncSession = Depends(get_db),
+    session: AsyncSession = Depends(get_db_session),
 ) -> ProjectService:
     return ProjectService(
         project_repository=ProjectRepository(session),
@@ -68,7 +75,7 @@ async def get_project_service(
 
 
 async def get_document_service(
-    session: AsyncSession = Depends(get_db),
+    session: AsyncSession = Depends(get_db_session),
     settings: Settings = Depends(get_settings),
 ) -> DocumentService:
     return DocumentService(
@@ -80,7 +87,7 @@ async def get_document_service(
 
 
 async def get_source_service(
-    session: AsyncSession = Depends(get_db),
+    session: AsyncSession = Depends(get_db_session),
     settings: Settings = Depends(get_settings),
 ) -> SourceService:
     return SourceService(
@@ -91,7 +98,7 @@ async def get_source_service(
 
 
 async def get_analysis_job_service(
-    session: AsyncSession = Depends(get_db),
+    session: AsyncSession = Depends(get_db_session),
 ) -> AnalysisJobService:
     return AnalysisJobService(
         analysis_job_repository=AnalysisJobRepository(session),
@@ -100,7 +107,7 @@ async def get_analysis_job_service(
 
 
 async def get_suggestion_service(
-    session: AsyncSession = Depends(get_db),
+    session: AsyncSession = Depends(get_db_session),
 ) -> SuggestionService:
     return SuggestionService(
         suggestion_repository=SuggestionRepository(session),
@@ -109,15 +116,13 @@ async def get_suggestion_service(
 
 
 async def get_audit_log_service(
-    session: AsyncSession = Depends(get_db),
+    session: AsyncSession = Depends(get_db_session),
 ) -> AuditLogService:
-    return AuditLogService(
-        audit_log_repository=AuditLogRepository(session),
-    )
+    return AuditLogService(audit_log_repository=AuditLogRepository(session))
 
 
 async def get_document_export_service(
-    session: AsyncSession = Depends(get_db),
+    session: AsyncSession = Depends(get_db_session),
 ) -> DocumentExportService:
     return DocumentExportService(
         suggestion_repository=SuggestionRepository(session),
@@ -125,6 +130,10 @@ async def get_document_export_service(
         exporter_registry=_get_exporter_registry(),
         parser_registry=_get_parser_registry(),
     )
+
+
+def get_llm_client_instance(settings: Settings = Depends(get_settings)):
+    return get_llm_client(settings)
 
 
 async def get_login_rate_limiter() -> LoginRateLimiter:
@@ -137,10 +146,17 @@ async def get_login_rate_limiter() -> LoginRateLimiter:
     )
 
 
+async def get_auth_service(
+    session: AsyncSession = Depends(get_db_session),
+    rate_limiter: LoginRateLimiter = Depends(get_login_rate_limiter),
+    settings: Settings = Depends(get_settings),
+) -> AuthService:
+    from app.infrastructure.db.repositories.user_repository import UserRepository
+
+    return AuthService(UserRepository(session), PasswordHasher(), JWTHandler(settings), rate_limiter)
+
+
 async def get_dashboard_service(
-    session: AsyncSession = Depends(get_db),
+    session: AsyncSession = Depends(get_db_session),
 ) -> DashboardService:
-    """CR-2: реальный DashboardRepository с сессией вместо заглушки."""
-    return DashboardService(
-        dashboard_repository=DashboardRepository(session),
-    )
+    return DashboardService(dashboard_repository=DashboardRepository(session))
