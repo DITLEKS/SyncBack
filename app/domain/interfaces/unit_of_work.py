@@ -8,6 +8,15 @@
     инфраструктурная реализация (SqlAlchemyUnitOfWork) подключается через DI.
   - __aenter__ и __aexit__ объявлены @abstractmethod, чтобы тестовые фейки
     были обязаны реализовать их явно.
+
+Namespace-атрибуты (все объявлены здесь для type-checker'а):
+  documents   — IDocumentRepository
+  suggestions — ISuggestionRepository
+  jobs        — IAnalysisJobRepository
+  audit       — IAuditLogRepository
+  projects    — IProjectRepository
+  sources     — ISourceRepository
+  dashboard   — IDashboardRepository
 """
 from __future__ import annotations
 
@@ -19,7 +28,10 @@ if TYPE_CHECKING:
     from app.domain.interfaces.repositories import (
         IAnalysisJobRepository,
         IAuditLogRepository,
+        IDashboardRepository,
         IDocumentRepository,
+        IProjectRepository,
+        ISourceRepository,
         ISuggestionRepository,
     )
 
@@ -30,16 +42,20 @@ class IUnitOfWork(ABC):
     Использование:
         async with uow:
             doc = await uow.documents.get_by_id(doc_id)
-            doc.status = DocumentStatus.READY
-            suggestion_ids = await uow.suggestions.list_pending_ids(job_id)
-            await uow.suggestions.bulk_accept(suggestion_ids, user_id)
+            await uow.suggestions.bulk_update_status(decisions)
             await uow.commit()   # один flush на всю операцию
     """
 
-    documents: "IDocumentRepository"
+    # Core
+    documents:   "IDocumentRepository"
     suggestions: "ISuggestionRepository"
-    jobs: "IAnalysisJobRepository"
-    audit: "IAuditLogRepository"
+    jobs:        "IAnalysisJobRepository"
+    audit:       "IAuditLogRepository"
+
+    # Extended (добавлены при переводе на UoW)
+    projects:    "IProjectRepository"
+    sources:     "ISourceRepository"
+    dashboard:   "IDashboardRepository"
 
     @abstractmethod
     async def __aenter__(self) -> "IUnitOfWork":

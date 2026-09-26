@@ -19,35 +19,70 @@ from enum import StrEnum
 
 class DocumentStatusVO(StrEnum):
     """Доменное перечисление статусов документа."""
-    DRAFT = "draft"
-    IN_PROGRESS = "in_progress"
+    DRAFT             = "draft"
+    IN_PROGRESS       = "in_progress"
     AWAITING_APPROVAL = "awaiting_approval"
-    READY = "ready"
+    READY             = "ready"
 
 
 class SuggestionStatusVO(StrEnum):
     """Доменное перечисление статусов правки."""
-    PENDING = "pending"
+    PENDING  = "pending"
     ACCEPTED = "accepted"
     REJECTED = "rejected"
 
 
 class AnalysisJobStatusVO(StrEnum):
-    """Доменное перечисление состояний задачи анализа.
-
-    Зеркалит AnalysisJobStatus из инфраструктурного слоя, но не зависит от него.
-    Конвертация: адаптер (репозиторий) читает/пишет ORM-поле через .value.
-    """
-    PENDING = "pending"
-    PROCESSING = "processing"
-    SUCCESS = "success"
+    """Доменное перечисление состояний задачи анализа."""
+    PENDING         = "pending"
+    PROCESSING      = "processing"
+    SUCCESS         = "success"
     PARTIAL_SUCCESS = "partial_success"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
+    FAILED          = "failed"
+    CANCELLED       = "cancelled"
 
 
-# Обратная совместимость: старое имя всё ещё работает
+# Обратная совместимость
 AnalysisJobState = AnalysisJobStatusVO
+
+
+class UserRoleVO(StrEnum):
+    """Роль пользователя в системе."""
+    ADMIN  = "admin"
+    EDITOR = "editor"
+    VIEWER = "viewer"
+
+
+class SourceTypeVO(StrEnum):
+    """Тип источника истины."""
+    FILE     = "file"
+    TEXT     = "text"
+    URL      = "url"
+    NOTION   = "notion"
+    GDOC     = "gdoc"
+
+
+class SourceScopeVO(StrEnum):
+    """Область видимости источника."""
+    PROJECT  = "project"
+    DOCUMENT = "document"
+
+
+class DocumentFormatVO(StrEnum):
+    """Формат исходного документа."""
+    DOCX     = "docx"
+    DOC      = "doc"
+    TXT      = "txt"
+    MARKDOWN = "markdown"
+
+
+class AuditActionVO(StrEnum):
+    """Тип действия в журнале аудита."""
+    ACCEPT       = "accept"
+    REJECT       = "reject"
+    BULK_ACCEPT  = "bulk_accept"
+    FINALIZE     = "finalize"
+    REOPEN       = "reopen"
 
 
 # ---------------------------------------------------------------------------
@@ -78,9 +113,14 @@ class SuggestionDecision:
 class ReviewDecisions:
     """Набор решений одной сессии ревью с оптимистичной блокировкой.
 
-    Заменяет пару (accepted_ids, rejected_ids) + review_version,
-    которые раньше передавались как отдельные примитивы.
+    Содержит:
+      - analysis_job_id  — к какому job относятся правки
+      - decided_by       — кто принял решения
+      - review_version   — ожидаемая версия для CAS-проверки
+      - decisions        — набор SuggestionDecision
     """
+    analysis_job_id: uuid.UUID
+    decided_by: uuid.UUID
     review_version: int
     decisions: tuple[SuggestionDecision, ...]
 
