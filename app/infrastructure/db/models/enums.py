@@ -9,26 +9,26 @@ json.dumps в logging_setup.py), используется либо .value, ли�
 объект — уже валидный str (его "символьное" содержимое не меняется). Единственное
 отличие — str(member)/f-string без .value теперь возвращает "admin" вместо
 "UserRole.ADMIN"; в кодовой базе таких мест не найдено.
+
+LOW (DocumentFormat): класс перенесён в domain/value_objects.py как DocumentFormatVO.
+Здесь оставлен только реэкспорт-алиас для обратной совместимости:
+  - SQLAlchemy Enum(DocumentFormat, name="document_format") продолжает работать;
+  - существующие миграции Alembic не затронуты (значения в БД не меняются);
+  - весь код, который импортировал DocumentFormat из enums, продолжает работать
+    без изменений благодаря алиасу.
 """
 
 import enum
+
+# ---------------------------------------------------------------------------
+# LOW: DocumentFormat перенесён в domain — реэкспорт для совместимости
+# ---------------------------------------------------------------------------
+from app.domain.value_objects import DocumentFormatVO as DocumentFormat  # noqa: F401
 
 
 class UserRole(enum.StrEnum):
     ADMIN = "admin"
     USER = "user"
-
-
-class DocumentFormat(enum.StrEnum):
-    # .doc (OLE2 / Word 97-2003) исключён из допустимых форматов загрузки:
-    # python-docx поддерживает только .docx (OpenXML). Значение оставлено
-    # в enum для обратной совместимости с уже сохранёнными записями в БД,
-    # но DocumentParserRegistry выбрасывает UnsupportedFormatError при попытке
-    # распарсить такой файл.
-    DOC = "doc"  # не поддерживается парсером — только для legacy-совместимости
-    DOCX = "docx"
-    TXT = "txt"
-    MARKDOWN = "markdown"
 
 
 class DocumentStatus(enum.StrEnum):

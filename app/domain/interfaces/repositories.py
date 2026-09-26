@@ -12,6 +12,7 @@ Infrastructure-слой предоставляет конкретные адап
   - Document и Suggestion — через DocumentProtocol/SuggestionProtocol (не ORM).
   - AnalysisJob и AuditLog — document/entry через Protocol, возвращаемые значения под TYPE_CHECKING.
   - Project, Source, User — всё ещё под TYPE_CHECKING.
+  - DocumentFormatVO — теперь из domain.value_objects (больше нет импорта из infra).
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 from app.domain.interfaces.entities import DocumentProtocol, SuggestionProtocol
 from app.domain.value_objects import (
     AnalysisJobStatusVO,
+    DocumentFormatVO,
     DocumentStatusVO,
     KeysetPage,
     PaginationParams,
@@ -37,7 +39,6 @@ if TYPE_CHECKING:
     from app.infrastructure.db.models.analysis_job import AnalysisJob
     from app.infrastructure.db.models.audit_log import AuditLog
     from app.infrastructure.db.models.document import Document
-    from app.infrastructure.db.models.enums import DocumentFormat
     from app.infrastructure.db.models.project import Project
     from app.infrastructure.db.models.source import Source
     from app.infrastructure.db.models.user import User
@@ -56,7 +57,7 @@ class IDocumentRepository(ABC):
         id: uuid.UUID,
         project_id: uuid.UUID,
         title: str,
-        format: "DocumentFormat",
+        format: DocumentFormatVO,
         storage_key: str,
     ) -> "Document": ...
 
@@ -215,7 +216,7 @@ class IAnalysisJobRepository(ABC):
         pagination: PaginationParams | KeysetPage,
     ) -> list["AnalysisJob"]:
         """
-        MED: История задач анализа по документу — необходима для эндпоинта GET /documents/{id}/jobs.
+        MED: история задач анализа по документу — необходима для эндпоинта GET /documents/{id}/jobs.
         Сортировка по created_at DESC.
         """
         ...
@@ -396,7 +397,7 @@ class ISourceRepository(ABC):
         url: str | None = None,
     ) -> "Source":
         """
-        HIGH: Изменить метаданные источника. Передавать только значения, которые необходимо изменить;
+        HIGH: изменить метаданные источника. Передавать только значения, которые необходимо изменить;
         None — поле остаётся неизменным. storage_key изменяется в инфра-слое при замене файла.
         """
         ...
@@ -404,7 +405,7 @@ class ISourceRepository(ABC):
     @abstractmethod
     async def delete(self, source: "Source") -> None:
         """
-        HIGH: Удалить источник. Инфра-слой обязан удалить связанные файлы из MinIO
+        HIGH: удалить источник. Инфра-слой обязан удалить связанные файлы из MinIO
         бест-эффорт до удаления записи из БД.
         """
         ...
