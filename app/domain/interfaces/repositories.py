@@ -10,14 +10,14 @@ Infrastructure-слой предоставляет конкретные адап
 
 Правило импортов:
   - Document и Suggestion — через DocumentProtocol/SuggestionProtocol (не ORM).
-  - Остальные ORM-типы (AnalysisJob, AuditLog, Project, Source) пока под
-    TYPE_CHECKING — постепенная миграция.
+  - AnalysisJob и AuditLog — document/entry через Protocol, возвращаемые значения под TYPE_CHECKING.
+  - Project, Source — всё ещё под TYPE_CHECKING.
 """
 from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from app.domain.interfaces.entities import DocumentProtocol, SuggestionProtocol
 from app.domain.value_objects import (
@@ -47,7 +47,6 @@ if TYPE_CHECKING:
 
 class IDocumentRepository(ABC):
 
-    # CRIT-2 (HIGH-1): factory — H-5, сервис передаёт параметры, репо строит ORM
     @abstractmethod
     async def create(
         self,
@@ -62,7 +61,6 @@ class IDocumentRepository(ABC):
     @abstractmethod
     async def get_by_id(self, document_id: uuid.UUID) -> DocumentProtocol | None: ...
 
-    # CRIT-2: signature now matches DocumentRepository — accepts pagination object
     @abstractmethod
     async def list_for_project(
         self,
@@ -71,7 +69,12 @@ class IDocumentRepository(ABC):
     ) -> list[DocumentProtocol]: ...
 
     @abstractmethod
-    async def count_for_project(self, project_id: uuid.UUID) -> int: ...
+    async def count_for_project(self, project_id: uuid.UUID) -> int:
+        """
+        M-NEW-2: отдельный запрос подсчёта является ценой. Связка list_for_project + count_for_project
+        даёт два round-trip. Если в будущем потребуется оптимизация — добавить
+        list_for_project_with_total() с COUNT(*) OVER() (window function).
+        """
 
     @abstractmethod
     async def list_analyzable_for_project(
@@ -88,26 +91,16 @@ class IDocumentRepository(ABC):
         self, document_id: uuid.UUID, expected_version: int
     ) -> DocumentProtocol | None: ...
 
-    # CRIT-3: return type aligned with implementation — raw dict
     @abstractmethod
     async def get_stats_for_project(
         self, project_id: uuid.UUID
-    ) -> dict[str, int]:
-        """Один SQL-запрос: COUNT(*) FILTER per status.
+    ) -> dict[str, int]: ...
 
-        Ключи ответа: draft, in_progress, awaiting_approval, approved,
-        rejected, total.
-        Для conversion в DocumentStats VO используйте DocumentStats(**result).
-        """
-
-    # HIGH-1: was missing from implementation
     @abstractmethod
     async def update_exported_key(
         self, document: DocumentProtocol, export_key: str
-    ) -> None:
-        """Сохранить storage_key экспортированного файла."""
+    ) -> None: ...
 
-    # HIGH-2: was missing from implementation
     @abstractmethod
     async def list_all_for_user(
         self,
@@ -118,8 +111,7 @@ class IDocumentRepository(ABC):
         search: str | None = None,
         sort_by: str = "updated_at",
         sort_dir: str = "desc",
-    ) -> tuple[list[DocumentProtocol], int]:
-        """Вернуть список + общий счётчик документов пользователя с фильтрацией/сортировкой."""
+    ) -> tuple[list[DocumentProtocol], int]: ...
 
     @abstractmethod
     async def delete(self, document: DocumentProtocol) -> None: ...
@@ -152,8 +144,7 @@ class ISuggestionRepository(ABC):
         self,
         analysis_job_id: uuid.UUID,
         pagination: PaginationParams,
-    ) -> tuple[list[SuggestionProtocol], int]:
-        """Один SELECT с COUNT(*) OVER() — список + общий счётчик за один round-trip."""
+    ) -> tuple[list[SuggestionProtocol], int]: ...
 
     @abstractmethod
     async def count_by_analysis_job(self, analysis_job_id: uuid.UUID) -> int: ...
@@ -168,10 +159,7 @@ class ISuggestionRepository(ABC):
         self,
         analysis_job_id: uuid.UUID,
         status: SuggestionStatusVO,
-    ) -> list[SuggestionProtocol]:
-        """
-        Без LIMIT: источник для экспорта — возвращает все принятые правки.
-        """
+    ) -> list[SuggestionProtocol]: ...
 
     @abstractmethod
     async def list_ids_by_analysis_job_and_status(
@@ -183,23 +171,20 @@ class ISuggestionRepository(ABC):
         self,
         suggestion: SuggestionProtocol,
         decision: SuggestionDecision,
-    ) -> SuggestionProtocol | None:
-        """CAS-обновление статуса одной правки. None — уже обработана."""
+    ) -> SuggestionProtocol | None: ...
 
     @abstractmethod
     async def bulk_update_status(
         self,
         decisions: ReviewDecisions,
-    ) -> list[SuggestionProtocol]:
-        """Единый UPDATE для accepted + rejected через ReviewDecisions VO."""
+    ) -> list[SuggestionProtocol]: ...
 
     @abstractmethod
     async def bulk_accept_all(
         self,
         analysis_job_id: uuid.UUID,
         user_id: uuid.UUID,
-    ) -> list[SuggestionProtocol]:
-        """UPDATE WHERE job_id=X AND status='pending' RETURNING * без SELECT UUID в память."""
+    ) -> list[SuggestionProtocol]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -220,50 +205,35 @@ class IAnalysisJobRepository(ABC):
         self, document_id: uuid.UUID
     ) -> "AnalysisJob | None": ...
 
-    # CRIT-1: removed obsolete `job: AnalysisJob` arg; signature now matches
-    # AnalysisJobRepository.create_for_document (H-2 factory pattern)
     @abstractmethod
     async def create_for_document(
         self,
-        document: DocumentProtocol,
+        document: DocumentProtocol,  # H-NEW-3: Protocol, не ORM-тип
         *,
         job_id: uuid.UUID | None = None,
         status: AnalysisJobStatusVO = AnalysisJobStatusVO.PENDING,
         idempotency_key: str | None = None,
-    ) -> "AnalysisJob":
-        """Фабричный метод: создаёт ORM-объект AnalysisJob внутри репозитория.
-
-        H-2: сервис передаёт только параметры — репозиторий сам строит ORM-инстанс.
-        Commit — ответственность вызывающего UoW.
-        """
+    ) -> "AnalysisJob": ...
 
     @abstractmethod
     async def mark_dispatched(
         self,
         job: "AnalysisJob",
         task_id: str,
-    ) -> "tuple[AnalysisJob, DocumentStatusVO | None]":
-        """Пометить задачу как отправленную в Celery.
-
-        CRIT-NEW-1 / CRIT-A: document не принимается — репозиторий не мутирует
-        чужие агрегаты. Возвращает (job, new_doc_status | None); вызывающий код
-        применяет изменение документа через uow.documents.update_status().
-        """
+    ) -> "tuple[AnalysisJob, DocumentStatusVO | None]": ...
 
     @abstractmethod
     async def mark_failed_queue_unavailable(
         self,
         job: "AnalysisJob",
         message: str | None,
-    ) -> "tuple[AnalysisJob, DocumentStatusVO]":
-        """CRIT-NEW-1 / CRIT-B: не принимает document, возвращает (job, DocumentStatusVO.DRAFT)."""
+    ) -> "tuple[AnalysisJob, DocumentStatusVO]": ...
 
     @abstractmethod
     async def cancel(
         self,
         job: "AnalysisJob",
-    ) -> "tuple[AnalysisJob, DocumentStatusVO]":
-        """CRIT-NEW-1 / CRIT-B: не принимает document, возвращает (job, DocumentStatusVO.DRAFT)."""
+    ) -> "tuple[AnalysisJob, DocumentStatusVO]": ...
 
     @abstractmethod
     async def mark_processing_if_active(self, job_id: uuid.UUID) -> bool: ...
@@ -284,7 +254,18 @@ class IAnalysisJobRepository(ABC):
 
 class IAuditLogRepository(ABC):
     @abstractmethod
-    async def create(self, entry: "AuditLog") -> "AuditLog": ...
+    async def create(
+        self,
+        *,
+        document_id: uuid.UUID,
+        user_id: uuid.UUID | None,
+        action: str,
+        details: Any | None = None,
+    ) -> "AuditLog":
+        """
+        M-NEW-3: фабричный метод. Сервис передаёт параметры, репозиторий строит AuditLog-объект.
+        Сохраняет паттерн фабричных методов, введённый для Document и AnalysisJob.
+        """
 
     @abstractmethod
     async def list_for_document(
@@ -337,8 +318,7 @@ class IProjectRepository(ABC):
     async def delete(self, project: "Project") -> None: ...
 
     @abstractmethod
-    async def collect_storage_keys(self, project_id: uuid.UUID) -> list[str]:
-        """Вернуть все storage_key файлов, принадлежащих проекту."""
+    async def collect_storage_keys(self, project_id: uuid.UUID) -> list[str]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -347,8 +327,7 @@ class IProjectRepository(ABC):
 
 class ISourceRepository(ABC):
     @abstractmethod
-    async def get_by_id(self, source_id: uuid.UUID) -> "Source | None":
-        """Получить один источник по ID. Используется в воркере для обработки одного источника."""
+    async def get_by_id(self, source_id: uuid.UUID) -> "Source | None": ...
 
     @abstractmethod
     async def create(
@@ -370,8 +349,7 @@ class ISourceRepository(ABC):
         source_type: SourceTypeVO,
         storage_key: str,
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
-    ) -> "Source":
-        """Создать файловый источник с заранее известным UUID (после upload)."""
+    ) -> "Source": ...
 
     @abstractmethod
     async def get_many_by_ids(
@@ -391,8 +369,7 @@ class ISourceRepository(ABC):
         self,
         document_id: uuid.UUID,
         sources: "list[Source]",
-    ) -> "list[Source]":
-        """Атомарная замена document-specific источников."""
+    ) -> "list[Source]": ...
 
 
 # ---------------------------------------------------------------------------
@@ -401,8 +378,7 @@ class ISourceRepository(ABC):
 
 class IDashboardRepository(ABC):
     @abstractmethod
-    async def get_stats(self, user_id: uuid.UUID) -> dict:
-        """Один агрегатный запрос: total / awaiting / ready (PERF-1)."""
+    async def get_stats(self, user_id: uuid.UUID) -> dict: ...
 
     @abstractmethod
     async def get_activity_last_7_days(
