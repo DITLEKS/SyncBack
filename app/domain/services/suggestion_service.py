@@ -5,11 +5,6 @@
   - Сервис зависит только от IUnitOfWork (порт) и domain value-objects.
   - Никаких импортов из app.infrastructure.* при выполнении.
   - Один uow.commit() на операцию — атомарность гарантируется UoW.
-
-ИСПРАВЛЕНО:
-  - PERF-2: apply_review принимает user_id: uuid.UUID.
-  - CODE-3: дублированный export-блок вынесен в _run_export().
-  - DDD: статусы берутся из domain.value_objects, не из infra enums.
 """
 from __future__ import annotations
 
@@ -30,7 +25,9 @@ from app.domain.interfaces.document_exporter import AppliedChange
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.value_objects import (
     DocumentStatusVO,
+    PaginationParams,
     ReviewDecisions,
+    SuggestionDecision,
     SuggestionStatusVO,
 )
 
@@ -108,6 +105,19 @@ class SuggestionService:
                 "Не удалось применить утверждённые правки к документу."
             ) from err
 
+    def _assert_awaiting_approval(self, document: "Document") -> None:
+        if document.status != DocumentStatusVO.AWAITING_APPROVAL:
+            raise InvalidDocumentStatusError(
+                "Решения по правкам доступны только в статусе 'awaiting_approval'"
+            )
+
+    def _assert_has_active_job(self, document: "Document") -> uuid.UUID:
+        if document.current_analysis_job_id is None:
+            raise ReviewNotCompleteError(
+                "У документа отсутствует текущий результат анализа"
+            )
+        return document.current_analysis_job_id
+
     # ------------------------------------------------------------------
     # Queries
     # ------------------------------------------------------------------
@@ -116,15 +126,14 @@ class SuggestionService:
         self,
         project_id: uuid.UUID,
         document_id: uuid.UUID,
-        limit: int,
-        offset: int,
+        pagination: PaginationParams,
     ) -> "tuple[list[Suggestion], int]":
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             if document.current_analysis_job_id is None:
                 return [], 0
             items = await self._uow.suggestions.list_by_analysis_job(
-                document.current_analysis_job_id, limit=limit, offset=offset
+                document.current_analysis_job_id, pagination
             )
             total = await self._uow.suggestions.count_by_analysis_job(
                 document.current_analysis_job_id
@@ -169,16 +178,10 @@ class SuggestionService:
         self,
         document: "Document",
         suggestion: "Suggestion",
-        user_id: uuid.UUID,
-        new_status: SuggestionStatusVO,
+        decision: SuggestionDecision,
     ) -> "Suggestion":
-        if document.status != DocumentStatusVO.AWAITING_APPROVAL:
-            raise InvalidDocumentStatusError(
-                "Решения по правкам доступны только в статусе 'awaiting_approval'"
-            )
-        updated = await self._uow.suggestions.update_status(
-            suggestion, new_status, user_id
-        )
+        self._assert_awaiting_approval(document)
+        updated = await self._uow.suggestions.update_status(suggestion, decision)
         if updated is None:
             raise SuggestionAlreadyDecidedError(
                 f"Правка {suggestion.id} уже была обработана другим запросом"
@@ -194,12 +197,13 @@ class SuggestionService:
     ) -> "Suggestion":
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
-            suggestion = await self._get_suggestion_for_document(
-                document, suggestion_id
+            suggestion = await self._get_suggestion_for_document(document, suggestion_id)
+            decision = SuggestionDecision(
+                suggestion_id=suggestion_id,
+                status=SuggestionStatusVO.ACCEPTED,
+                decided_by=user_id,
             )
-            result = await self._decide(
-                document, suggestion, user_id, SuggestionStatusVO.ACCEPTED
-            )
+            result = await self._decide(document, suggestion, decision)
             await self._uow.commit()
         return result
 
@@ -212,12 +216,13 @@ class SuggestionService:
     ) -> "Suggestion":
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
-            suggestion = await self._get_suggestion_for_document(
-                document, suggestion_id
+            suggestion = await self._get_suggestion_for_document(document, suggestion_id)
+            decision = SuggestionDecision(
+                suggestion_id=suggestion_id,
+                status=SuggestionStatusVO.REJECTED,
+                decided_by=user_id,
             )
-            result = await self._decide(
-                document, suggestion, user_id, SuggestionStatusVO.REJECTED
-            )
+            result = await self._decide(document, suggestion, decision)
             await self._uow.commit()
         return result
 
@@ -233,26 +238,25 @@ class SuggestionService:
     ) -> BulkAcceptResult:
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
-            if document.status != DocumentStatusVO.AWAITING_APPROVAL:
-                raise InvalidDocumentStatusError(
-                    "Решения по правкам доступны только в статусе 'awaiting_approval'"
-                )
-            if document.current_analysis_job_id is None:
-                return BulkAcceptResult(suggestions=[], document=document)
+            self._assert_awaiting_approval(document)
+            job_id = self._assert_has_active_job(document)
+
             pending_ids = await self._uow.suggestions.list_ids_by_analysis_job_and_status(
-                document.current_analysis_job_id, SuggestionStatusVO.PENDING
+                job_id, SuggestionStatusVO.PENDING
             )
-            accepted = await self._uow.suggestions.bulk_update_status(
-                document.current_analysis_job_id,
-                pending_ids,
-                SuggestionStatusVO.ACCEPTED,
-                user_id,
+            if not pending_ids:
+                return BulkAcceptResult(suggestions=[], document=document)
+
+            decisions = ReviewDecisions(
+                analysis_job_id=job_id,
+                accepted_ids=pending_ids,
+                rejected_ids=[],
+                decided_by=user_id,
             )
+            accepted = await self._uow.suggestions.bulk_update_status(decisions)
             refreshed = await self._uow.documents.get_by_id(document_id)
             await self._uow.commit()
-        return BulkAcceptResult(
-            suggestions=accepted, document=refreshed or document
-        )
+        return BulkAcceptResult(suggestions=accepted, document=refreshed or document)
 
     async def apply_review(
         self,
@@ -262,21 +266,13 @@ class SuggestionService:
         review_decisions: ReviewDecisions,
     ) -> int:
         """Применить решения ревью без финализации.
-
-        Принимает ReviewDecisions (VO) — review_version + список решений.
         Возвращает новую review_version документа.
         """
-        decisions = [
-            (d.suggestion_id,
-             SuggestionStatusVO.ACCEPTED if d.accepted else SuggestionStatusVO.REJECTED)
-            for d in review_decisions.decisions
-        ]
         result = await self.atomic_review_save(
-            project_id,
-            document_id,
-            user_id,
-            review_decisions.review_version,
-            decisions,
+            project_id=project_id,
+            document_id=document_id,
+            user_id=user_id,
+            review_decisions=review_decisions,
             finalize=False,
         )
         return result.document.review_version
@@ -289,18 +285,11 @@ class SuggestionService:
     ) -> "Document":
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
-            if document.status != DocumentStatusVO.AWAITING_APPROVAL:
-                raise InvalidDocumentStatusError(
-                    "Завершить review можно только в статусе 'awaiting_approval'"
-                )
-            if document.current_analysis_job_id is None:
-                raise ReviewNotCompleteError(
-                    "У документа отсутствует текущий результат анализа"
-                )
-            pending_count = (
-                await self._uow.suggestions.count_by_analysis_job_and_status(
-                    document.current_analysis_job_id, SuggestionStatusVO.PENDING
-                )
+            self._assert_awaiting_approval(document)
+            job_id = self._assert_has_active_job(document)
+
+            pending_count = await self._uow.suggestions.count_by_analysis_job_and_status(
+                job_id, SuggestionStatusVO.PENDING
             )
             if pending_count:
                 raise ReviewNotCompleteError(
@@ -319,8 +308,7 @@ class SuggestionService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         user_id: uuid.UUID,
-        review_version: int,
-        decisions: "list[tuple[uuid.UUID, SuggestionStatusVO]]",
+        review_decisions: ReviewDecisions,
         finalize: bool = True,
         export_service: "DocumentExportService | None" = None,
     ) -> ReviewSaveResult:
@@ -328,68 +316,60 @@ class SuggestionService:
 
         Весь use-case — один uow.commit():
           1. CAS review_version (OptimisticLock при конфликте)
-          2. bulk UPDATE accepted
-          3. bulk UPDATE rejected
-          4. (опц.) export + статус READY
-          5. commit()
+          2. Один UPDATE для accepted + rejected (через ReviewDecisions)
+          3. (опц.) export + статус READY
+          4. commit()
         """
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
-            if document.status != DocumentStatusVO.AWAITING_APPROVAL:
-                raise InvalidDocumentStatusError(
-                    "Ревью доступно только в статусе 'awaiting_approval'"
-                )
-            job_id = document.current_analysis_job_id
-            if job_id is None:
+            self._assert_awaiting_approval(document)
+            job_id = self._assert_has_active_job(document)
+
+            # Проверяем, что все suggestion_id относятся к текущему job
+            all_ids = [*review_decisions.accepted_ids, *review_decisions.rejected_ids]
+            if len(set(all_ids)) != len(all_ids):
                 raise ReviewNotCompleteError(
-                    "У документа отсутствует текущий результат анализа"
+                    "Переданы дублирующиеся id правок"
                 )
 
-            # Дедупликация и проверка противоречий
-            normalized: dict[uuid.UUID, SuggestionStatusVO] = {}
-            for suggestion_id, decision in decisions:
-                previous = normalized.get(suggestion_id)
-                if previous is not None and previous != decision:
-                    raise ReviewNotCompleteError(
-                        f"Для правки {suggestion_id} переданы противоречивые решения"
-                    )
-                normalized[suggestion_id] = decision
+            # Пересечение accepted ∩ rejected
+            overlap = set(review_decisions.accepted_ids) & set(review_decisions.rejected_ids)
+            if overlap:
+                raise ReviewNotCompleteError(
+                    f"Правки одновременно accepted и rejected: {overlap}"
+                )
 
             # CAS review_version
-            document = await self._uow.documents.compare_and_increment_review_version(
-                document.id, review_version
+            locked_doc = await self._uow.documents.compare_and_increment_review_version(
+                document.id, review_decisions.review_version
             )
-            if document is None:
+            if locked_doc is None:
                 raise OptimisticLockError(
                     "Документ изменён параллельным запросом. Обновите данные и повторите."
                 )
+            document = locked_doc
 
-            accepted_ids = [
-                sid for sid, dec in normalized.items()
-                if dec == SuggestionStatusVO.ACCEPTED
-            ]
-            rejected_ids = [
-                sid for sid, dec in normalized.items()
-                if dec == SuggestionStatusVO.REJECTED
-            ]
-            accepted = await self._uow.suggestions.bulk_update_status(
-                job_id, accepted_ids, SuggestionStatusVO.ACCEPTED, user_id
+            # Единый UPDATE через ReviewDecisions VO
+            decisions_vo = ReviewDecisions(
+                analysis_job_id=job_id,
+                accepted_ids=review_decisions.accepted_ids,
+                rejected_ids=review_decisions.rejected_ids,
+                decided_by=user_id,
+                review_version=review_decisions.review_version,
             )
-            rejected = await self._uow.suggestions.bulk_update_status(
-                job_id, rejected_ids, SuggestionStatusVO.REJECTED, user_id
-            )
-            if (
-                len(accepted) != len(accepted_ids)
-                or len(rejected) != len(rejected_ids)
-            ):
+            updated = await self._uow.suggestions.bulk_update_status(decisions_vo)
+
+            expected_total = len(all_ids)
+            if len(updated) != expected_total:
                 raise SuggestionAlreadyDecidedError(
                     "Часть правок не найдена в текущем анализе или уже обработана"
                 )
 
-            pending_count = (
-                await self._uow.suggestions.count_by_analysis_job_and_status(
-                    job_id, SuggestionStatusVO.PENDING
-                )
+            accepted_count = len(review_decisions.accepted_ids)
+            rejected_count = len(review_decisions.rejected_ids)
+
+            pending_count = await self._uow.suggestions.count_by_analysis_job_and_status(
+                job_id, SuggestionStatusVO.PENDING
             )
             finalized = False
             if finalize:
@@ -408,8 +388,8 @@ class SuggestionService:
 
         return ReviewSaveResult(
             document=document,
-            accepted_count=len(accepted),
-            rejected_count=len(rejected),
+            accepted_count=accepted_count,
+            rejected_count=rejected_count,
             pending_count=pending_count,
             finalized=finalized,
         )
