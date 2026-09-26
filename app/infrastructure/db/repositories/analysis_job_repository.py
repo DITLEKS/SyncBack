@@ -16,6 +16,10 @@ SQLAlchemy-адаптер для AnalysisJob.
 - H-NEW-1: убраны все session.refresh() из create_for_document, mark_dispatched
   и update_status — flush() достаточен в рамках текущей транзакции.
   Если вызывающему коду нужны lazy-атрибуты — он использует uow.refresh(job).
+- CRIT-1: create_for_document больше НЕ мутирует document.current_analysis_job_id.
+  Вызывающий сервис обязан явно выполнить uow.documents.set_current_job(document, job.id).
+- M-2: mark_dispatched сравнивает статус через VO-значения (.value), а не ORM-enum
+  напрямую — устраняет течь абстракции при потенциальном переименовании ORM-enum.
 """
 from __future__ import annotations
 
@@ -95,7 +99,12 @@ class AnalysisJobRepository(IAnalysisJobRepository):
     ) -> "AnalysisJob":
         """Фабричный метод: создаёт ORM-объект AnalysisJob внутри репозитория.
 
-        CRIT-1/H-2: сигнатура синхронизирована с IAnalysisJobRepository.create_for_document.
+        CRIT-1: репозиторий НЕ мутирует document.current_analysis_job_id.
+        Вызывающий сервис обязан сам выполнить:
+            document.current_analysis_job_id = job.id
+        или использовать uow.documents.set_current_job(document, job.id).
+        Это соблюдает SRP: jobs-репозиторий не знает про структуру Document.
+
         H-NEW-1: session.refresh(job) удалён — flush() достаточно.
         Commit — ответственность вызывающего UoW.
         """
@@ -107,7 +116,6 @@ class AnalysisJobRepository(IAnalysisJobRepository):
             idempotency_key=idempotency_key,
         )
         self._session.add(job)
-        document.current_analysis_job_id = job.id
         await self._session.flush()
         return job
 
@@ -118,15 +126,20 @@ class AnalysisJobRepository(IAnalysisJobRepository):
     ) -> "tuple[AnalysisJob, DocumentStatusVO | None]":
         """Пометить задачу как отправленную в Celery.
 
-        CRIT-A: больше не мутирует document напрямую.
+        CRIT-A: не мутирует document напрямую.
+        M-2: сравнение статуса через .value (VO-семантика), а не ORM-enum напрямую —
+        устраняет течь абстракции при переименовании ORM-enum.
         H-NEW-1: удалены session.refresh(job) до и после флаша.
         Возвращает (job, new_doc_status | None) — вызывающий код применяет
         изменение документа через uow.documents.update_status().
         """
-        from app.infrastructure.db.models.enums import AnalysisJobStatus
+        _dispatched_values = {
+            AnalysisJobStatusVO.PENDING.value,
+            AnalysisJobStatusVO.PROCESSING.value,
+        }
         job.celery_task_id = task_id
         new_doc_status: DocumentStatusVO | None = None
-        if job.status in (AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING):
+        if job.status.value in _dispatched_values:
             new_doc_status = DocumentStatusVO.IN_PROGRESS
         await self._session.flush()
         return job, new_doc_status
