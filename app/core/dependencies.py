@@ -8,7 +8,7 @@ DI-фабрики FastAPI.
 H2.2: фабрики по-прежнему создают concrete SQLAlchemy-репозитории,
 но передают их сервисам как значения, удовлетворяющие доменным портам.
 Типы аннотаций в фабриках оставлены конкретными — FastAPI DI не понимает
-Protocol для Depends, зато мысль/pyright проверят, что concrete-репозитории
+Protocol для Depends, зато mypy/pyright проверят, что concrete-репозитории
 действительно реализуют порты через @runtime_checkable.
 """
 
@@ -28,6 +28,7 @@ from app.domain.services.project_service import ProjectService
 from app.domain.services.source_service import SourceService
 from app.domain.services.suggestion_service import SuggestionService
 from app.infrastructure.cache.redis_client import get_redis_client
+from app.infrastructure.db.repositories.project_repository import ProjectRepository
 from app.infrastructure.db.repositories.user_repository import UserRepository
 from app.infrastructure.db.session import get_db_session
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -146,6 +147,24 @@ def get_dashboard_service(
 
 
 # ---------------------------------------------------------------------------
+# Per-request repositories (используются в deps.py для auth/authz)
+# ---------------------------------------------------------------------------
+
+def get_user_repository(
+    session: AsyncSession = Depends(get_db_session),
+) -> UserRepository:
+    """Отдельная сессия для UserRepository — Auth-слой вне UoW по дизайну."""
+    return UserRepository(session)
+
+
+def get_project_repository(
+    session: AsyncSession = Depends(get_db_session),
+) -> ProjectRepository:
+    """CRIT-NEW-1: фабрика для ProjectRepository в deps.py (get_allowed_project)."""
+    return ProjectRepository(session)
+
+
+# ---------------------------------------------------------------------------
 # Auth (UserRepository живёт вне UoW — отдельная сессия по дизайну)
 # ---------------------------------------------------------------------------
 
@@ -171,12 +190,6 @@ async def get_auth_service(
         JWTHandler(settings),
         rate_limiter,
     )
-
-
-def get_user_repository(
-    session: AsyncSession = Depends(get_db_session),
-) -> UserRepository:
-    return UserRepository(session)
 
 
 def get_llm_client_instance(

@@ -5,6 +5,11 @@ get_allowed_project — единая точка принятия решения 
 В MVP правило простое (admin видит всё, иначе только свой project.owner_id),
 но весь остальной код обращается именно к этой функции, а не сравнивает id напрямую —
 это то место, которое поменяется, когда появится таблица project_members и роли внутри проекта.
+
+CRIT-NEW-1:
+  - Убраны прямые импорты ProjectRepository / UserRepository (инфраструктурные конкреции).
+  - Тип аннотаций заменён на IProjectRepository / IUserRepository (порты).
+  - get_project_repository добавлен в core/dependencies.py.
 """
 
 import uuid
@@ -14,10 +19,10 @@ from fastapi.security import OAuth2PasswordBearer
 
 from app.core.dependencies import get_project_repository, get_user_repository
 from app.domain.exceptions import InvalidTokenError
+from app.domain.interfaces.repositories import IProjectRepository
 from app.infrastructure.db.models.enums import UserRole
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.user import User
-from app.infrastructure.db.repositories.project_repository import ProjectRepository
 from app.infrastructure.db.repositories.user_repository import UserRepository
 from app.infrastructure.security.jwt_handler import JWTHandler
 
@@ -49,7 +54,7 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
 async def get_allowed_project(
     project_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    project_repository: ProjectRepository = Depends(get_project_repository),
+    project_repository: IProjectRepository = Depends(get_project_repository),
 ) -> Project:
     project = await project_repository.get_by_id(project_id)
     if project is None:
