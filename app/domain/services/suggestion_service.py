@@ -19,6 +19,7 @@ from app.domain.exceptions import (
     InvalidDocumentStatusError,
     OptimisticLockError,
     ReviewNotCompleteError,
+    StaleSuggestionJobError,
     SuggestionAlreadyDecidedError,
     SuggestionNotFoundError,
 )
@@ -79,13 +80,17 @@ class SuggestionService:
         document: DocumentProtocol,
         suggestion_id: uuid.UUID,
     ) -> SuggestionProtocol:
+        """M-9: явно разграничивает «не найдена» vs «не та версия анализа»."""
         suggestion = await self._uow.suggestions.get_by_id(suggestion_id)
-        if (
-            suggestion is None
-            or suggestion.analysis_job_id != document.current_analysis_job_id
-        ):
+        if suggestion is None:
             raise SuggestionNotFoundError(
-                f"Правка {suggestion_id} не найдена для документа {document.id}"
+                f"Правка {suggestion_id} не найдена"
+            )
+        if suggestion.analysis_job_id != document.current_analysis_job_id:
+            raise StaleSuggestionJobError(
+                f"Правка {suggestion_id} принадлежит устаревшему analysis job "
+                f"(job_id={suggestion.analysis_job_id}). "
+                f"Документ был переанализирован — перезагрузите список правок."
             )
         return suggestion
 
@@ -275,7 +280,7 @@ class SuggestionService:
         user_id: uuid.UUID,
         export_service: "DocumentExportService | None" = None,
     ) -> DocumentProtocol:
-        """M-7: принимает user_id для аудита ъкто финализировал ревью."""
+        """M-7: принимает user_id для аудита кто финализировал ревью."""
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             self._assert_awaiting_approval(document)

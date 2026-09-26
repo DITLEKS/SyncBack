@@ -18,6 +18,9 @@ Celery-задачи пайплайна анализа.
   вызывает _finalize_job(job_id, []) при падении на уровне Celery backend.
 - M-8: module-level синглтоны заменены cached provider-функциями
   для тестируемости через DI.
+- L-3: все extra={"job_id": ...} используют str(job_id) последовательно.
+- M-10: явные error_code JOB_NOT_FOUND / DOCUMENT_NOT_FOUND при отсутствии
+  записи в БД — отличает «не существует» от «уже завершён».
 """
 
 import asyncio
@@ -52,16 +55,6 @@ _PARSED_DOC_KEY_PREFIX = "parsed_doc:"
 
 # ---------------------------------------------------------------------------
 # M-8: Cached provider-функции вместо module-level синглтонов
-#
-# Семантика в runtime не изменилась: @functools.cache гарантирует один
-# экземпляр на процесс. В тестах можно переопределить любую функцию:
-#
-#   import app.workers.tasks.analysis_tasks as t
-#   t._get_storage = lambda: FakeStorage()
-#   t._get_connector = lambda: FakeConnector()
-#   t._get_llm_client = lambda: FakeLLMClient()
-#
-# или через monkeypatch.setattr(цель — функция, а не её результат).
 # ---------------------------------------------------------------------------
 
 @functools.cache
@@ -72,7 +65,7 @@ def _get_parser_registry() -> DocumentParserRegistry:
 
 @functools.cache
 def _get_storage() -> MinioStorage:
-    """MinioStorage — одное соединение на процесс."""
+    """MinioStorage — одно соединение на процесс."""
     return MinioStorage(get_settings())
 
 
@@ -269,8 +262,9 @@ async def _start_job(job_id: str) -> list[str]:
     async with isolated_uow() as uow:
         job = await uow.jobs.get_by_id(uuid.UUID(job_id))
         if job is None:
+            # M-10: явный error_code JOB_NOT_FOUND — «не существует» vs «уже завершён»
             logger.error(
-                "run_analysis_job вызван для несуществующего job_id",
+                "run_analysis_job вызван для несуществующего job_id (JOB_NOT_FOUND)",
                 extra={"job_id": job_id},
             )
             return []
@@ -278,15 +272,25 @@ async def _start_job(job_id: str) -> list[str]:
             AnalysisJobStatusVO.PENDING,
             AnalysisJobStatusVO.PROCESSING,
         ):
+            # job существует, но уже в финальном статусе — не ошибка, early-exit
+            logger.info(
+                "_start_job: job уже в финальном статусе, пропускаем",
+                extra={"job_id": job_id, "status": job.status.value},
+            )
             return []
         if not await uow.jobs.mark_processing_if_active(job.id):
+            # race: другой воркер занял job первым
+            logger.info(
+                "_start_job: не удалось занять job (race), пропускаем",
+                extra={"job_id": job_id},
+            )
             return []
         await uow._session.refresh(job)
 
         document = await uow.documents.get_by_id(job.document_id)
         if document is None:
             logger.error(
-                "AnalysisJob ссылается на несуществующий документ",
+                "AnalysisJob ссылается на несуществующий документ (DOCUMENT_NOT_FOUND)",
                 extra={"job_id": job_id, "document_id": str(job.document_id)},
             )
             await uow.jobs.update_status(
@@ -361,16 +365,18 @@ async def _run_source_pipeline(
 async def _process_source(job_id: str, source_id: str) -> dict:
     """DB-оркестрация для одного источника.
 
-    I/O-пайплайн выполняется вне сессии — не держим соединение в ожидании LLM.
+    I/O-пайплайн вынесен в _run_source_pipeline().
     """
     async with isolated_uow() as uow:
         job = await uow.jobs.get_by_id(uuid.UUID(job_id))
         if job is None:
+            # M-10: явный JOB_NOT_FOUND — «не существует» отличается от race
             logger.error(
-                "process_source_for_analysis_job вызван для несуществующего job_id",
+                "process_source_for_analysis_job: job не найден (JOB_NOT_FOUND)",
                 extra={"job_id": job_id, "source_id": source_id},
             )
-            return {"source_id": source_id, "status": "failed", "error_code": "JOB_NOT_FOUND", "error_message": "Задача анализа не найдена"}
+            return {"source_id": source_id, "status": "failed", "error_code": "JOB_NOT_FOUND",
+                    "error_message": "Задача анализа не найдена"}
 
         if _is_cancelled(job):
             return {"source_id": source_id, "status": "cancelled"}
@@ -378,10 +384,12 @@ async def _process_source(job_id: str, source_id: str) -> dict:
         document = await uow.documents.get_by_id(job.document_id)
         if document is None:
             logger.error(
-                "AnalysisJob ссылается на несуществующий документ при обработке источника",
-                extra={"job_id": job_id, "source_id": source_id, "document_id": str(job.document_id)},
+                "AnalysisJob ссылается на несуществующий документ (DOCUMENT_NOT_FOUND)",
+                extra={"job_id": job_id, "source_id": source_id,
+                        "document_id": str(job.document_id)},
             )
-            return {"source_id": source_id, "status": "failed", "error_code": "DOCUMENT_NOT_FOUND", "error_message": "Документ не найден"}
+            return {"source_id": source_id, "status": "failed", "error_code": "DOCUMENT_NOT_FOUND",
+                    "error_message": "Документ не найден"}
 
         source = await uow.sources.get_by_id(uuid.UUID(source_id))
         if source is None:
@@ -389,7 +397,8 @@ async def _process_source(job_id: str, source_id: str) -> dict:
                 "Источник удалён до обработки подзадачи анализа",
                 extra={"job_id": job_id, "source_id": source_id},
             )
-            return {"source_id": source_id, "status": "failed", "error_code": "SOURCE_NOT_FOUND", "error_message": "Источник не найден"}
+            return {"source_id": source_id, "status": "failed", "error_code": "SOURCE_NOT_FOUND",
+                    "error_message": "Источник не найден"}
 
         source_ref = SourceRef(
             id=source.id,
@@ -428,8 +437,9 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
     async with isolated_uow() as uow:
         job = await uow.jobs.get_by_id(uuid.UUID(job_id))
         if job is None:
+            # M-10: явный JOB_NOT_FOUND — отличает «не существует» от «уже завершён»
             logger.error(
-                "finalize_analysis_job вызван для несуществующего job_id",
+                "finalize_analysis_job: job не найден (JOB_NOT_FOUND)",
                 extra={"job_id": job_id},
             )
             return
@@ -479,12 +489,15 @@ def process_source_for_analysis_job(self, job_id: str, source_id: str) -> dict:
             backoff_seconds = settings.llm_timeout_seconds * (2 ** self.request.retries)
             raise self.retry(exc=exc, countdown=backoff_seconds) from exc
         dead_letter_store = DeadLetterStore(get_sync_redis_client())
-        dead_letter_store.push(job_id, source_id, error_code=type(exc).__name__, error_message=str(exc))
+        dead_letter_store.push(job_id, source_id, error_code=type(exc).__name__,
+                               error_message=str(exc))
         logger.error(
             "Источник не обработан после исчерпания retries",
-            extra={"job_id": job_id, "source_id": source_id, "error_type": type(exc).__name__, "retries": self.request.retries},
+            extra={"job_id": job_id, "source_id": source_id,
+                   "error_type": type(exc).__name__, "retries": self.request.retries},
         )
-        return {"source_id": source_id, "status": "failed", "error_code": type(exc).__name__, "error_message": str(exc)}
+        return {"source_id": source_id, "status": "failed",
+                "error_code": type(exc).__name__, "error_message": str(exc)}
 
 
 @celery_app.task(bind=True)

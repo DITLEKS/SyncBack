@@ -66,6 +66,15 @@ class AnalysisJobNotFoundError(DomainError):
     """Задание анализа не найдено."""
 
 
+class JobNotFoundError(AnalysisJobNotFoundError):
+    """job_id передан в воркер или сервис, но запись в БД отсутствует.
+
+    Отличие от AnalysisJobNotFoundError: используется в контекстах,
+    где job обязан существовать (например, внутри Celery-задачи после
+    dispatch). Позволяет отличить «не существует» от «уже завершён».
+    """
+
+
 class AnalysisAlreadyRunningError(DomainError):
     """Для документа уже выполняется анализ — нельзя запустить повторно.
 
@@ -86,7 +95,17 @@ class AnalysisJobNotCancellableError(DomainError):
 
 
 class SuggestionNotFoundError(DomainError):
-    """Правка не найдена или не принадлежит текущему документу."""
+    """Правка не найдена в БД вообще."""
+
+
+class StaleSuggestionJobError(SuggestionNotFoundError):
+    """Правка существует, но принадлежит устаревшему analysis job.
+
+    M-9: явно разграничивает «не найдена» vs «не та версия анализа».
+    Клиент должен перезагрузить список правок — документ был
+    переанализирован с тех пор, как клиент получил suggestion_id.
+    Возвращает HTTP 404 (наследует SuggestionNotFoundError).
+    """
 
 
 class SuggestionAlreadyDecidedError(DomainError):
