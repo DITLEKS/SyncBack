@@ -22,6 +22,8 @@ from app.domain.value_objects import (
     AnalysisJobStatusVO,
     DocumentStatusVO,
     DocumentStats,
+    KeysetPage,
+    PaginationParams,
     ReviewDecisions,
     SourceScopeVO,
     SourceTypeVO,
@@ -100,8 +102,16 @@ class ISuggestionRepository(ABC):
     async def list_by_analysis_job(
         self,
         analysis_job_id: uuid.UUID,
-        pagination: "from app.domain.value_objects import PaginationParams",  # noqa: F821
+        pagination: KeysetPage | PaginationParams,
     ) -> "list[Suggestion]": ...
+
+    @abstractmethod
+    async def list_with_total(
+        self,
+        analysis_job_id: uuid.UUID,
+        pagination: PaginationParams,
+    ) -> "tuple[list[Suggestion], int]":
+        """Один SELECT с COUNT(*) OVER() — список + общий счётчик за один round-trip."""
 
     @abstractmethod
     async def count_by_analysis_job(self, analysis_job_id: uuid.UUID) -> int: ...
@@ -113,32 +123,14 @@ class ISuggestionRepository(ABC):
 
     @abstractmethod
     async def list_by_analysis_job_and_status(
-        self, analysis_job_id: uuid.UUID, status: SuggestionStatusVO
-<<<<<<< HEAD
-    ) -> "list[Suggestion]":
-        """
-        Намеренно без LIMIT: этот метод является источником курсорной итерации
-        для экспорта и обязан возвращать все принятые правки.
-        Пагинация реализована на уровне DocumentExportService._iter_accepted_changes_pages,
-        а не здесь.
-        """
-
-    @abstractmethod
-    async def list_by_analysis_job_and_status_page(
         self,
         analysis_job_id: uuid.UUID,
         status: SuggestionStatusVO,
-        limit: int,
-        offset: int,
     ) -> "list[Suggestion]":
         """
-        Страничный вариант list_by_analysis_job_and_status — предназначен
-        исключительно для DocumentExportService._iter_accepted_changes_pages.
-        Внешние потребители должны использовать list_by_analysis_job_and_status.
+        Без LIMIT: источник для экспорта — возвращает все принятые правки.
+        Пагинация для экспорта реализована на уровне DocumentExportService.
         """
-=======
-    ) -> "list[Suggestion]": ...
->>>>>>> origin/fix/high-priority-review-findings
 
     @abstractmethod
     async def list_ids_by_analysis_job_and_status(
@@ -159,6 +151,14 @@ class ISuggestionRepository(ABC):
         decisions: ReviewDecisions,
     ) -> "list[Suggestion]":
         """Единый UPDATE для accepted + rejected через ReviewDecisions VO."""
+
+    @abstractmethod
+    async def bulk_accept_all(
+        self,
+        analysis_job_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> "list[Suggestion]":
+        """UPDATE WHERE job_id=X AND status='pending' RETURNING * без SELECT UUID в память."""
 
 
 # ---------------------------------------------------------------------------
