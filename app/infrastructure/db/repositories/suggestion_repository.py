@@ -6,6 +6,9 @@ list_by_analysis_job_and_status — фильтр по status теперь про
 (WHERE status = ...), а не выборкой всех строк с последующей фильтрацией в Python —
 используются в SuggestionService.bulk_accept()/get_accepted_changes(), где раньше
 тянулись ВСЕ правки документа ради подмножества нужного статуса.
+
+H1: commit() удалён из всех методов — транзакция фиксируется в get_db_session().
+Репозиторий использует flush() чтобы данные были видны внутри текущей транзакции.
 """
 
 import uuid
@@ -26,7 +29,7 @@ class SuggestionRepository:
         if not suggestions:
             return []
         self._session.add_all(suggestions)
-        await self._session.commit()
+        await self._session.flush()
         return suggestions
 
     async def get_by_id(self, suggestion_id: uuid.UUID) -> Suggestion | None:
@@ -76,7 +79,9 @@ class SuggestionRepository:
         )
         return list(result.scalars().all())
 
-    async def update_status(self, suggestion: Suggestion, status: SuggestionStatus, decided_by: uuid.UUID) -> Suggestion | None:
+    async def update_status(
+        self, suggestion: Suggestion, status: SuggestionStatus, decided_by: uuid.UUID
+    ) -> Suggestion | None:
         """
         Атомарный UPDATE ... WHERE status = 'pending' — защита от гонки при двойном
         accept/reject одной и той же правки параллельными запросами: если suggestion уже
@@ -91,9 +96,9 @@ class SuggestionRepository:
         )
         result = await self._session.execute(stmt)
         updated = result.scalar_one_or_none()
-        await self._session.commit()
         if updated is None:
             return None
+        await self._session.flush()
         await self._session.refresh(updated)
         return updated
 
@@ -115,5 +120,5 @@ class SuggestionRepository:
         )
         result = await self._session.execute(stmt)
         updated = list(result.scalars().all())
-        await self._session.commit()
+        await self._session.flush()
         return updated

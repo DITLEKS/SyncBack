@@ -5,15 +5,20 @@
 - update() — изменяет name/description (partial update, None-поля игнорируются).
 - collect_storage_keys() — собирает MinIO-ключи всех документов и файл-источников проекта.
 - delete() — удаляет запись проекта; каскад в БД удаляет дочерние таблицы.
-- get_for_user() — возвращает проект или выбрасывает HTTP 403/404 (ownership guard).
+- get_for_user() — возвращает проект или выбрасывает доменное исключение (ownership guard).
+
+H1: commit() заменён на flush() — транзакция фиксируется в get_db_session().
+H1/DDD: get_for_user() больше не бросает HTTPException — инфраструктурный слой
+    не должен зависеть от HTTP. Вместо этого бросает ProjectNotFoundError /
+    ProjectAccessDeniedError, которые маппируются на HTTP в exception handlers.
 """
 
 import uuid
 
-from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.exceptions import ProjectAccessDeniedError, ProjectNotFoundError
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.source import Source
@@ -31,27 +36,22 @@ class ProjectRepository:
     ) -> Project:
         """
         Возвращает проект, если он принадлежит owner_id.
-        - 404 если проекта нет
-        - 403 если проект существует, но принадлежит другому пользователю
+        - ProjectNotFoundError если проекта нет
+        - ProjectAccessDeniedError если проект существует, но принадлежит другому пользователю
 
         Используется везде, где нужна проверка ownership перед мутацией.
+        Exception handlers в app/main.py маппируют эти исключения на HTTP 404/403.
         """
         project = await self._session.get(Project, project_id)
         if project is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Project {project_id} not found.",
-            )
+            raise ProjectNotFoundError(project_id)
         if project.owner_id != owner_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied: this project belongs to another user.",
-            )
+            raise ProjectAccessDeniedError(project_id)
         return project
 
     async def create(self, project: Project) -> Project:
         self._session.add(project)
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(project)
         return project
 
@@ -92,7 +92,7 @@ class ProjectRepository:
             project.name = name
         if description is not None:
             project.description = description
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(project)
         return project
 
@@ -121,4 +121,4 @@ class ProjectRepository:
 
     async def delete(self, project: Project) -> None:
         await self._session.delete(project)
-        await self._session.commit()
+        await self._session.flush()

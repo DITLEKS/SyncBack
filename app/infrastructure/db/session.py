@@ -62,11 +62,25 @@ def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
 
 
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
-    """Generator-зависимость для FastAPI Depends(). Не использовать напрямую вне DI —
-    FastAPI сам разворачивает генератор через __anext__, а не async with."""
+    """Generator-зависимость для FastAPI Depends().
+
+    H1 — транзакционные границы: единственное место, где вызывается commit().
+    Репозитории используют только flush() для видимости данных внутри
+    текущей транзакции без её фиксации.
+
+    - На нормальном выходе: commit() + закрытие сессии.
+    - На любом исключении: rollback() + повторный raise.
+
+    Не использовать напрямую вне DI — FastAPI сам разворачивает генератор.
+    """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        yield session
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 @asynccontextmanager
@@ -80,6 +94,8 @@ async def isolated_db_session() -> AsyncGenerator[AsyncSession, None]:
     event loop, в котором был создан, поэтому ошибка "attached to a different loop"
     структурно невозможна: у каждого вызова свой изолированный движок.
 
+    H1: та же commit/rollback-логика, что в get_db_session.
+
     Пример:
         async with isolated_db_session() as session:
             ...
@@ -91,7 +107,12 @@ async def isolated_db_session() -> AsyncGenerator[AsyncSession, None]:
     local_sessionmaker = async_sessionmaker(local_engine, expire_on_commit=False, class_=AsyncSession)
     try:
         async with local_sessionmaker() as session:
-            yield session
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
     finally:
         await local_engine.dispose()
 

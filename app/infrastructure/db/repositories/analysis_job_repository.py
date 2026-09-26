@@ -1,3 +1,11 @@
+"""Репозиторий analysis jobs.
+
+H1: commit() удалён из всех методов — транзакция фиксируется в get_db_session().
+Репозиторий использует flush() чтобы данные были видны внутри текущей транзакции.
+Manual try/except rollback удалён из create_for_document: get_db_session() сам
+выполняет rollback() при любом исключении.
+"""
+
 import uuid
 from datetime import UTC, datetime
 
@@ -43,11 +51,7 @@ class AnalysisJobRepository:
     async def create_for_document(self, job: AnalysisJob, document: Document) -> AnalysisJob:
         self._session.add(job)
         document.current_analysis_job_id = job.id
-        try:
-            await self._session.commit()
-        except Exception:
-            await self._session.rollback()
-            raise
+        await self._session.flush()
         await self._session.refresh(job)
         return job
 
@@ -59,7 +63,7 @@ class AnalysisJobRepository:
             and document.current_analysis_job_id == job.id
         ):
             document.status = DocumentStatus.IN_PROGRESS
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(job)
         return job
 
@@ -72,7 +76,7 @@ class AnalysisJobRepository:
         job.finished_at = datetime.now(UTC)
         if document.current_analysis_job_id == job.id:
             document.status = DocumentStatus.DRAFT
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(job)
         return job
 
@@ -83,7 +87,7 @@ class AnalysisJobRepository:
         job.finished_at = datetime.now(UTC)
         if document.current_analysis_job_id == job.id:
             document.status = DocumentStatus.DRAFT
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(job)
         return job
 
@@ -99,7 +103,7 @@ class AnalysisJobRepository:
                 started_at=func.coalesce(AnalysisJob.started_at, datetime.now(UTC)),
             )
         )
-        await self._session.commit()
+        await self._session.flush()
         return bool(result.rowcount)
 
     async def update_status(
@@ -117,6 +121,6 @@ class AnalysisJobRepository:
             job.started_at = now
         if status in (AnalysisJobStatus.SUCCESS, AnalysisJobStatus.FAILED, AnalysisJobStatus.CANCELLED):
             job.finished_at = now
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(job)
         return job

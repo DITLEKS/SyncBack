@@ -1,5 +1,7 @@
 """
 Репозиторий пользователей.
+
+H1: commit() заменён на flush() — транзакция фиксируется в get_db_session().
 """
 
 import uuid
@@ -23,6 +25,6 @@ class UserRepository:
 
     async def create(self, user: User) -> User:
         self._session.add(user)
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(user)
         return user

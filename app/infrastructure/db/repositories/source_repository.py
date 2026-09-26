@@ -2,6 +2,8 @@
 Репозиторий источников.
 
 ИСПРАВЛЕНО: list_by_project теперь принимает limit/offset, добавлен count_by_project.
+
+H1: commit() заменён на flush() — транзакция фиксируется в get_db_session().
 """
 
 import uuid
@@ -18,7 +20,7 @@ class SourceRepository:
 
     async def create(self, source: Source) -> Source:
         self._session.add(source)
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(source)
         return source
 
