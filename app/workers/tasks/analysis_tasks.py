@@ -16,9 +16,12 @@ Celery-задачи пайплайна анализа.
   Celery мог применить retry/dead-letter вместо вечного IN_PROGRESS.
 - L-5: chord получает on_error-хэндлер _chord_error_handler, который
   вызывает _finalize_job(job_id, []) при падении на уровне Celery backend.
+- M-8: module-level синглтоны заменены cached provider-функциями
+  для тестируемости через DI.
 """
 
 import asyncio
+import functools
 import logging
 import uuid
 from typing import TYPE_CHECKING, NamedTuple
@@ -43,15 +46,46 @@ from app.workers.pipeline.suggestion_mapper import map_to_suggestions
 
 logger = logging.getLogger("syncscribe.workers.analysis")
 
-# Module-level singletons: создаются один раз при загрузке модуля.
-_settings = get_settings()
-_parser_registry = DocumentParserRegistry()
-_storage = MinioStorage(_settings)
-_connector = ManualUploadConnector(_storage, _parser_registry)
-_llm_client = get_llm_client(_settings)
-
 # Префикс Redis-ключа для кэшированного plain_text документа.
 _PARSED_DOC_KEY_PREFIX = "parsed_doc:"
+
+
+# ---------------------------------------------------------------------------
+# M-8: Cached provider-функции вместо module-level синглтонов
+#
+# Семантика в runtime не изменилась: @functools.cache гарантирует один
+# экземпляр на процесс. В тестах можно переопределить любую функцию:
+#
+#   import app.workers.tasks.analysis_tasks as t
+#   t._get_storage = lambda: FakeStorage()
+#   t._get_connector = lambda: FakeConnector()
+#   t._get_llm_client = lambda: FakeLLMClient()
+#
+# или через monkeypatch.setattr(цель — функция, а не её результат).
+# ---------------------------------------------------------------------------
+
+@functools.cache
+def _get_parser_registry() -> DocumentParserRegistry:
+    """DocumentParserRegistry — stateless, создаётся один раз."""
+    return DocumentParserRegistry()
+
+
+@functools.cache
+def _get_storage() -> MinioStorage:
+    """MinioStorage — одное соединение на процесс."""
+    return MinioStorage(get_settings())
+
+
+@functools.cache
+def _get_connector() -> ManualUploadConnector:
+    """ManualUploadConnector, использует _get_storage() + _get_parser_registry()."""
+    return ManualUploadConnector(_get_storage(), _get_parser_registry())
+
+
+@functools.cache
+def _get_llm_client():
+    """LLM-клиент — один экземпляр на процесс."""
+    return get_llm_client(get_settings())
 
 
 # ---------------------------------------------------------------------------
@@ -75,11 +109,12 @@ async def _cache_parsed_document(
 
     Возвращает plain_text (нужен для первого источника без лишнего round-trip).
     """
-    raw_bytes = await _storage.download(storage_key)
-    parsed = _parser_registry.parse_by_filename(storage_key, raw_bytes)
+    settings = get_settings()
+    raw_bytes = await _get_storage().download(storage_key)
+    parsed = _get_parser_registry().parse_by_filename(storage_key, raw_bytes)
     plain_text = parsed.plain_text
 
-    ttl = max(_settings.llm_timeout_seconds * sources_count * 2, 300)
+    ttl = max(settings.llm_timeout_seconds * sources_count * 2, 300)
     redis = get_redis_client()
     await redis.setex(_parsed_doc_key(job_id), ttl, plain_text)
 
@@ -308,16 +343,16 @@ async def _run_source_pipeline(
             extra={"job_id": str(job_id), "storage_key": document_storage_key},
         )
         try:
-            raw_bytes = await _storage.download(document_storage_key)
-            parsed = _parser_registry.parse_by_filename(document_storage_key, raw_bytes)
+            raw_bytes = await _get_storage().download(document_storage_key)
+            parsed = _get_parser_registry().parse_by_filename(document_storage_key, raw_bytes)
             plain_text = parsed.plain_text
         except Exception as exc:
             raise DocumentParseError(
                 f"Не удалось распарсить документ (storage_key={document_storage_key}): {exc}"
             ) from exc
 
-    source_text = await _connector.fetch(source_ref)
-    batch = await _llm_client.generate_suggestions(
+    source_text = await _get_connector().fetch(source_ref)
+    batch = await _get_llm_client().generate_suggestions(
         plain_text, source_text, document_format
     )
     return map_to_suggestions(batch, job_id, source_reference=source_ref.name)
@@ -326,7 +361,7 @@ async def _run_source_pipeline(
 async def _process_source(job_id: str, source_id: str) -> dict:
     """DB-оркестрация для одного источника.
 
-    I/O-пайплайн вынесен в _run_source_pipeline().
+    I/O-пайплайн выполняется вне сессии — не держим соединение в ожидании LLM.
     """
     async with isolated_uow() as uow:
         job = await uow.jobs.get_by_id(uuid.UUID(job_id))
@@ -439,8 +474,9 @@ def process_source_for_analysis_job(self, job_id: str, source_id: str) -> dict:
     try:
         return asyncio.run(_process_source(job_id, source_id))
     except (LLMTimeoutError, LLMInvalidResponseError, DocumentParseError) as exc:
-        if self.request.retries < _settings.llm_max_retries:
-            backoff_seconds = _settings.llm_timeout_seconds * (2 ** self.request.retries)
+        settings = get_settings()
+        if self.request.retries < settings.llm_max_retries:
+            backoff_seconds = settings.llm_timeout_seconds * (2 ** self.request.retries)
             raise self.retry(exc=exc, countdown=backoff_seconds) from exc
         dead_letter_store = DeadLetterStore(get_sync_redis_client())
         dead_letter_store.push(job_id, source_id, error_code=type(exc).__name__, error_message=str(exc))
