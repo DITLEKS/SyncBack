@@ -5,13 +5,20 @@
   - Зависит только от IUnitOfWork (порт) и FileStorage (порт).
   - Нет импортов из app.infrastructure.* при выполнении.
   - _assert_sources_mutable — чистый guard, не трогает инфраструктуру.
+
+Примечание по импорту конфигурации:
+  `from app.core.config import Settings, get_settings` используется при выполнении
+  (не под TYPE_CHECKING) — это намеренно. app.core.config — не инфраструктурный слой
+  (не содержит ORM, I/O, сетевых зависимостей), поэтому импорт допустим в доменном сервисе.
+  Фиксируется здесь как документированное исключение из правила
+  «нет инфра-импортов в domain/services».
 """
 from __future__ import annotations
 
 import uuid
 from typing import TYPE_CHECKING
 
-from app.core.config import Settings, get_settings
+from app.core.config import Settings, get_settings  # допустимый non-infra импорт (см. docstring)
 from app.domain.exceptions import FileTooLargeError, SourceLockError, SourceNotFoundError
 from app.domain.interfaces.file_storage import FileStorage
 from app.domain.interfaces.unit_of_work import IUnitOfWork

@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.domain.interfaces.dashboard_query_service import IDashboardQueryService
+from app.domain.interfaces.llm_client import LLMClient
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.domain.services.audit_log_service import AuditLogService
 from app.domain.services.auth_service import AuthService
@@ -223,5 +224,10 @@ async def get_auth_service(
 
 def get_llm_client_instance(
     settings: Settings = Depends(get_settings),
-):
+) -> LLMClient:
+    """Фабрика LLMClient для FastAPI DI.
+
+    Возвращаемый тип — LLMClient (Protocol), что позволяет mypy/pyright
+    проверять совместимость конкретной реализации с доменным контрактом.
+    """
     return get_llm_client(settings)
