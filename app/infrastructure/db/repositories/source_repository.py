@@ -1,46 +1,165 @@
 """
-Репозиторий источников.
+SQLAlchemy-адаптер для Source.
 
-ИСПРАВЛЕНО: list_by_project теперь принимает limit/offset, добавлен count_by_project.
+Правило: НИКАКИХ session.commit() / session.rollback() здесь.
+Все изменения фиксирует SqlAlchemyUnitOfWork через uow.commit().
+
+ИСПРАВЛЕНО:
+- CRIT: create() вызывал session.commit() — нарушение UoW-правила. Заменён на flush().
+- M-4: добавлены фабричные методы create() / create_with_id(), принимающие параметры,
+  а не готовый ORM-объект. Репозиторий сам строит Source внутри.
+- Добавлен replace_document_sources() — атомарная замена document-specific источников.
+- SourceRepository теперь явно наследует ISourceRepository.
 """
+from __future__ import annotations
 
 import uuid
+from typing import TYPE_CHECKING
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.infrastructure.db.models.source import Source
+from app.domain.interfaces.repositories import ISourceRepository
+from app.domain.value_objects import SourceScopeVO, SourceTypeVO
+
+if TYPE_CHECKING:
+    from app.infrastructure.db.models.source import Source
 
 
-class SourceRepository:
-    def __init__(self, session: AsyncSession):
+def _scope_to_orm(vo: SourceScopeVO):
+    from app.infrastructure.db.models.enums import SourceScope
+    return SourceScope(vo.value)
+
+
+def _type_to_orm(vo: SourceTypeVO):
+    from app.infrastructure.db.models.enums import SourceType
+    return SourceType(vo.value)
+
+
+class SourceRepository(ISourceRepository):
+    def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def create(self, source: Source) -> Source:
-        self._session.add(source)
-        await self._session.commit()
-        await self._session.refresh(source)
-        return source
+    # ------------------------------------------------------------------
+    # Read
+    # ------------------------------------------------------------------
 
-    async def get_by_id(self, source_id: uuid.UUID) -> Source | None:
-        return await self._session.get(Source, source_id)
+    async def get_by_id(self, source_id: uuid.UUID) -> "Source | None":
+        from app.infrastructure.db.models.source import Source as M
+        return await self._session.get(M, source_id)
 
-    async def list_by_project(self, project_id: uuid.UUID, limit: int, offset: int) -> list[Source]:
+    async def get_many_by_ids(self, source_ids: list[uuid.UUID]) -> "list[Source]":
+        from app.infrastructure.db.models.source import Source as M
         result = await self._session.execute(
-            select(Source)
-            .where(Source.project_id == project_id)
-            .order_by(Source.uploaded_at.desc())
+            select(M).where(M.id.in_(source_ids))
+        )
+        return list(result.scalars().all())
+
+    async def list_by_project(
+        self, project_id: uuid.UUID, limit: int, offset: int
+    ) -> "list[Source]":
+        from app.infrastructure.db.models.source import Source as M
+        result = await self._session.execute(
+            select(M)
+            .where(M.project_id == project_id)
+            .order_by(M.uploaded_at.desc())
             .limit(limit)
             .offset(offset)
         )
         return list(result.scalars().all())
 
     async def count_by_project(self, project_id: uuid.UUID) -> int:
+        from app.infrastructure.db.models.source import Source as M
         result = await self._session.execute(
-            select(func.count()).select_from(Source).where(Source.project_id == project_id)
+            select(func.count()).select_from(M).where(M.project_id == project_id)
         )
         return result.scalar_one()
 
-    async def get_many_by_ids(self, source_ids: list[uuid.UUID]) -> list[Source]:
-        result = await self._session.execute(select(Source).where(Source.id.in_(source_ids)))
-        return list(result.scalars().all())
+    # ------------------------------------------------------------------
+    # Write — factory methods (M-4 / H-2)
+    # ------------------------------------------------------------------
+
+    async def create(
+        self,
+        project_id: uuid.UUID,
+        name: str,
+        source_type: SourceTypeVO,
+        text_content: str | None = None,
+        url: str | None = None,
+        scope: SourceScopeVO = SourceScopeVO.PROJECT,
+    ) -> "Source":
+        """Фабричный метод для текстовых / URL-источников.
+
+        Сервис передаёт параметры — репозиторий строит ORM-объект.
+        Commit — ответственность вызывающего UoW.
+        """
+        from app.infrastructure.db.models.source import Source as M
+        source = M(
+            id=uuid.uuid4(),
+            project_id=project_id,
+            name=name,
+            source_type=_type_to_orm(source_type),
+            text_content=text_content,
+            url=url,
+            scope=_scope_to_orm(scope),
+        )
+        self._session.add(source)
+        await self._session.flush()
+        await self._session.refresh(source)
+        return source
+
+    async def create_with_id(
+        self,
+        source_id: uuid.UUID,
+        project_id: uuid.UUID,
+        name: str,
+        source_type: SourceTypeVO,
+        storage_key: str,
+        scope: SourceScopeVO = SourceScopeVO.PROJECT,
+    ) -> "Source":
+        """Фабричный метод для файловых источников с заранее известным UUID.
+
+        Используется после загрузки файла в MinIO, когда source_id уже выдан клиенту.
+        Commit — ответственность вызывающего UoW.
+        """
+        from app.infrastructure.db.models.source import Source as M
+        source = M(
+            id=source_id,
+            project_id=project_id,
+            name=name,
+            source_type=_type_to_orm(source_type),
+            storage_key=storage_key,
+            scope=_scope_to_orm(scope),
+        )
+        self._session.add(source)
+        await self._session.flush()
+        await self._session.refresh(source)
+        return source
+
+    async def replace_document_sources(
+        self,
+        document_id: uuid.UUID,
+        sources: "list[Source]",
+    ) -> "list[Source]":
+        """Атомарная замена document-specific источников.
+
+        1. Удаляет все Source, привязанные к document_id (scope=DOCUMENT).
+        2. Обновляет scope переданных sources на DOCUMENT и связывает с document_id.
+        Commit — ответственность вызывающего UoW.
+        """
+        from app.infrastructure.db.models.enums import SourceScope
+        from app.infrastructure.db.models.source import Source as M
+
+        await self._session.execute(
+            delete(M).where(
+                M.document_id == document_id,
+                M.scope == SourceScope.DOCUMENT,
+            )
+        )
+
+        for source in sources:
+            source.document_id = document_id
+            source.scope = SourceScope.DOCUMENT
+
+        await self._session.flush()
+        return sources
