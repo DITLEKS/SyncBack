@@ -8,17 +8,11 @@
   - Один uow.commit() на операцию.
 
 ИСПРАВЛЕНИЯ:
-- CRIT-3: убран global _FORMAT_MAP. Словарь инициализируется как None-константа
-  на уровне модуля (без global). При первом вызове заполняется
-  через отложенный импорт (избегаем циклических зависимостей).
+- CRIT-3 / H-NEW-1: _FORMAT_MAP убран полностью. Вместо global-переменной
+  используется @functools.cache на _extension_to_format() — потокобезопасно,
+  не требует global statement, кэшируется автоматически.
 - HIGH-2: delete_document сначала commit(), потом MinIO.
-  Порядок изменён с обратного: MinIO-файл — side-effect вне транзакции,
-  поэтому данные в БД следует удалять первыми.
-  Удаление файлов из MinIO — бест-эффорт, не отменяет итог операции.
 - M-3: upload_document принимает project_id: UUID вместо ORM-объекта Project.
-  Сервис не зависит от ORM-модели Project — только ID.
-- delete_document()       — удаляет запись в БД первой, MinIO-файл вторым.
-- get_original_content()  — читает снапшот текста до правок (#7).
 - H-5: ORM-объект Document создаётся внутри репозитория через фабричный метод.
 
 CRIT-NEW-2: list_documents передаёт PaginationParams-объект, а не limit/offset позиционно.
@@ -26,6 +20,7 @@ LOW: exc_info=True добавлен в logger.warning внутри delete_docume
 """
 from __future__ import annotations
 
+import functools
 import logging
 import uuid
 from pathlib import Path
@@ -48,29 +43,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("syncscribe.services.document")
 
-# CRIT-3: module-level константа без global. Инициализируется как None на уровне модуля.
-# Первый вызов _extension_to_format() заполняет его через отложенный импорт
-# (избегаем циклических зависимостей на уровне модуля).
-_FORMAT_MAP: dict[str, object] | None = None
+
+@functools.cache
+def _get_format_map() -> dict[str, object]:
+    """H-NEW-1: ленивый импорт + кэш через functools.cache (без global).
+
+    Первый вызов строит словарь и кэширует его навсегда в рамках процесса.
+    functools.cache потокобезопасен для read-after-first-write — GIL гарантирует
+    единственное создание словаря при первом вызове.
+    """
+    from app.infrastructure.db.models.enums import DocumentFormat  # noqa: PLC0415
+    return {
+        ".docx": DocumentFormat.DOCX,
+        ".txt": DocumentFormat.TXT,
+        ".md": DocumentFormat.MARKDOWN,
+        ".markdown": DocumentFormat.MARKDOWN,
+    }
 
 
 def _extension_to_format(suffix: str):
-    """\u041eтложенный лукап: расширение \u2192 ORM DocumentFormat enum.
-
-    CRIT-3: использует модульную переменную _FORMAT_MAP (без global statement).
-    Переприсывает её локальной переменной в модульное пространство
-    через locals()-трюк.
-    """
-    global _FORMAT_MAP  # noqa: PLW0603  (needed for lazy init without global keyword smell — see docstring)
-    if _FORMAT_MAP is None:
-        from app.infrastructure.db.models.enums import DocumentFormat
-        _FORMAT_MAP = {
-            ".docx": DocumentFormat.DOCX,
-            ".txt": DocumentFormat.TXT,
-            ".md": DocumentFormat.MARKDOWN,
-            ".markdown": DocumentFormat.MARKDOWN,
-        }
-    fmt = _FORMAT_MAP.get(suffix)
+    """Лукап: расширение → ORM DocumentFormat enum."""
+    fmt = _get_format_map().get(suffix)
     if fmt is None:
         raise UnsupportedFileFormatError(
             f"Формат '{suffix or 'без расширения'}' не поддерживается. "
@@ -106,11 +99,9 @@ class DocumentService:
         content: bytes,
         content_type: str,
     ) -> "Document":
-        """\u0417агрузить документ в MinIO и создать запись в БД.
+        """Загрузить документ в MinIO и создать запись в БД.
 
         M-3: принимает project_id: UUID, а не ORM-объект Project.
-        Сервис не зависит от ORM-модели Project — только ID.
-        Каллер должен верифицировать проект самостоятельно.
         """
         if len(content) > self._settings.max_upload_size_bytes:
             raise FileTooLargeError(
@@ -176,8 +167,12 @@ class DocumentService:
         sort_by: Literal["created_at", "updated_at", "title"] = "updated_at",
         sort_dir: Literal["asc", "desc"] = "desc",
         pagination: PaginationParams | None = None,
-    ) -> tuple[list[dict], int]:
-        """Список всех документов пользователя с агрегированными счётчиками правок."""
+    ) -> tuple[list["Document"], int]:
+        """Список всех документов пользователя с агрегированными счётчиками правок.
+
+        M-NEW-3: тип возврата выровнен с IDocumentRepository.list_all_for_user
+        — tuple[list[Document], int], не tuple[list[dict], int].
+        """
         _pagination = pagination or PaginationParams(limit=50, offset=0)
         async with self._uow:
             return await self._uow.documents.list_all_for_user(
@@ -199,27 +194,21 @@ class DocumentService:
         HIGH-2: удаление документа.
 
         Порядок: commit() сначала, MinIO-удаление потом.
-        Обоснование: MinIO — side-effect вне транзакции.
-        Если commit() прошёл, запись удалена — MinIO-удаление бест-эффорт.
-        Если commit() упал — запись осталась, MinIO-файл цел. Клиент получит 500.
-        Если MinIO-удаление упало — запись уже удалена, орфанский файл
-        очищается бекграунд-задачей (LogAndForget-паттерн).
         """
         storage_key = document.storage_key
         original_key: str | None = getattr(document, "original_storage_key", None)
 
-        # 1. Удаляем запись из БД (ON DELETE CASCADE убранъет suggestions, jobs, document_sources).
+        # 1. Удаляем запись из БД.
         async with self._uow:
             await self._uow.documents.delete(document)
             await self._uow.commit()
 
-        # 2. Удаляем файлы из MinIO (бест-эффорт — ошибка не отменяет итог операции).
+        # 2. Удаляем файлы из MinIO (бест-эффорт).
         keys_to_delete = {k for k in [storage_key, original_key] if k}
         for key in keys_to_delete:
             try:
                 await self._storage.delete(key)
             except Exception:  # noqa: BLE001
-                # LOW: exc_info=True — трейсбэк записывается в журнал.
                 logger.warning(
                     "Не удалось удалить файл из MinIO после удаления документа",
                     exc_info=True,
@@ -236,13 +225,7 @@ class DocumentService:
         return self._parser_registry.parse_by_filename(document.storage_key, raw_bytes)
 
     async def get_original_content(self, document: "Document") -> ParsedDocument:
-        """Режим «Оригинал» (#7): вернуть текст до правок.
-
-        Пайплайн анализа записывает снапшот исходного файла в MinIO под
-        ключом original_storage_key перед сохранением правок. Если
-        original_storage_key не выставлен (документ не проходил анализ),
-        отдаём текущий контент (оригинал == текущий).
-        """
+        """Режим «Оригинал» (#7): вернуть текст до правок."""
         original_key: str | None = getattr(document, "original_storage_key", None)
         storage_key = original_key or document.storage_key
         raw_bytes = await self._storage.download(storage_key)
