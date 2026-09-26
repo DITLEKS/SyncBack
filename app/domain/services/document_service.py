@@ -1,14 +1,15 @@
 """
 Бизнес-логика документов.
 
+Архитектурные правила:
+  - Зависит только от IUnitOfWork (порт), FileStorage (порт)
+    и DocumentParserRegistry (инфра-singleton без сайд-эффектов).
+  - Нет module-level импортов из app.infrastructure.db.*.
+  - Один uow.commit() на операцию.
+
 ДОБАВЛЕНО:
 - delete_document()       — удаляет MinIO-файл (best-effort), затем запись в БД.
 - get_original_content()  — читает снапшот текста до правок (#7).
-                            Использует document.original_storage_key, если
-                            он есть (выставляется пайплайном анализа), иначе
-                            отдаёт текущий storage_key (снапшот совпадает с текущим).
-
-H2.2: сервис принимает DocumentPort вместо конкретного DocumentRepository.
 """
 from __future__ import annotations
 
@@ -25,7 +26,7 @@ from app.domain.exceptions import (
 )
 from app.domain.interfaces.document_parser import ParsedDocument
 from app.domain.interfaces.file_storage import FileStorage
-from app.domain.ports.document_port import DocumentPort
+from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.value_objects import DocumentStatusVO, PaginationParams
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 
@@ -57,12 +58,12 @@ def _extension_to_format(suffix: str):
 class DocumentService:
     def __init__(
         self,
-        document_repository: DocumentPort,
+        uow: IUnitOfWork,
         file_storage: FileStorage,
         parser_registry: DocumentParserRegistry | None = None,
         settings: Settings | None = None,
     ):
-        self._documents = document_repository
+        self._uow = uow
         self._storage = file_storage
         self._parser_registry = parser_registry or DocumentParserRegistry()
         self._settings = settings or get_settings()
@@ -90,19 +91,22 @@ class DocumentService:
         storage_key = f"projects/{project.id}/documents/{document_id}/{filename}"
         await self._storage.upload(storage_key, content, content_type)
 
-        from app.infrastructure.db.models.document import Document as DocumentModel
-        document = DocumentModel(
-            id=document_id,
-            project_id=project.id,
-            title=filename,
-            format=document_format,
-            storage_key=storage_key,
-        )
         try:
-            return await self._documents.create(document)
+            from app.infrastructure.db.models.document import Document as DocumentModel
+            document = DocumentModel(
+                id=document_id,
+                project_id=project.id,
+                title=filename,
+                format=document_format,
+                storage_key=storage_key,
+            )
+            async with self._uow:
+                saved = await self._uow.documents.create(document)
+                await self._uow.commit()
         except Exception:
             await self._storage.delete(storage_key)
             raise
+        return saved
 
     # ------------------------------------------------------------------
     # Queries
@@ -113,10 +117,11 @@ class DocumentService:
         project_id: uuid.UUID,
         pagination: PaginationParams,
     ) -> tuple[list["Document"], int]:
-        items = await self._documents.list_by_project(
-            project_id, pagination.limit, pagination.offset
-        )
-        total = await self._documents.count_by_project(project_id)
+        async with self._uow:
+            items = await self._uow.documents.list_by_project(
+                project_id, pagination.limit, pagination.offset
+            )
+            total = await self._uow.documents.count_by_project(project_id)
         return items, total
 
     async def get_document(
@@ -124,7 +129,8 @@ class DocumentService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
     ) -> "Document":
-        document = await self._documents.get_by_id(document_id)
+        async with self._uow:
+            document = await self._uow.documents.get_by_id(document_id)
         if document is None or document.project_id != project_id:
             raise DocumentNotFoundError(
                 f"Документ {document_id} не найден в проекте {project_id}"
@@ -143,15 +149,16 @@ class DocumentService:
     ) -> tuple[list[dict], int]:
         """Список всех документов пользователя с агрегированными счётчиками правок."""
         _pagination = pagination or PaginationParams(limit=50, offset=0)
-        return await self._documents.list_all_for_user(
-            owner_id,
-            status=status,
-            search=search,
-            sort_by=sort_by,
-            sort_dir=sort_dir,
-            limit=_pagination.limit,
-            offset=_pagination.offset,
-        )
+        async with self._uow:
+            return await self._uow.documents.list_all_for_user(
+                owner_id,
+                status=status,
+                search=search,
+                sort_by=sort_by,
+                sort_dir=sort_dir,
+                limit=_pagination.limit,
+                offset=_pagination.offset,
+            )
 
     # ------------------------------------------------------------------
     # File operations
@@ -180,7 +187,9 @@ class DocumentService:
                     "Не удалось удалить файл из MinIO при удалении документа",
                     extra={"storage_key": key, "document_id": str(document.id)},
                 )
-        await self._documents.delete(document)
+        async with self._uow:
+            await self._uow.documents.delete(document)
+            await self._uow.commit()
 
     async def get_download_url(self, document: "Document") -> tuple[str, int]:
         expires_in = self._settings.minio_presigned_url_expire_seconds
@@ -207,4 +216,7 @@ class DocumentService:
     async def attach_sources(
         self, document: "Document", sources: list
     ) -> "Document":
-        return await self._documents.attach_sources(document, sources)
+        async with self._uow:
+            result = await self._uow.documents.attach_sources(document, sources)
+            await self._uow.commit()
+        return result

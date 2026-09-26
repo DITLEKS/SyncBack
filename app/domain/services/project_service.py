@@ -1,37 +1,16 @@
 """
 Бизнес-логика проектов.
 
-<<<<<<< HEAD
-ДОБАВЛЕНО:
-- update_project() — частичное обновление (переименование / изменение описания).
-- delete_project() — каскадное удаление всех дочерних объектов и MinIO-файлов.
-
-H2.2: сервис принимает ProjectPort вместо конкретного ProjectRepository.
-Сonkrete SQLAlchemy-репозиторий по-прежнему передаётся из core/dependencies.py,
-но тип в сигнатуре — порт домена.
-=======
 Архитектурные правила:
   - Зависит только от IUnitOfWork (порт) и FileStorage (порт).
   - Нет импортов из app.infrastructure.* при выполнении.
   - Один uow.commit() на операцию.
->>>>>>> origin/fix/high-priority-review-findings
 """
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 from app.domain.interfaces.file_storage import FileStorage
-<<<<<<< HEAD
-from app.domain.ports.project_port import ProjectPort
-from app.infrastructure.db.models.enums import UserRole
-from app.infrastructure.db.models.project import Project
-from app.infrastructure.db.models.user import User
-
-
-class ProjectService:
-    def __init__(self, project_repository: ProjectPort, file_storage: FileStorage):
-        self._projects = project_repository
-=======
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.value_objects import UserRoleVO
 
@@ -43,7 +22,6 @@ if TYPE_CHECKING:
 class ProjectService:
     def __init__(self, uow: IUnitOfWork, file_storage: FileStorage) -> None:
         self._uow = uow
->>>>>>> origin/fix/high-priority-review-findings
         self._storage = file_storage
 
     async def create_project(
@@ -98,7 +76,6 @@ class ProjectService:
             try:
                 await self._storage.delete(key)
             except Exception:  # noqa: BLE001
-                # MinIO-объект мог быть уже удалён вручную — не прерываем удаление.
                 pass
 
         async with self._uow:
