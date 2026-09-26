@@ -8,6 +8,7 @@
 - #10 accept_suggestion / reject_suggestion объединены через _decide_suggestion.
 - CR-3 / CODE-4: удалён дублирующий @router.put('/review'); добавлен
   Header в импорты; оба маршрута объединены в один обработчик review_save.
+- P0-fix: versioned path теперь передаёт user_id + решения в сервис.
 """
 import logging
 import uuid
@@ -106,6 +107,19 @@ def _parse_if_match(if_match: str | None) -> int | None:
         )
 
 
+def _build_audit_decisions(
+    payload_decisions: list,
+) -> list[tuple[uuid.UUID, AuditAction]]:
+    """Преобразует payload.decisions в список (uuid, AuditAction) для аудит-лога."""
+    return [
+        (
+            d.suggestion_id,
+            AuditAction.ACCEPT if d.decision == "accepted" else AuditAction.REJECT,
+        )
+        for d in payload_decisions
+    ]
+
+
 async def _decide_suggestion(
     action: Literal["accept", "reject"],
     document_id: uuid.UUID,
@@ -173,25 +187,30 @@ async def review_save(
 ) -> ReviewSaveResponse:
     """Атомарное сохранение ревью.
 
-    Если клиент передаёт ``If-Match: <review_version>`` — запрос идёт через
-    ``finalize_review_versioned`` (оптимистическая блокировка, 412 при конфликте).
-    Без If-Match — стандартный путь через ``atomic_review_save``.
+    Если клиент передаёт ``If-Match: <review_version>`` и ``finalize=true`` —
+    запрос идёт через ``finalize_review_versioned`` (оптимистическая блокировка,
+    412 при конфликте). Без If-Match — стандартный путь через ``atomic_review_save``.
     """
     client_version = _parse_if_match(if_match)
 
-    decisions = [
-        (
-            d.suggestion_id,
-            SuggestionStatus.ACCEPTED if d.decision == "accepted" else SuggestionStatus.REJECTED,
-        )
-        for d in payload.decisions
+    # Вычисляем accepted/rejected id списки из payload один раз
+    accepted_ids = [
+        d.suggestion_id for d in payload.decisions if d.decision == "accepted"
+    ]
+    rejected_ids = [
+        d.suggestion_id for d in payload.decisions if d.decision == "rejected"
     ]
 
-    # Versioned path (If-Match present)
+    # Versioned path (If-Match present + finalize=True)
     if client_version is not None and payload.finalize:
         try:
             document = await suggestion_service.finalize_review_versioned(
-                project.id, document_id, client_version
+                project_id=project.id,
+                document_id=document_id,
+                user_id=current_user.id,
+                accepted_ids=accepted_ids,
+                rejected_ids=rejected_ids,
+                current_review_version=client_version,
             )
         except DocumentNotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -202,26 +221,30 @@ async def review_save(
         except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-        audit_decisions = [
-            (
-                d.suggestion_id,
-                AuditAction.ACCEPT if d.decision == "accepted" else AuditAction.REJECT,
-            )
-            for d in payload.decisions
-        ]
-        await _safe_bulk_log(audit_log_service, current_user.id, audit_decisions)
+        await _safe_bulk_log(
+            audit_log_service,
+            current_user.id,
+            _build_audit_decisions(payload.decisions),
+        )
         review_version = getattr(document, "review_version", 0) or 0
         return ReviewSaveResponse(
             document_id=document.id,
             document_status=document.status.value,
             review_version=review_version,
-            accepted_count=0,
-            rejected_count=0,
+            accepted_count=len(accepted_ids),
+            rejected_count=len(rejected_ids),
             pending_count=0,
             finalized=True,
         )
 
     # Standard path (no If-Match)
+    decisions = [
+        (
+            d.suggestion_id,
+            SuggestionStatus.ACCEPTED if d.decision == "accepted" else SuggestionStatus.REJECTED,
+        )
+        for d in payload.decisions
+    ]
     try:
         result = await suggestion_service.atomic_review_save(
             project_id=project.id,
@@ -238,14 +261,11 @@ async def review_save(
     except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    audit_decisions = [
-        (
-            d.suggestion_id,
-            AuditAction.ACCEPT if d.decision == "accepted" else AuditAction.REJECT,
-        )
-        for d in payload.decisions
-    ]
-    await _safe_bulk_log(audit_log_service, current_user.id, audit_decisions)
+    await _safe_bulk_log(
+        audit_log_service,
+        current_user.id,
+        _build_audit_decisions(payload.decisions),
+    )
 
     doc = result.document
     review_version = getattr(doc, "review_version", 0) or 0
