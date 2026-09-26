@@ -111,20 +111,23 @@ class SuggestionService:
 
     async def _apply_decisions(
         self,
+        analysis_job_id: uuid.UUID,
         accepted_ids: list[uuid.UUID],
         rejected_ids: list[uuid.UUID],
         user_id: uuid.UUID,
     ) -> None:
         """Применяет списки принятых и отклонённых правок.
-        Выделено в хэлпер чтобы не дублировать между versioned / standard путями.
+
+        analysis_job_id обязателен — передаётся в bulk_update_status, чтобы
+        репозиторий мог отфильтровать правки из чужих документов.
         """
         if accepted_ids:
             await self._suggestions.bulk_update_status(
-                accepted_ids, SuggestionStatus.ACCEPTED, user_id
+                accepted_ids, analysis_job_id, SuggestionStatus.ACCEPTED, user_id
             )
         if rejected_ids:
             await self._suggestions.bulk_update_status(
-                rejected_ids, SuggestionStatus.REJECTED, user_id
+                rejected_ids, analysis_job_id, SuggestionStatus.REJECTED, user_id
             )
 
     # ------------------------------------------------------------------
@@ -227,7 +230,11 @@ class SuggestionService:
         document_id: uuid.UUID,
         user_id: uuid.UUID,
     ) -> BulkAcceptResult:
-        """Принимает все pending-правки, возвращает BulkAcceptResult(правки, документ)."""
+        """Принимает все pending-правки, возвращает BulkAcceptResult(правки, документ).
+
+        Один UPDATE WHERE analysis_job_id=... AND status='pending' RETURNING *
+        вместо двух запросов (SELECT ids → UPDATE WHERE id IN).
+        """
         document = await self._get_document_or_raise(project_id, document_id)
         if document.status != DocumentStatus.AWAITING_APPROVAL:
             raise InvalidDocumentStatusError(
@@ -235,11 +242,8 @@ class SuggestionService:
             )
         if document.current_analysis_job_id is None:
             return BulkAcceptResult(suggestions=[], document=document)
-        pending_ids = await self._suggestions.list_ids_by_analysis_job_and_status(
-            document.current_analysis_job_id, SuggestionStatus.PENDING
-        )
-        accepted = await self._suggestions.bulk_update_status(
-            pending_ids, SuggestionStatus.ACCEPTED, user_id
+        accepted = await self._suggestions.bulk_update_all_pending(
+            document.current_analysis_job_id, SuggestionStatus.ACCEPTED, user_id
         )
         refreshed = await self._documents.get_by_id(document_id)
         return BulkAcceptResult(
@@ -272,7 +276,14 @@ class SuggestionService:
                 "Обновите страницу и повторите попытку."
             )
 
-        await self._apply_decisions(accepted_ids, rejected_ids, user_id)
+        if document.current_analysis_job_id is None:
+            raise ReviewNotCompleteError(
+                "У документа отсутствует текущий результат анализа"
+            )
+
+        await self._apply_decisions(
+            document.current_analysis_job_id, accepted_ids, rejected_ids, user_id
+        )
         updated_document = await self._documents.increment_review_version(document)
         return updated_document.review_version
 
@@ -294,7 +305,7 @@ class SuggestionService:
         1. Проверяет review_version если передана (OptimisticLockError при конфликте).
         2. Применяет все решения из ``decisions``.
         3. Если ``finalize=True`` — переводит документ в статус REVIEWED.
-        Возвращает ReviewSaveResult с актуальными счётчиками.
+        Возвращает ReviewSaveResult с актуальными счётчиками (1 COUNT-запрос).
         """
         document = await self._get_document_or_raise(project_id, document_id)
 
@@ -309,21 +320,24 @@ class SuggestionService:
                 f"сервер={document.review_version}. Обновите страницу."
             )
 
+        if document.current_analysis_job_id is None:
+            raise ReviewNotCompleteError(
+                "У документа отсутствует текущий результат анализа"
+            )
+
+        job_id = document.current_analysis_job_id
+
         accepted_ids = [
             sid for sid, st in decisions if st == SuggestionStatus.ACCEPTED
         ]
         rejected_ids = [
             sid for sid, st in decisions if st == SuggestionStatus.REJECTED
         ]
-        await self._apply_decisions(accepted_ids, rejected_ids, user_id)
+        await self._apply_decisions(job_id, accepted_ids, rejected_ids, user_id)
 
         if finalize:
-            if document.current_analysis_job_id is None:
-                raise ReviewNotCompleteError(
-                    "У документа отсутствует текущий результат анализа"
-                )
             pending_count = await self._suggestions.count_by_analysis_job_and_status(
-                document.current_analysis_job_id, SuggestionStatus.PENDING
+                job_id, SuggestionStatus.PENDING
             )
             if pending_count:
                 raise ReviewNotCompleteError(
@@ -333,25 +347,14 @@ class SuggestionService:
                 document, DocumentStatus.REVIEWED
             )
 
-        job_id = document.current_analysis_job_id
-        if job_id is not None:
-            accepted_count = await self._suggestions.count_by_analysis_job_and_status(
-                job_id, SuggestionStatus.ACCEPTED
-            )
-            rejected_count = await self._suggestions.count_by_analysis_job_and_status(
-                job_id, SuggestionStatus.REJECTED
-            )
-            pending_count = await self._suggestions.count_by_analysis_job_and_status(
-                job_id, SuggestionStatus.PENDING
-            )
-        else:
-            accepted_count = rejected_count = pending_count = 0
+        # Один COUNT-запрос вместо трёх.
+        stats = await self._suggestions.count_by_analysis_job_stats(job_id)
 
         return ReviewSaveResult(
             document=document,
-            accepted_count=accepted_count,
-            rejected_count=rejected_count,
-            pending_count=pending_count,
+            accepted_count=stats.accepted,
+            rejected_count=stats.rejected,
+            pending_count=stats.pending,
             finalized=finalize,
         )
 
@@ -374,9 +377,6 @@ class SuggestionService:
         2. Применяет решения пользователя.
         3. Проверяет отсутствие pending-правок.
         4. Переводит документ в REVIEWED.
-
-        Отличие от finalize_review: принимает и применяет
-        решения пользователя в той же транзакции.
         """
         from app.domain.exceptions import StaleReviewVersionError  # алиас
 
@@ -393,12 +393,15 @@ class SuggestionService:
                 f"текущая {document.review_version}. Обновите страницу."
             )
 
-        await self._apply_decisions(accepted_ids, rejected_ids, user_id)
-
         if document.current_analysis_job_id is None:
             raise ReviewNotCompleteError(
                 "У документа отсутствует текущий результат анализа"
             )
+
+        await self._apply_decisions(
+            document.current_analysis_job_id, accepted_ids, rejected_ids, user_id
+        )
+
         pending_count = await self._suggestions.count_by_analysis_job_and_status(
             document.current_analysis_job_id, SuggestionStatus.PENDING
         )
@@ -410,7 +413,7 @@ class SuggestionService:
         return await self._documents.update_status(document, DocumentStatus.REVIEWED)
 
     # ------------------------------------------------------------------
-    # Finalize (без версионирования, устаревший путь)
+    # finalize_review (устаревший путь, используется Celery worker)
     # ------------------------------------------------------------------
 
     async def finalize_review(
