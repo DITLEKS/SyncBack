@@ -10,6 +10,14 @@ H2.2: фабрики по-прежнему создают concrete SQLAlchemy-р
 Типы аннотаций в фабриках оставлены конкретными — FastAPI DI не понимает
 Protocol для Depends, зато mypy/pyright проверят, что concrete-репозитории
 действительно реализуют порты через @runtime_checkable.
+
+CRIT-D4 (этот раунд):
+  get_dashboard_service ранее передавал uow= в DashboardService,
+  но DashboardService переключён на IDashboardQueryService (CRIT-D1).
+  Исправлено: добавлена фабрика get_dashboard_query_service,
+  которая создаёт DashboardRepository(session) — конкретную реализацию
+  IDashboardQueryService. get_dashboard_service теперь принимает
+  dashboard_qs через Depends(get_dashboard_query_service).
 """
 
 from functools import lru_cache
@@ -18,6 +26,7 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
+from app.domain.interfaces.dashboard_query_service import IDashboardQueryService
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.domain.services.audit_log_service import AuditLogService
 from app.domain.services.auth_service import AuthService
@@ -28,6 +37,7 @@ from app.domain.services.project_service import ProjectService
 from app.domain.services.source_service import SourceService
 from app.domain.services.suggestion_service import SuggestionService
 from app.infrastructure.cache.redis_client import get_redis_client
+from app.infrastructure.db.repositories.dashboard_repository import DashboardRepository
 from app.infrastructure.db.repositories.project_repository import ProjectRepository
 from app.infrastructure.db.repositories.user_repository import UserRepository
 from app.infrastructure.db.session import get_db_session
@@ -140,10 +150,29 @@ def get_document_export_service(
     )
 
 
+# ---------------------------------------------------------------------------
+# Dashboard — read-model инжектируется напрямую, минуя UoW
+# ---------------------------------------------------------------------------
+
+def get_dashboard_query_service(
+    session: AsyncSession = Depends(get_db_session),
+) -> IDashboardQueryService:
+    """CRIT-D4: DashboardRepository реализует IDashboardQueryService.
+
+    Инжектируется напрямую (без UoW) — read-model не участвует в транзакциях агрегатов.
+    Отдельная сессия от UoW — SELECT-запросы дашборда не мешают write-транзакциям.
+    """
+    return DashboardRepository(session)
+
+
 def get_dashboard_service(
-    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
+    dashboard_qs: IDashboardQueryService = Depends(get_dashboard_query_service),
 ) -> DashboardService:
-    return DashboardService(uow=uow)
+    """CRIT-D4: передаём dashboard_qs=, а не uow=.
+
+    DashboardService.__init__ ожидает IDashboardQueryService после CRIT-D1.
+    """
+    return DashboardService(dashboard_qs=dashboard_qs)
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,9 @@
 """
 DashboardRepository — реальные SQL-агрегаты для GET /dashboard.
 
+CRIT-D4: класс теперь наследует IDashboardQueryService, чтобы
+get_dashboard_service мог передать его как dashboard_qs= в DashboardService.
+
 Запросы:
   - get_stats                 единый COUNT(*) FILTER вместо трёх отдельных (PERF-1)
   - activity_last_7_days      GROUP BY date за последние 7 дней (из document_opens)
@@ -18,13 +21,14 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.interfaces.dashboard_query_service import IDashboardQueryService
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.document_open import DocumentOpen
 from app.infrastructure.db.models.enums import DocumentStatus
 from app.infrastructure.db.models.project import Project
 
 
-class DashboardRepository:
+class DashboardRepository(IDashboardQueryService):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
@@ -187,7 +191,7 @@ class DashboardRepository:
         ]
 
     # ------------------------------------------------------------------
-    # Track open (extracted from deleted app/services/dashboard_service.py)
+    # Track open
     # ------------------------------------------------------------------
 
     async def upsert_open(self, user_id: uuid.UUID, document_id: uuid.UUID) -> None:
