@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING, NamedTuple, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, AsyncIterator, NamedTuple, Protocol, runtime_checkable
 
 from app.domain.enums import SuggestionStatus
 
@@ -50,7 +50,29 @@ class SuggestionPort(Protocol):
 
     async def list_by_analysis_job_and_status(
         self, analysis_job_id: uuid.UUID, status: SuggestionStatus
-    ) -> "list[Suggestion]": ...
+    ) -> "list[Suggestion]":
+        """Возвращает все правки с заданным статусом без лимита.
+
+        Намеренно не принимает limit/offset: есть пути, где нужны
+        сразу все записи одним запросом (например, небольшие чтения-пути).
+        Для экспорта (возможно тысячи правок) используйте
+        iter_accepted_changes, который читает постранично.
+        """
+        ...
+
+    def iter_accepted_changes(
+        self,
+        analysis_job_id: uuid.UUID,
+        chunk_size: int = 500,
+    ) -> "AsyncIterator[list[Suggestion]]":
+        """Постраничный итератор по принятым правкам (ACCEPTED) jobа.
+
+        Используется в get_accepted_changes / экспорте: вместо
+        материализации всего списка в память Python, читает
+        по chunk_size записей за раз. Пик потребления памяти
+        O(chunk_size) вместо O(total_accepted).
+        """
+        ...
 
     async def update_status(
         self,

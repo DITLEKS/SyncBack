@@ -164,21 +164,28 @@ class SuggestionService:
     async def get_accepted_changes(
         self, document_id: uuid.UUID
     ) -> list[AppliedChange]:
+        """Собирает все принятые правки для передачи экспортеру.
+
+        Использует iter_accepted_changes для чтения постранично:
+        пик потребления памяти O(chunk_size) вместо O(total_accepted).
+        """
         document = await self._documents.get_by_id(document_id)
         if document is None or document.current_analysis_job_id is None:
             return []
-        suggestions = await self._suggestions.list_by_analysis_job_and_status(
-            document.current_analysis_job_id, SuggestionStatus.ACCEPTED
-        )
-        return [
-            AppliedChange(
-                section_ref=s.section_ref,
-                change_type=s.change_type.value,
-                old_text=s.old_text,
-                new_text=s.new_text,
-            )
-            for s in suggestions
-        ]
+        changes: list[AppliedChange] = []
+        async for chunk in self._suggestions.iter_accepted_changes(
+            document.current_analysis_job_id
+        ):
+            for s in chunk:
+                changes.append(
+                    AppliedChange(
+                        section_ref=s.section_ref,
+                        change_type=s.change_type.value,
+                        old_text=s.old_text,
+                        new_text=s.new_text,
+                    )
+                )
+        return changes
 
     # ------------------------------------------------------------------
     # Write operations (требуют AWAITING_APPROVAL)

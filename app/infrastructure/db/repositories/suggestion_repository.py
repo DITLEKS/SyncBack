@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import UTC, datetime
+from typing import AsyncIterator
 
 from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -97,6 +98,11 @@ class SuggestionRepository:
     async def list_by_analysis_job_and_status(
         self, analysis_job_id: uuid.UUID, status: SuggestionStatus
     ) -> list[Suggestion]:
+        """Возвращает все правки с заданным статусом без лимита.
+
+        Намеренно не принимает limit/offset: используется там, где нужны
+        все записи сразу. Для экспорта используйте iter_accepted_changes.
+        """
         result = await self._session.execute(
             select(Suggestion)
             .where(
@@ -106,6 +112,37 @@ class SuggestionRepository:
             .order_by(Suggestion.created_at)
         )
         return list(result.scalars().all())
+
+    async def iter_accepted_changes(
+        self,
+        analysis_job_id: uuid.UUID,
+        chunk_size: int = 500,
+    ) -> AsyncIterator[list[Suggestion]]:
+        """Постранично читает ACCEPTED-правки чанками по chunk_size.
+
+        Пик потребления памяти O(chunk_size) вместо O(total_accepted).
+        Останавливается, когда последний чанк короче chunk_size (последняя страница).
+        """
+        offset = 0
+        base_query = (
+            select(Suggestion)
+            .where(
+                Suggestion.analysis_job_id == analysis_job_id,
+                Suggestion.status == SuggestionStatus.ACCEPTED,
+            )
+            .order_by(Suggestion.created_at, Suggestion.id)
+            .limit(chunk_size)
+        )
+        while True:
+            result = await self._session.execute(base_query.offset(offset))
+            chunk = list(result.scalars().all())
+            if not chunk:
+                return
+            yield chunk
+            if len(chunk) < chunk_size:
+                # последняя страница — дальше читать нечего
+                return
+            offset += chunk_size
 
     # ------------------------------------------------------------------
     # Write
@@ -149,7 +186,7 @@ class SuggestionRepository:
         """UPDATE WHERE id IN (...) AND analysis_job_id = ... AND status = 'pending'.
 
         Параметр analysis_job_id обязателен — предотвращает изменение правок
-        из чужого документа при передаче произвольных UUID в теле запроса.
+        из чужого документа при передаче произвольных UUID.
         Правки, решённые параллельно, автоматически пропускаются.
         """
         if not suggestion_ids:
