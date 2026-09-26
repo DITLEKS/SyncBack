@@ -11,7 +11,7 @@ Infrastructure-слой предоставляет конкретные адап
 Правило импортов:
   - Document и Suggestion — через DocumentProtocol/SuggestionProtocol (не ORM).
   - AnalysisJob и AuditLog — document/entry через Protocol, возвращаемые значения под TYPE_CHECKING.
-  - Project, Source — всё ещё под TYPE_CHECKING.
+  - Project, Source, User — всё ещё под TYPE_CHECKING.
 """
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ from app.domain.value_objects import (
     SourceTypeVO,
     SuggestionDecision,
     SuggestionStatusVO,
+    UserRoleVO,
 )
 
 if TYPE_CHECKING:
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
     from app.infrastructure.db.models.enums import DocumentFormat
     from app.infrastructure.db.models.project import Project
     from app.infrastructure.db.models.source import Source
+    from app.infrastructure.db.models.user import User
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +77,7 @@ class IDocumentRepository(ABC):
         даёт два round-trip. Если в будущем потребуется оптимизация — добавить
         list_for_project_with_total() с COUNT(*) OVER() (window function).
         """
+        ...
 
     @abstractmethod
     async def list_analyzable_for_project(
@@ -206,9 +209,21 @@ class IAnalysisJobRepository(ABC):
     ) -> "AnalysisJob | None": ...
 
     @abstractmethod
+    async def list_by_document(
+        self,
+        document_id: uuid.UUID,
+        pagination: PaginationParams | KeysetPage,
+    ) -> list["AnalysisJob"]:
+        """
+        MED: История задач анализа по документу — необходима для эндпоинта GET /documents/{id}/jobs.
+        Сортировка по created_at DESC.
+        """
+        ...
+
+    @abstractmethod
     async def create_for_document(
         self,
-        document: DocumentProtocol,  # H-NEW-3: Protocol, не ORM-тип
+        document: DocumentProtocol,
         *,
         job_id: uuid.UUID | None = None,
         status: AnalysisJobStatusVO = AnalysisJobStatusVO.PENDING,
@@ -266,6 +281,7 @@ class IAuditLogRepository(ABC):
         M-NEW-3: фабричный метод. Сервис передаёт параметры, репозиторий строит AuditLog-объект.
         Сохраняет паттерн фабричных методов, введённый для Document и AnalysisJob.
         """
+        ...
 
     @abstractmethod
     async def list_for_document(
@@ -370,6 +386,66 @@ class ISourceRepository(ABC):
         document_id: uuid.UUID,
         sources: "list[Source]",
     ) -> "list[Source]": ...
+
+    @abstractmethod
+    async def update(
+        self,
+        source: "Source",
+        name: str | None = None,
+        text_content: str | None = None,
+        url: str | None = None,
+    ) -> "Source":
+        """
+        HIGH: Изменить метаданные источника. Передавать только значения, которые необходимо изменить;
+        None — поле остаётся неизменным. storage_key изменяется в инфра-слое при замене файла.
+        """
+        ...
+
+    @abstractmethod
+    async def delete(self, source: "Source") -> None:
+        """
+        HIGH: Удалить источник. Инфра-слой обязан удалить связанные файлы из MinIO
+        бест-эффорт до удаления записи из БД.
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
+# User
+# ---------------------------------------------------------------------------
+
+class IUserRepository(ABC):
+    """
+    HIGH: Порт для репозитория пользователей.
+
+    IUnitOfWork.users теперь ссылается на этот интерфейс,
+    а не на конкретный UserRepository из infrastructure.
+    """
+
+    @abstractmethod
+    async def get_by_id(self, user_id: uuid.UUID) -> "User | None": ...
+
+    @abstractmethod
+    async def get_by_email(self, email: str) -> "User | None": ...
+
+    @abstractmethod
+    async def create(
+        self,
+        email: str,
+        hashed_password: str,
+        role: UserRoleVO = UserRoleVO.EDITOR,
+    ) -> "User": ...
+
+    @abstractmethod
+    async def update_role(
+        self, user: "User", role: UserRoleVO
+    ) -> "User": ...
+
+    @abstractmethod
+    async def list_all(self, limit: int, offset: int) -> "list[User]": ...
+
+    @abstractmethod
+    async def count_all(self) -> int: ...
 
 
 # ---------------------------------------------------------------------------
