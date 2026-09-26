@@ -1,26 +1,25 @@
-"""P0-2/3: review_version на documents, block_id/start_offset/end_offset на suggestions.
+"""P0-2/3: review_version on documents, block_id/start_offset/end_offset on suggestions.
 
 Revision ID: 0004_p0_review_version_block_id
-Revises: 0003_p0_idempotency_key
+Revises: 0004_suggestion_id_nullable
 Create Date: 2026-09-20
 """
 from alembic import op
 import sqlalchemy as sa
 
 revision = "0004_p0_review_version_block_id"
-down_revision = "0003_p0_idempotency_key"
+down_revision = "0004_suggestion_id_nullable"
 branch_labels = None
 depends_on = None
 
 
 def upgrade() -> None:
-    # P0-2: версия review для оптимистической блокировки
+    # Версия review для оптимистической блокировки
     op.add_column(
         "documents",
         sa.Column("review_version", sa.Integer(), nullable=False, server_default="0"),
     )
-
-    # P0-3: якоря правок
+    # Якоря правок
     op.add_column(
         "suggestions",
         sa.Column("block_id", sa.String(255), nullable=True),
