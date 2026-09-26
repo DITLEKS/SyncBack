@@ -9,14 +9,14 @@
   - __aenter__ и __aexit__ объявлены @abstractmethod, чтобы тестовые фейки
     были обязаны реализовать их явно.
 
-Namespace-атрибуты (все объявлены здесь для type-checker'а):
+Namespace-атрибуты (все объявлены здесь для type-checkerʼа):
   documents   — IDocumentRepository
   suggestions — ISuggestionRepository
   jobs        — IAnalysisJobRepository
   audit       — IAuditLogRepository
   projects    — IProjectRepository
   sources     — ISourceRepository
-  users       — UserRepository (HIGH-A: добавлен для type-safety)
+  users       — IUserRepository  (раньше UserRepository — устранён инфра-лик)
 
 L-C: dashboard УБРАН из IUnitOfWork. DashboardRepository — read-model, не агрегат.
   Инжектируется как IDashboardQueryService через FastAPI Depends(get_dashboard_query_service).
@@ -36,8 +36,8 @@ if TYPE_CHECKING:
         IProjectRepository,
         ISourceRepository,
         ISuggestionRepository,
+        IUserRepository,
     )
-    from app.infrastructure.db.repositories.user_repository import UserRepository
 
 
 class IUnitOfWork(ABC):
@@ -63,8 +63,8 @@ class IUnitOfWork(ABC):
     projects:    "IProjectRepository"
     sources:     "ISourceRepository"
 
-    # Auth (HIGH-A)
-    users:       "UserRepository"
+    # Auth — HIGH: заменён UserRepository (инфра) на IUserRepository (порт)
+    users:       "IUserRepository"
 
     @abstractmethod
     async def __aenter__(self) -> "IUnitOfWork":
@@ -92,5 +92,5 @@ class IUnitOfWork(ABC):
         """H-4: Обновить ORM-объект из БД через интерфейс.
 
         Используется в воркере вместо прямого обращения к uow._session.
-        attribute_names: список ленивых атрибутов для загрузки (напр., ["sources"]).
+        attribute_names: список ленивых атрибутов для загрузки (напр., ["соурцес"]).
         """
