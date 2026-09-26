@@ -4,6 +4,7 @@
 ДОБАВЛЕНО:
 - DELETE /{document_id} — удаление документа + MinIO-файл + каскад suggestions/jobs.
 - GET /{document_id}/export?format=md|docx|txt — экспорт в конкретный формат (макет).
+- GET /?status=draft|in_progress|... — фильтрация по статусу документа.
 ОПТИМИЗИРОВАНО (PERF-4):
 - list_documents: TypeAdapter для пакетной сериализации вместо N model_validate.
 """
@@ -41,7 +42,7 @@ from app.domain.services.audit_log_service import AuditLogService
 from app.domain.services.document_export_service import DocumentExportService
 from app.domain.services.document_service import DocumentService
 from app.domain.services.source_service import SourceService
-from app.domain.value_objects import DocumentFormatVO, PaginationParams
+from app.domain.value_objects import DocumentFormatVO, DocumentStatusVO, PaginationParams
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.user import User
 
@@ -60,6 +61,11 @@ _EXPORT_FORMAT_MAP: dict[str, DocumentFormatVO] = {
     "md":   DocumentFormatVO.MARKDOWN,
     "docx": DocumentFormatVO.DOCX,
     "txt":  DocumentFormatVO.TXT,
+}
+
+# Маппинг строкового query-параметра ?status= → DocumentStatusVO.
+_STATUS_FILTER_MAP: dict[str, DocumentStatusVO] = {
+    vo.value: vo for vo in DocumentStatusVO
 }
 
 router = APIRouter(prefix="/projects/{project_id}/documents", tags=["documents"])
@@ -115,11 +121,34 @@ async def upload_document(
 async def list_documents(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    status_filter: str | None = Query(
+        default=None,
+        alias="status",
+        description=(
+            "Фильтр по статусу документа. "
+            f"Допустимые значения: {', '.join(_STATUS_FILTER_MAP)}"
+        ),
+    ),
     project: Project = Depends(get_allowed_project),
     document_service: DocumentService = Depends(get_document_service),
 ) -> Page[DocumentResponse]:
+    """Список документов проекта с опциональным фильтром по статусу."""
+    status_vo: DocumentStatusVO | None = None
+    if status_filter is not None:
+        status_vo = _STATUS_FILTER_MAP.get(status_filter.lower())
+        if status_vo is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Неподдерживаемый статус: {status_filter!r}. "
+                    f"Допустимые значения: {', '.join(_STATUS_FILTER_MAP)}"
+                ),
+            )
+
     pagination = PaginationParams(limit=limit, offset=offset)
-    documents, total = await document_service.list_documents(project.id, pagination)
+    documents, total = await document_service.list_documents(
+        project.id, pagination, status_filter=status_vo
+    )
     return Page[DocumentResponse](
         items=_document_list_adapter.validate_python(documents, from_attributes=True),
         total=total,

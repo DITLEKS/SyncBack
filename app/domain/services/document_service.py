@@ -17,6 +17,7 @@
 
 CRIT-NEW-2: list_documents передаёт PaginationParams-объект, а не limit/offset позиционно.
 LOW: exc_info=True добавлен в logger.warning внутри delete_document.
+FEAT: list_documents принимает status_filter: DocumentStatusVO | None.
 """
 from __future__ import annotations
 
@@ -136,13 +137,21 @@ class DocumentService:
         self,
         project_id: uuid.UUID,
         pagination: PaginationParams | KeysetPage,
+        *,
+        status_filter: DocumentStatusVO | None = None,
     ) -> tuple[list["Document"], int]:
-        """CRIT-NEW-2: передаём pagination-объект целиком, не limit/offset позиционно."""
+        """Постраничный список документов проекта.
+
+        status_filter — опциональный фильтр по статусу (пробрасывается в репозиторий).
+        CRIT-NEW-2: передаём pagination-объект целиком, не limit/offset позиционно.
+        """
         async with self._uow:
             items = await self._uow.documents.list_for_project(
-                project_id, pagination
+                project_id, pagination, status=status_filter
             )
-            total = await self._uow.documents.count_for_project(project_id)
+            total = await self._uow.documents.count_for_project(
+                project_id, status=status_filter
+            )
         return items, total
 
     async def get_document(
