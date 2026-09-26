@@ -12,7 +12,14 @@ Infrastructure-слой предоставляет конкретные адап
   - Document и Suggestion — через DocumentProtocol/SuggestionProtocol (не ORM).
   - AnalysisJob и AuditLog — document/entry через Protocol, возвращаемые значения под TYPE_CHECKING.
   - Project, Source, User — всё ещё под TYPE_CHECKING.
-  - DocumentFormatVO — теперь из domain.value_objects (больше нет импорта из infra).
+  - DocumentFormatVO — теперь из domain.value_objects.
+
+H-NEW-2: IDashboardRepository (реад-модель) не содержит write-методов.
+  upsert_open перенесён в IDocumentOpenRepository — отдельный write-порт.
+  Инжектируется через FastAPI Depends(get_document_open_repository).
+  UoW не содержит IDashboardRepository — реад-модель инжектируется напрямую.
+
+M-NEW-3: list_all_for_user возвращает tuple[list[DocumentProtocol], int] (раньше был tuple[list[dict], int]).
 """
 from __future__ import annotations
 
@@ -115,7 +122,12 @@ class IDocumentRepository(ABC):
         search: str | None = None,
         sort_by: str = "updated_at",
         sort_dir: str = "desc",
-    ) -> tuple[list[DocumentProtocol], int]: ...
+    ) -> tuple[list[DocumentProtocol], int]:
+        """
+        M-NEW-3: возвращает tuple[list[DocumentProtocol], int].
+        Тип выровнен с реализациями и document_service.list_all_for_user.
+        """
+        ...
 
     @abstractmethod
     async def delete(self, document: DocumentProtocol) -> None: ...
@@ -214,12 +226,7 @@ class IAnalysisJobRepository(ABC):
         self,
         document_id: uuid.UUID,
         pagination: PaginationParams | KeysetPage,
-    ) -> list["AnalysisJob"]:
-        """
-        MED: история задач анализа по документу — необходима для эндпоинта GET /documents/{id}/jobs.
-        Сортировка по created_at DESC.
-        """
-        ...
+    ) -> list["AnalysisJob"]: ...
 
     @abstractmethod
     async def create_for_document(
@@ -277,12 +284,7 @@ class IAuditLogRepository(ABC):
         user_id: uuid.UUID | None,
         action: str,
         details: Any | None = None,
-    ) -> "AuditLog":
-        """
-        M-NEW-3: фабричный метод. Сервис передаёт параметры, репозиторий строит AuditLog-объект.
-        Сохраняет паттерн фабричных методов, введённый для Document и AnalysisJob.
-        """
-        ...
+    ) -> "AuditLog": ...
 
     @abstractmethod
     async def list_for_document(
@@ -395,20 +397,10 @@ class ISourceRepository(ABC):
         name: str | None = None,
         text_content: str | None = None,
         url: str | None = None,
-    ) -> "Source":
-        """
-        HIGH: изменить метаданные источника. Передавать только значения, которые необходимо изменить;
-        None — поле остаётся неизменным. storage_key изменяется в инфра-слое при замене файла.
-        """
-        ...
+    ) -> "Source": ...
 
     @abstractmethod
-    async def delete(self, source: "Source") -> None:
-        """
-        HIGH: удалить источник. Инфра-слой обязан удалить связанные файлы из MinIO
-        бест-эффорт до удаления записи из БД.
-        """
-        ...
+    async def delete(self, source: "Source") -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -416,12 +408,7 @@ class ISourceRepository(ABC):
 # ---------------------------------------------------------------------------
 
 class IUserRepository(ABC):
-    """
-    HIGH: Порт для репозитория пользователей.
-
-    IUnitOfWork.users теперь ссылается на этот интерфейс,
-    а не на конкретный UserRepository из infrastructure.
-    """
+    """HIGH: Порт для репозитория пользователей."""
 
     @abstractmethod
     async def get_by_id(self, user_id: uuid.UUID) -> "User | None": ...
@@ -450,10 +437,15 @@ class IUserRepository(ABC):
 
 
 # ---------------------------------------------------------------------------
-# Dashboard
+# Dashboard (read-model only)
 # ---------------------------------------------------------------------------
 
 class IDashboardRepository(ABC):
+    """
+    H-NEW-2: реад-модель — только читающие методы.
+    Пись через отдельный IDocumentOpenRepository.
+    """
+
     @abstractmethod
     async def get_stats(self, user_id: uuid.UUID) -> dict: ...
 
@@ -471,6 +463,20 @@ class IDashboardRepository(ABC):
     async def get_recent_documents(
         self, user_id: uuid.UUID, limit: int
     ) -> list[dict]: ...
+
+
+# ---------------------------------------------------------------------------
+# DocumentOpen (write-port for "recently opened" tracking)
+# ---------------------------------------------------------------------------
+
+class IDocumentOpenRepository(ABC):
+    """
+    H-NEW-2: write-порт, вынесенный из IDashboardRepository.
+
+    Отслеживает последнее открытие документа пользователем.
+    Инжектируется напрямую через FastAPI Depends(get_document_open_repository)
+    без IUnitOfWork — это операция upsert без бизнес-транзакции.
+    """
 
     @abstractmethod
     async def upsert_open(
