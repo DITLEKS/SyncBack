@@ -4,10 +4,13 @@
 Архитектурные правила:
   - Сервис зависит только от IUnitOfWork — не от конкретных репозиториев.
   - Один uow.commit() на операцию (кроме компенсирующих транзакций при ошибках).
-  - Импорт из infrastructure.* запрещён (только ORM-модели через TYPE_CHECKING,
-    т.к. идёт поэтапная миграция к domain value-objects).
+  - ORM-модели под TYPE_CHECKING — временная мера до замены на domain entities.
+  - Никаких импортов из app.infrastructure.* при выполнении (НЕ TYPE_CHECKING).
 """
+from __future__ import annotations
+
 import uuid
+from typing import TYPE_CHECKING
 
 from sqlalchemy.exc import IntegrityError
 
@@ -18,16 +21,24 @@ from app.domain.exceptions import (
     InvalidDocumentStatusError,
 )
 from app.domain.interfaces.unit_of_work import IUnitOfWork
-from app.infrastructure.db.models.analysis_job import AnalysisJob
-from app.infrastructure.db.models.document import Document
-from app.infrastructure.db.models.enums import AnalysisJobStatus, DocumentStatus
+from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO
+
+if TYPE_CHECKING:
+    from app.infrastructure.db.models.analysis_job import AnalysisJob
+    from app.infrastructure.db.models.document import Document
 
 # Статусы документа, из которых разрешён запуск анализа:
-_ANALYSIS_ALLOWED_STATUSES = (
-    DocumentStatus.DRAFT,
-    DocumentStatus.AWAITING_APPROVAL,
-    DocumentStatus.READY,
-)
+_ANALYSIS_ALLOWED_STATUSES = frozenset({
+    DocumentStatusVO.DRAFT,
+    DocumentStatusVO.AWAITING_APPROVAL,
+    DocumentStatusVO.READY,
+})
+
+# Статусы job, из которых допустима отмена:
+_CANCELLABLE_JOB_STATUSES = frozenset({
+    AnalysisJobStatusVO.PENDING,
+    AnalysisJobStatusVO.PROCESSING,
+})
 
 
 class AnalysisJobService:
@@ -43,7 +54,7 @@ class AnalysisJobService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         idempotency_key: str,
-    ) -> AnalysisJob | None:
+    ) -> "AnalysisJob | None":
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
             if document is None or document.project_id != project_id:
@@ -58,7 +69,7 @@ class AnalysisJobService:
 
     async def get_document_for_job(
         self, project_id: uuid.UUID, document_id: uuid.UUID
-    ) -> Document:
+    ) -> "Document":
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
             if document is None or document.project_id != project_id:
@@ -76,15 +87,15 @@ class AnalysisJobService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         idempotency_key: str | None = None,
-    ) -> AnalysisJob:
+    ) -> "AnalysisJob":
         """Создать задачу анализа.
 
         Одна транзакция:
-          • проверка статуса документа
-          • idempotency-check
-          • сброс документа в DRAFT (если нужен)
-          • INSERT job + UPDATE document.current_analysis_job_id
-          • commit
+          1. Проверка статуса документа
+          2. Idempotency-check (если ключ передан)
+          3. Сброс документа в DRAFT (если не DRAFT)
+          4. INSERT job + UPDATE document.current_analysis_job_id
+          5. commit
         """
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
@@ -103,23 +114,27 @@ class AnalysisJobService:
             if document.status not in _ANALYSIS_ALLOWED_STATUSES:
                 raise InvalidDocumentStatusError(
                     f"Анализ можно запустить только для документа в статусе "
-                    f"{' или '.join(s.value for s in _ANALYSIS_ALLOWED_STATUSES)}, "
-                    f"текущий статус: {document.status.value}"
+                    f"{' или '.join(_ANALYSIS_ALLOWED_STATUSES)}, "
+                    f"текущий статус: {document.status}"
                 )
+
             if await self._uow.jobs.get_active_by_document_id(document.id) is not None:
                 raise AnalysisAlreadyRunningError(
                     "Для документа уже выполняется анализ"
                 )
 
-            if document.status != DocumentStatus.DRAFT:
+            if document.status != DocumentStatusVO.DRAFT:
                 document = await self._uow.documents.update_status(
-                    document, DocumentStatus.DRAFT
+                    document, DocumentStatusVO.DRAFT
                 )
 
+            # ORM-объект AnalysisJob создаётся здесь, а не в репозитории,
+            # т.к. сервис владеет id-генерацией и начальным статусом.
+            from app.infrastructure.db.models.analysis_job import AnalysisJob  # noqa: PLC0415
             job = AnalysisJob(
                 id=uuid.uuid4(),
                 document_id=document.id,
-                status=AnalysisJobStatus.PENDING,
+                status=AnalysisJobStatusVO.PENDING,
                 idempotency_key=idempotency_key,
             )
             try:
@@ -133,8 +148,8 @@ class AnalysisJobService:
         return job
 
     async def mark_dispatched(
-        self, job: AnalysisJob, task_id: str
-    ) -> AnalysisJob:
+        self, job: "AnalysisJob", task_id: str
+    ) -> "AnalysisJob":
         async with self._uow:
             document = await self._uow.documents.get_by_id(job.document_id)
             if document is None:
@@ -146,8 +161,8 @@ class AnalysisJobService:
         return result
 
     async def mark_job_queue_unavailable(
-        self, job: AnalysisJob, error_message: str | None = None
-    ) -> AnalysisJob:
+        self, job: "AnalysisJob", error_message: str | None = None
+    ) -> "AnalysisJob":
         async with self._uow:
             document = await self._uow.documents.get_by_id(job.document_id)
             if document is None:
@@ -165,15 +180,12 @@ class AnalysisJobService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         job_id: uuid.UUID,
-    ) -> AnalysisJob:
+    ) -> "AnalysisJob":
         async with self._uow:
             job = await self._get_job(project_id, document_id, job_id)
-            if job.status == AnalysisJobStatus.CANCELLED:
+            if job.status == AnalysisJobStatusVO.CANCELLED:
                 return job
-            if job.status not in (
-                AnalysisJobStatus.PENDING,
-                AnalysisJobStatus.PROCESSING,
-            ):
+            if job.status not in _CANCELLABLE_JOB_STATUSES:
                 raise AnalysisJobNotCancellableError(
                     "Завершённую задачу анализа отменить нельзя"
                 )
@@ -191,7 +203,7 @@ class AnalysisJobService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         job_id: uuid.UUID,
-    ) -> AnalysisJob:
+    ) -> "AnalysisJob":
         async with self._uow:
             return await self._get_job(project_id, document_id, job_id)
 
@@ -236,7 +248,7 @@ class AnalysisJobService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         job_id: uuid.UUID,
-    ) -> AnalysisJob:
+    ) -> "AnalysisJob":
         """Проверить принадлежность job → document → project."""
         job = await self._uow.jobs.get_by_id(job_id)
         if job is None or job.document_id != document_id:

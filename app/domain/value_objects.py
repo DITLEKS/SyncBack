@@ -9,7 +9,7 @@ Value-объекты доменного слоя — иммутабельные 
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 
@@ -55,11 +55,11 @@ class UserRoleVO(StrEnum):
 
 class SourceTypeVO(StrEnum):
     """Тип источника истины."""
-    FILE     = "file"
-    TEXT     = "text"
-    URL      = "url"
-    NOTION   = "notion"
-    GDOC     = "gdoc"
+    FILE   = "file"
+    TEXT   = "text"
+    URL    = "url"
+    NOTION = "notion"
+    GDOC   = "gdoc"
 
 
 class SourceScopeVO(StrEnum):
@@ -78,11 +78,11 @@ class DocumentFormatVO(StrEnum):
 
 class AuditActionVO(StrEnum):
     """Тип действия в журнале аудита."""
-    ACCEPT       = "accept"
-    REJECT       = "reject"
-    BULK_ACCEPT  = "bulk_accept"
-    FINALIZE     = "finalize"
-    REOPEN       = "reopen"
+    ACCEPT      = "accept"
+    REJECT      = "reject"
+    BULK_ACCEPT = "bulk_accept"
+    FINALIZE    = "finalize"
+    REOPEN      = "reopen"
 
 
 # ---------------------------------------------------------------------------
@@ -104,33 +104,85 @@ class PaginationParams:
 
 @dataclass(frozen=True)
 class SuggestionDecision:
-    """Одно решение по правке: принять или отклонить."""
+    """Одно решение по правке: принять или отклонить.
+
+    Используется в:
+      - ISuggestionRepository.update_status()  — одиночное CAS-обновление
+      - ReviewDecisions                         — батч-обновление
+    """
     suggestion_id: uuid.UUID
-    accepted: bool
+    status: SuggestionStatusVO    # ACCEPTED | REJECTED (PENDING недопустим)
+    decided_by: uuid.UUID
+
+    def __post_init__(self) -> None:
+        if self.status == SuggestionStatusVO.PENDING:
+            raise ValueError(
+                "SuggestionDecision.status не может быть PENDING; "
+                "используйте ACCEPTED или REJECTED"
+            )
+
+    @property
+    def is_accepted(self) -> bool:
+        return self.status == SuggestionStatusVO.ACCEPTED
 
 
 @dataclass(frozen=True)
 class ReviewDecisions:
     """Набор решений одной сессии ревью с оптимистичной блокировкой.
 
-    Содержит:
-      - analysis_job_id  — к какому job относятся правки
-      - decided_by       — кто принял решения
-      - review_version   — ожидаемая версия для CAS-проверки
-      - decisions        — набор SuggestionDecision
+    Поля:
+      analysis_job_id — к какому job относятся правки
+      decided_by      — кто принял решения (обязателен, PERF-2)
+      review_version  — ожидаемая версия для CAS-проверки
+      accepted_ids    — UUID правок к принятию
+      rejected_ids    — UUID правок к отклонению
+
+    Инварианты (проверяются при создании):
+      - accepted ∩ rejected = ∅
+      - нет дублей внутри каждого списка
     """
     analysis_job_id: uuid.UUID
     decided_by: uuid.UUID
     review_version: int
-    decisions: tuple[SuggestionDecision, ...]
+    accepted_ids: tuple[uuid.UUID, ...] = field(default_factory=tuple)
+    rejected_ids: tuple[uuid.UUID, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        if len(self.accepted_ids) != len(set(self.accepted_ids)):
+            raise ValueError("accepted_ids содержат дубли")
+        if len(self.rejected_ids) != len(set(self.rejected_ids)):
+            raise ValueError("rejected_ids содержат дубли")
+        overlap = set(self.accepted_ids) & set(self.rejected_ids)
+        if overlap:
+            raise ValueError(
+                f"Правки одновременно в accepted и rejected: {overlap}"
+            )
 
     @property
-    def accepted_ids(self) -> list[uuid.UUID]:
-        return [d.suggestion_id for d in self.decisions if d.accepted]
+    def all_ids(self) -> list[uuid.UUID]:
+        """Все затронутые UUID правок."""
+        return [*self.accepted_ids, *self.rejected_ids]
 
-    @property
-    def rejected_ids(self) -> list[uuid.UUID]:
-        return [d.suggestion_id for d in self.decisions if not d.accepted]
+    def to_decisions(self) -> list[SuggestionDecision]:
+        """Развернуть в список SuggestionDecision для поштучной обработки."""
+        decisions: list[SuggestionDecision] = []
+        for sid in self.accepted_ids:
+            decisions.append(
+                SuggestionDecision(
+                    suggestion_id=sid,
+                    status=SuggestionStatusVO.ACCEPTED,
+                    decided_by=self.decided_by,
+                )
+            )
+        for sid in self.rejected_ids:
+            decisions.append(
+                SuggestionDecision(
+                    suggestion_id=sid,
+                    status=SuggestionStatusVO.REJECTED,
+                    decided_by=self.decided_by,
+                )
+            )
+        return decisions
 
 
 @dataclass(frozen=True)

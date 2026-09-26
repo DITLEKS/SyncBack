@@ -180,6 +180,11 @@ class SuggestionService:
         suggestion: "Suggestion",
         decision: SuggestionDecision,
     ) -> "Suggestion":
+        """CAS-обновление одной правки.
+
+        update_status() возвращает None, если правка уже обработана
+        (optimistic lock на уровне репозитория).
+        """
         self._assert_awaiting_approval(document)
         updated = await self._uow.suggestions.update_status(suggestion, decision)
         if updated is None:
@@ -236,6 +241,7 @@ class SuggestionService:
         document_id: uuid.UUID,
         user_id: uuid.UUID,
     ) -> BulkAcceptResult:
+        """Принять все PENDING-правки одним SQL UPDATE."""
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             self._assert_awaiting_approval(document)
@@ -249,9 +255,10 @@ class SuggestionService:
 
             decisions = ReviewDecisions(
                 analysis_job_id=job_id,
-                accepted_ids=pending_ids,
-                rejected_ids=[],
                 decided_by=user_id,
+                review_version=document.review_version,
+                accepted_ids=tuple(pending_ids),
+                rejected_ids=(),
             )
             accepted = await self._uow.suggestions.bulk_update_status(decisions)
             refreshed = await self._uow.documents.get_by_id(document_id)
@@ -325,23 +332,19 @@ class SuggestionService:
             self._assert_awaiting_approval(document)
             job_id = self._assert_has_active_job(document)
 
-            # Проверяем, что все suggestion_id относятся к текущему job
-            all_ids = [*review_decisions.accepted_ids, *review_decisions.rejected_ids]
-            if len(set(all_ids)) != len(all_ids):
-                raise ReviewNotCompleteError(
-                    "Переданы дублирующиеся id правок"
-                )
-
-            # Пересечение accepted ∩ rejected
-            overlap = set(review_decisions.accepted_ids) & set(review_decisions.rejected_ids)
-            if overlap:
-                raise ReviewNotCompleteError(
-                    f"Правки одновременно accepted и rejected: {overlap}"
-                )
+            # Инварианты ReviewDecisions проверяются в __post_init__ VO;
+            # здесь дополнительно убеждаемся, что передан правильный job.
+            decisions_vo = ReviewDecisions(
+                analysis_job_id=job_id,
+                decided_by=user_id,
+                review_version=review_decisions.review_version,
+                accepted_ids=review_decisions.accepted_ids,
+                rejected_ids=review_decisions.rejected_ids,
+            )
 
             # CAS review_version
             locked_doc = await self._uow.documents.compare_and_increment_review_version(
-                document.id, review_decisions.review_version
+                document.id, decisions_vo.review_version
             )
             if locked_doc is None:
                 raise OptimisticLockError(
@@ -350,23 +353,16 @@ class SuggestionService:
             document = locked_doc
 
             # Единый UPDATE через ReviewDecisions VO
-            decisions_vo = ReviewDecisions(
-                analysis_job_id=job_id,
-                accepted_ids=review_decisions.accepted_ids,
-                rejected_ids=review_decisions.rejected_ids,
-                decided_by=user_id,
-                review_version=review_decisions.review_version,
-            )
             updated = await self._uow.suggestions.bulk_update_status(decisions_vo)
 
-            expected_total = len(all_ids)
+            expected_total = len(decisions_vo.all_ids)
             if len(updated) != expected_total:
                 raise SuggestionAlreadyDecidedError(
                     "Часть правок не найдена в текущем анализе или уже обработана"
                 )
 
-            accepted_count = len(review_decisions.accepted_ids)
-            rejected_count = len(review_decisions.rejected_ids)
+            accepted_count = len(decisions_vo.accepted_ids)
+            rejected_count = len(decisions_vo.rejected_ids)
 
             pending_count = await self._uow.suggestions.count_by_analysis_job_and_status(
                 job_id, SuggestionStatusVO.PENDING
