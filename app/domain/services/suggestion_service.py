@@ -4,7 +4,7 @@
 Архитектурные правила:
   - Сервис зависит только от IUnitOfWork (порт) и domain value-objects.
   - Никаких импортов из app.infrastructure.* при выполнении.
-  - Один uow.commit() на операцию — атомарность гарантируется UoW.
+  - Один uow.commit() на операцию — атомарность гарантируется УоУ.
 """
 from __future__ import annotations
 
@@ -272,8 +272,10 @@ class SuggestionService:
         self,
         project_id: uuid.UUID,
         document_id: uuid.UUID,
+        user_id: uuid.UUID,
         export_service: "DocumentExportService | None" = None,
     ) -> "Document":
+        """M-7: принимает user_id для аудита ъкто финализировал ревью."""
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             self._assert_awaiting_approval(document)
@@ -318,7 +320,6 @@ class SuggestionService:
             self._assert_awaiting_approval(document)
             job_id = self._assert_has_active_job(document)
 
-            # ReviewDecisions создаётся здесь — только теперь известен job_id.
             decisions_vo = ReviewDecisions(
                 analysis_job_id=job_id,
                 decided_by=user_id,

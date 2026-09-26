@@ -150,7 +150,6 @@ async def review_save(
     client_version = _parse_if_match(if_match)
     review_version = client_version if client_version is not None else payload.review_version
 
-    # Разбиваем решения за один проход: O(N), O(1) поиск в accepted_set.
     accepted_ids: list[uuid.UUID] = []
     rejected_ids: list[uuid.UUID] = []
     accepted_set: set[uuid.UUID] = set()
@@ -162,15 +161,12 @@ async def review_save(
         else:
             rejected_ids.append(d.suggestion_id)
 
-    # Audit-список строится в O(N) без повторного обхода
     audit_decisions: list[tuple[uuid.UUID, AuditActionVO]] = [
         (sid, AuditActionVO.ACCEPT if sid in accepted_set else AuditActionVO.REJECT)
         for sid in (*accepted_ids, *rejected_ids)
     ]
 
     try:
-        # Роутер передаёт плоские параметры —
-        # сервис сам создаёт ReviewDecisions после разрешения job_id (M-6).
         result = await suggestion_service.atomic_review_save(
             project_id=project.id,
             document_id=document_id,
@@ -197,11 +193,10 @@ async def review_save(
     await _safe_bulk_log(audit_log_service, current_user.id, audit_decisions)
 
     doc = result.document
-    review_version_out = getattr(doc, "review_version", 0) or 0
     return ReviewSaveResponse(
         document_id=doc.id,
         document_status=doc.status.value,
-        review_version=review_version_out,
+        review_version=doc.review_version,  # L-2: nullable=False, default=0 — getattr был лишним
         accepted_count=result.accepted_count,
         rejected_count=result.rejected_count,
         pending_count=result.pending_count,
@@ -247,3 +242,32 @@ async def reject_suggestion(
         suggestion_service,
         audit_log_service,
     )
+
+
+@router.post("/finalize", response_model=DocumentResponse)
+async def finalize_review(
+    document_id: uuid.UUID,
+    project: Project = Depends(get_allowed_project),
+    current_user: User = Depends(get_current_user),
+    suggestion_service: SuggestionService = Depends(get_suggestion_service),
+    audit_log_service: AuditLogService = Depends(get_audit_log_service),
+) -> DocumentResponse:
+    """M-7: current_user теперь передаётся в сервис для аудита кто финализировал."""
+    try:
+        document = await suggestion_service.finalize_review(
+            project_id=project.id,
+            document_id=document_id,
+            user_id=current_user.id,
+        )
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    await _safe_single_log(
+        audit_log_service,
+        current_user.id,
+        document.id,
+        AuditActionVO.FINALIZE_REVIEW,
+    )
+    return DocumentResponse.model_validate(document)
