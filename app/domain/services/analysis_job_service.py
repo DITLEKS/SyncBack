@@ -4,7 +4,7 @@
 Архитектурные правила:
   - Сервис зависит только от IUnitOfWork — не от конкретных репозиториев.
   - Один uow.commit() на операцию (кроме компенсирующих транзакций при ошибках).
-  - ORM-модели под TYPE_CHECKING — временная мера до замены на domain entities.
+  - H-2: ORM-объект AnalysisJob создаётся внутри репозитория через фабричный метод.
   - Никаких импортов из app.infrastructure.* при выполнении (НЕ TYPE_CHECKING).
 """
 from __future__ import annotations
@@ -94,7 +94,7 @@ class AnalysisJobService:
           1. Проверка статуса документа
           2. Idempotency-check (если ключ передан)
           3. Сброс документа в DRAFT (если не DRAFT)
-          4. INSERT job + UPDATE document.current_analysis_job_id
+          4. INSERT job + UPDATE document.current_analysis_job_id  (фабрика в репозитории)
           5. commit
         """
         async with self._uow:
@@ -128,17 +128,13 @@ class AnalysisJobService:
                     document, DocumentStatusVO.DRAFT
                 )
 
-            # TODO(H-2): вынести создание ORM-объекта в репозиторий (create_for_document
-            # должен принимать параметры, а не готовый ORM-инстанс).
-            from app.infrastructure.db.models.analysis_job import AnalysisJob  # noqa: PLC0415
-            job = AnalysisJob(
-                id=uuid.uuid4(),
-                document_id=document.id,
-                status=AnalysisJobStatusVO.PENDING,
-                idempotency_key=idempotency_key,
-            )
+            # H-2: ORM-объект создаётся внутри репозитория — сервис не знает про AnalysisJob ORM.
             try:
-                job = await self._uow.jobs.create_for_document(job, document)
+                job = await self._uow.jobs.create_for_document(
+                    document,
+                    status=AnalysisJobStatusVO.PENDING,
+                    idempotency_key=idempotency_key,
+                )
                 await self._uow.commit()
             except IntegrityError as exc:
                 await self._uow.rollback()

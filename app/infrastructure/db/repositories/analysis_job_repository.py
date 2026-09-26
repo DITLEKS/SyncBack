@@ -8,6 +8,7 @@ SQLAlchemy-адаптер для AnalysisJob.
 - Публичные методы принимают / возвращают AnalysisJobStatusVO вместо ORM-enum.
 - Конвертация инкапсулирована в _status_to_orm / _status_from_orm.
 - Импорты ORM-моделей отложены (TYPE_CHECKING / локальные) — домен не зависит от инфры.
+- H-2: create_for_document принимает параметры, а не готовый ORM-инстанс.
 """
 from __future__ import annotations
 
@@ -45,13 +46,13 @@ class AnalysisJobRepository(IAnalysisJobRepository):
     # Read
     # ------------------------------------------------------------------
 
-    async def get_by_id(self, job_id: uuid.UUID) -> AnalysisJob | None:
+    async def get_by_id(self, job_id: uuid.UUID) -> "AnalysisJob | None":
         from app.infrastructure.db.models.analysis_job import AnalysisJob as M
         return await self._session.get(M, job_id)
 
     async def get_by_idempotency_key(
         self, document_id: uuid.UUID, idempotency_key: str
-    ) -> AnalysisJob | None:
+    ) -> "AnalysisJob | None":
         from app.infrastructure.db.models.analysis_job import AnalysisJob as M
         result = await self._session.execute(
             select(M).where(
@@ -63,7 +64,7 @@ class AnalysisJobRepository(IAnalysisJobRepository):
 
     async def get_active_by_document_id(
         self, document_id: uuid.UUID
-    ) -> AnalysisJob | None:
+    ) -> "AnalysisJob | None":
         from app.infrastructure.db.models.analysis_job import AnalysisJob as M
         from app.infrastructure.db.models.enums import AnalysisJobStatus
         result = await self._session.execute(
@@ -85,12 +86,24 @@ class AnalysisJobRepository(IAnalysisJobRepository):
 
     async def create_for_document(
         self,
-        job: AnalysisJob,
-        document: Document,
-    ) -> AnalysisJob:
-        """Добавляет job в сессию и связывает с документом.
+        document: "Document",
+        *,
+        job_id: uuid.UUID | None = None,
+        status: AnalysisJobStatusVO = AnalysisJobStatusVO.PENDING,
+        idempotency_key: str | None = None,
+    ) -> "AnalysisJob":
+        """Фабричный метод: создаёт ORM-объект AnalysisJob внутри репозитория.
+
+        H-2: сервис передаёт только параметры — репозиторий сам строит ORM-инстанс.
         Commit — ответственность вызывающего UoW.
         """
+        from app.infrastructure.db.models.analysis_job import AnalysisJob as M
+        job = M(
+            id=job_id or uuid.uuid4(),
+            document_id=document.id,
+            status=_status_to_orm(status),
+            idempotency_key=idempotency_key,
+        )
         self._session.add(job)
         document.current_analysis_job_id = job.id
         await self._session.flush()
@@ -99,10 +112,10 @@ class AnalysisJobRepository(IAnalysisJobRepository):
 
     async def mark_dispatched(
         self,
-        job: AnalysisJob,
-        document: Document,
+        job: "AnalysisJob",
+        document: "Document",
         task_id: str,
-    ) -> AnalysisJob:
+    ) -> "AnalysisJob":
         from app.infrastructure.db.models.enums import AnalysisJobStatus
         await self._session.refresh(job)
         job.celery_task_id = task_id
@@ -117,10 +130,10 @@ class AnalysisJobRepository(IAnalysisJobRepository):
 
     async def mark_failed_queue_unavailable(
         self,
-        job: AnalysisJob,
-        document: Document,
+        job: "AnalysisJob",
+        document: "Document",
         message: str | None,
-    ) -> AnalysisJob:
+    ) -> "AnalysisJob":
         from app.infrastructure.db.models.enums import AnalysisJobStatus
         job.status = AnalysisJobStatus.FAILED
         job.error_code = "QUEUE_UNAVAILABLE"
@@ -134,9 +147,9 @@ class AnalysisJobRepository(IAnalysisJobRepository):
 
     async def cancel(
         self,
-        job: AnalysisJob,
-        document: Document,
-    ) -> AnalysisJob:
+        job: "AnalysisJob",
+        document: "Document",
+    ) -> "AnalysisJob":
         from app.infrastructure.db.models.enums import AnalysisJobStatus
         job.status = AnalysisJobStatus.CANCELLED
         job.error_code = "ANALYSIS_CANCELLED"
@@ -170,11 +183,11 @@ class AnalysisJobRepository(IAnalysisJobRepository):
 
     async def update_status(
         self,
-        job: AnalysisJob,
+        job: "AnalysisJob",
         status: AnalysisJobStatusVO,
         error_code: str | None = None,
         error_message: str | None = None,
-    ) -> AnalysisJob:
+    ) -> "AnalysisJob":
         from app.infrastructure.db.models.enums import AnalysisJobStatus
         _terminal = {
             AnalysisJobStatus.SUCCESS,

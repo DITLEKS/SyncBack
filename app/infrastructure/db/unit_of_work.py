@@ -9,9 +9,11 @@ SQLAlchemy-реализация Unit of Work.
   - Никогда не вызывайте uow.commit() более одного раза за операцию
     (исключение — Celery-задачи с промежуточными чекпоинтами: каждый чекпоинт
     создаёт новый `async with uow` блок).
+  - H-4: refresh() доступен через IUnitOfWork.refresh() — не обращайся к uow._session напрямую.
 """
 from __future__ import annotations
 
+from typing import Any
 from types import TracebackType
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -66,3 +68,7 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
 
     async def rollback(self) -> None:
         await self._session.rollback()
+
+    async def refresh(self, obj: Any, attribute_names: list[str] | None = None) -> None:
+        """H-4: обновить ORM-объект из БД, не обращаясь к _session напрямую."""
+        await self._session.refresh(obj, attribute_names=attribute_names)

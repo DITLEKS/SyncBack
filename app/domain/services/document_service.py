@@ -10,6 +10,7 @@
 ДОБАВЛЕНО:
 - delete_document()       — удаляет MinIO-файл (best-effort), затем запись в БД.
 - get_original_content()  — читает снапшот текста до правок (#7).
+- H-5: ORM-объект Document создаётся внутри репозитория через фабричный метод.
 """
 from __future__ import annotations
 
@@ -92,16 +93,15 @@ class DocumentService:
         await self._storage.upload(storage_key, content, content_type)
 
         try:
-            from app.infrastructure.db.models.document import Document as DocumentModel
-            document = DocumentModel(
-                id=document_id,
-                project_id=project.id,
-                title=filename,
-                format=document_format,
-                storage_key=storage_key,
-            )
             async with self._uow:
-                saved = await self._uow.documents.create(document)
+                # H-5: ORM-объект строится внутри репозитория — сервис не знает про Document ORM.
+                saved = await self._uow.documents.create(
+                    id=document_id,
+                    project_id=project.id,
+                    title=filename,
+                    format=document_format,
+                    storage_key=storage_key,
+                )
                 await self._uow.commit()
         except Exception:
             await self._storage.delete(storage_key)

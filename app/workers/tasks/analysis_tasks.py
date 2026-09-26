@@ -21,6 +21,8 @@ Celery-задачи пайплайна анализа.
 - L-3: все extra={"job_id": ...} используют str(job_id) последовательно.
 - M-10: явные error_code JOB_NOT_FOUND / DOCUMENT_NOT_FOUND при отсутствии
   записи в БД — отличает «не существует» от «уже завершён».
+- H-4: uow._session.refresh() заменён на await uow.refresh() (IUnitOfWork).
+- M-1/M-2: прямые мутации document.status заменены на uow.documents.update_status().
 """
 
 import asyncio
@@ -183,11 +185,13 @@ async def _apply_job_outcome(
             )
         await uow.jobs.update_status(job, AnalysisJobStatusVO.SUCCESS, error_message=message)
         if is_current:
-            document.status = (
+            new_doc_status = (
                 DocumentStatusVO.AWAITING_APPROVAL
                 if tally.suggestions_count
                 else DocumentStatusVO.READY
             )
+            # M-1: через репозиторий, не прямую мутацию .status
+            await uow.documents.update_status(document, new_doc_status)
     elif tally.failed:
         message = "; ".join(
             f"{r.get('source_id', '?')}: {r.get('error_message')}" for r in tally.failed
@@ -196,7 +200,8 @@ async def _apply_job_outcome(
             job, AnalysisJobStatusVO.FAILED, "ALL_SOURCES_FAILED", message
         )
         if is_current:
-            document.status = DocumentStatusVO.DRAFT
+            # M-1: через репозиторий
+            await uow.documents.update_status(document, DocumentStatusVO.DRAFT)
     else:
         await uow.jobs.update_status(
             job,
@@ -205,7 +210,8 @@ async def _apply_job_outcome(
             "К документу не привязано ни одного источника",
         )
         if is_current:
-            document.status = DocumentStatusVO.DRAFT
+            # M-1: через репозиторий
+            await uow.documents.update_status(document, DocumentStatusVO.DRAFT)
 
 
 async def _recover_after_commit_failure(
@@ -235,7 +241,8 @@ async def _recover_after_commit_failure(
             recovery_doc is not None
             and recovery_doc.status == DocumentStatusVO.IN_PROGRESS
         ):
-            recovery_doc.status = DocumentStatusVO.DRAFT
+            # M-2: через репозиторий, не прямую мутацию .status
+            await uow.documents.update_status(recovery_doc, DocumentStatusVO.DRAFT)
 
         try:
             await uow.commit()
@@ -285,7 +292,8 @@ async def _start_job(job_id: str) -> list[str]:
                 extra={"job_id": job_id},
             )
             return []
-        await uow._session.refresh(job)
+        # H-4: обновляем через IUnitOfWork.refresh(), не через uow._session.refresh()
+        await uow.refresh(job)
 
         document = await uow.documents.get_by_id(job.document_id)
         if document is None:
@@ -302,10 +310,12 @@ async def _start_job(job_id: str) -> list[str]:
             await uow.commit()
             return []
         if document.current_analysis_job_id == job.id:
-            document.status = DocumentStatusVO.IN_PROGRESS
+            # M-2: через репозиторий, не прямую мутацию .status
+            await uow.documents.update_status(document, DocumentStatusVO.IN_PROGRESS)
             await uow.commit()
 
-        await uow._session.refresh(document, ["sources"])
+        # H-4: обновляем через IUnitOfWork.refresh() с attribute_names
+        await uow.refresh(document, ["sources"])
         source_ids = [str(source.id) for source in document.sources]
 
     # Parse-once: кэшируем plain_text вне DB-сессии.
