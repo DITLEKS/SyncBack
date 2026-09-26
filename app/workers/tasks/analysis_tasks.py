@@ -11,6 +11,11 @@ Celery-задачи пайплайна анализа.
 - Parse-once: document скачивается и парсится один раз в _start_job,
   plain_text кэшируется в Redis. _run_source_pipeline читает кэш и деградирует
   до прямого скачивания при cache miss (истёкший TTL, недоступный Redis).
+- H-7: recovery-транзакция при ошибке коммита финализации перестаёт
+  поглощать вторичное исключение — оно пробрасывается с __cause__, чтобы
+  Celery мог применить retry/dead-letter вместо вечного IN_PROGRESS.
+- L-5: chord получает on_error-хэндлер _chord_error_handler, который
+  вызывает _finalize_job(job_id, []) при падении на уровне Celery backend.
 """
 
 import asyncio
@@ -180,30 +185,38 @@ async def _recover_after_commit_failure(
     document_id: uuid.UUID,
     commit_exc: Exception,
 ) -> None:
-    """Компенсирующая транзакция: job → FAILED, документ → DRAFT."""
-    try:
-        async with isolated_uow() as uow:
-            recovery_job = await uow.jobs.get_by_id(uuid.UUID(job_id))
-            if recovery_job is not None:
-                await uow.jobs.update_status(
-                    recovery_job,
-                    AnalysisJobStatusVO.FAILED,
-                    error_code="COMMIT_ERROR",
-                    error_message=f"Ошибка коммита финализации: {commit_exc}",
-                )
+    """Компенсирующая транзакция: job → FAILED, документ → DRAFT.
 
-            recovery_doc = await uow.documents.get_by_id(document_id)
-            if (
-                recovery_doc is not None
-                and recovery_doc.status == DocumentStatusVO.IN_PROGRESS
-            ):
-                recovery_doc.status = DocumentStatusVO.DRAFT
-                await uow.commit()
-    except Exception:  # noqa: BLE001
-        logger.exception(
-            "Не удалось восстановить статус документа после ошибки коммита финализации",
-            extra={"job_id": job_id, "document_id": str(document_id)},
-        )
+    H-7: если recovery-коммит тоже падает — пробрасываем вторичное исключение
+    с __cause__ = commit_exc, чтобы Celery-воркер получил явный сигнал об ошибке
+    вместо тихого поглощения. Документ при этом может остаться в IN_PROGRESS,
+    но это будет видно в логах и Celery state, а не скрыто.
+    """
+    async with isolated_uow() as uow:
+        recovery_job = await uow.jobs.get_by_id(uuid.UUID(job_id))
+        if recovery_job is not None:
+            await uow.jobs.update_status(
+                recovery_job,
+                AnalysisJobStatusVO.FAILED,
+                error_code="COMMIT_ERROR",
+                error_message=f"Ошибка коммита финализации: {commit_exc}",
+            )
+
+        recovery_doc = await uow.documents.get_by_id(document_id)
+        if (
+            recovery_doc is not None
+            and recovery_doc.status == DocumentStatusVO.IN_PROGRESS
+        ):
+            recovery_doc.status = DocumentStatusVO.DRAFT
+
+        try:
+            await uow.commit()
+        except Exception as recovery_exc:  # noqa: BLE001
+            logger.exception(
+                "Recovery-коммит тоже упал; документ может остаться в IN_PROGRESS",
+                extra={"job_id": job_id, "document_id": str(document_id)},
+            )
+            raise recovery_exc from commit_exc
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +457,25 @@ def finalize_analysis_job(self, source_results: list[dict], job_id: str) -> None
 
 
 @celery_app.task(bind=True)
+def _chord_error_handler(self, request, exc, traceback, job_id: str = "") -> None:  # noqa: ARG002
+    """L-5: on_error хэндлер chord.
+
+    Вызывается Celery когда header-задача упала с необработанным исключением
+    (например, backend недоступен и chord не может сохранить результат).
+    Форсирует финализацию job с пустым списком результатов, чтобы документ
+    перешёл в FAILED/DRAFT вместо вечного IN_PROGRESS.
+
+    Сигнатура (request, exc, traceback) + kwargs — стандарт Celery on_error.
+    """
+    logger.error(
+        "chord завершился с ошибкой; запускаем аварийную финализацию job",
+        extra={"job_id": job_id, "exc": str(exc)},
+    )
+    if job_id:
+        asyncio.run(_finalize_job(job_id, []))
+
+
+@celery_app.task(bind=True)
 def run_analysis_job(self, job_id: str) -> None:
     source_ids = asyncio.run(_start_job(job_id))
     if not source_ids:
@@ -451,4 +483,4 @@ def run_analysis_job(self, job_id: str) -> None:
         return
     header = [process_source_for_analysis_job.s(job_id, source_id) for source_id in source_ids]
     callback = finalize_analysis_job.s(job_id=job_id)
-    chord(header)(callback)
+    chord(header)(callback).on_error(_chord_error_handler.s(job_id=job_id))
