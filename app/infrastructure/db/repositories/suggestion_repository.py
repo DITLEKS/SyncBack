@@ -8,7 +8,7 @@ SQLAlchemy-адаптер для Suggestion.
 - Публичные сигнатуры методов принимают / возвращают domain VO
   (SuggestionStatusVO) вместо ORM-enum SuggestionStatus.
 - Конвертация VO ↔ ORM-enum инкапсулирована в _to_orm / _from_orm.
-- list_by_analysis_job принимает PaginationParams.
+- list_by_analysis_job переведён на KeysetPage: O(log N) вместо O(N) на OFFSET.
 - bulk_update_status / update_status принимают ReviewDecisions или SuggestionDecision.
 """
 from __future__ import annotations
@@ -17,11 +17,12 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.repositories import ISuggestionRepository
 from app.domain.value_objects import (
+    KeysetPage,
     PaginationParams,
     ReviewDecisions,
     SuggestionDecision,
@@ -31,10 +32,6 @@ from app.domain.value_objects import (
 if TYPE_CHECKING:
     from app.infrastructure.db.models.suggestion import Suggestion
 
-# ---------------------------------------------------------------------------
-# Локальные конвертеры VO ↔ ORM-enum
-# Импорт ORM-enum отложен, чтобы инфра-слой не «просачивался» в домен.
-# ---------------------------------------------------------------------------
 
 def _status_to_orm(vo: SuggestionStatusVO):
     from app.infrastructure.db.models.enums import SuggestionStatus
@@ -68,16 +65,32 @@ class SuggestionRepository(ISuggestionRepository):
     async def list_by_analysis_job(
         self,
         analysis_job_id: uuid.UUID,
-        pagination: PaginationParams,
+        pagination: KeysetPage | PaginationParams,
     ) -> list[Suggestion]:
+        """Постраничный список правок для задачи анализа.
+
+        KeysetPage (предпочтительно): использует индекс
+        ix_suggestions_job_created_at_id → O(log N).
+        PaginationParams (legacy): OFFSET-запрос, оставлен для совместимости.
+        """
         from app.infrastructure.db.models.suggestion import Suggestion as SuggestionModel
-        result = await self._session.execute(
+
+        q = (
             select(SuggestionModel)
             .where(SuggestionModel.analysis_job_id == analysis_job_id)
-            .order_by(SuggestionModel.created_at)
+            .order_by(SuggestionModel.created_at, SuggestionModel.id)
             .limit(pagination.limit)
-            .offset(pagination.offset)
         )
+
+        if isinstance(pagination, KeysetPage) and pagination.has_cursor:
+            q = q.where(
+                tuple_(SuggestionModel.created_at, SuggestionModel.id)
+                > tuple_(pagination.before_created_at, pagination.before_id)
+            )
+        elif isinstance(pagination, PaginationParams):
+            q = q.offset(pagination.offset)
+
+        result = await self._session.execute(q)
         return list(result.scalars().all())
 
     async def count_by_analysis_job(self, analysis_job_id: uuid.UUID) -> int:
@@ -156,7 +169,6 @@ class SuggestionRepository(ISuggestionRepository):
         """
         Атомарный UPDATE ... WHERE status = 'pending'.
         Защита от гонки: если правка уже решена — возвращает None.
-        Caller обязан вызвать uow.commit() после.
         """
         from app.infrastructure.db.models.suggestion import Suggestion as SuggestionModel
         from app.infrastructure.db.models.enums import SuggestionStatus
@@ -187,7 +199,6 @@ class SuggestionRepository(ISuggestionRepository):
         """
         Один UPDATE ... WHERE id IN (...) AND status = 'pending'.
         Правки, решённые параллельно, автоматически пропускаются.
-        Caller обязан вызвать uow.commit() после.
         """
         from app.infrastructure.db.models.suggestion import Suggestion as SuggestionModel
         from app.infrastructure.db.models.enums import SuggestionStatus
@@ -196,8 +207,6 @@ class SuggestionRepository(ISuggestionRepository):
         if not all_ids:
             return []
 
-        # Единый UPDATE с CASE-выражением, чтобы избежать двух запросов
-        # (один для accepted, один для rejected).
         from sqlalchemy import case
         stmt = (
             update(SuggestionModel)

@@ -1,6 +1,5 @@
 """
-Celery-задачи пайплайна анализа. LLM вызывается отдельно на каждый источник —
-ретрай/dead-letter логика работает по каждому источнику независимо.
+Celery-задачи пайплайна анализа.
 
 Путь в репозитории: app/workers/tasks/analysis_tasks.py
 
@@ -9,6 +8,9 @@ Celery-задачи пайплайна анализа. LLM вызывается 
   _recover_after_commit_failure().
 - _process_source C(15) → C(7): I/O-пайплайн вынесен в _run_source_pipeline().
 - list_analyzable_for_project: убран прямой ORM-enum, используется DocumentStatusVO.
+- Parse-once: document скачивается и парсится один раз в _start_job,
+  plain_text кэшируется в Redis. _run_source_pipeline читает кэш и деградирует
+  до прямого скачивания при cache miss (истёкший TTL, недоступный Redis).
 """
 
 import asyncio
@@ -21,6 +23,7 @@ from celery import chord
 from app.core.config import get_settings
 from app.domain.exceptions import DocumentParseError, LLMInvalidResponseError, LLMTimeoutError
 from app.domain.interfaces.source_connector import SourceKind, SourceRef
+from app.infrastructure.cache.redis_client import get_redis_client
 from app.infrastructure.cache.sync_redis_client import get_sync_redis_client
 from app.infrastructure.db.models.enums import AnalysisJobStatus, DocumentStatus
 from app.infrastructure.db.repositories.analysis_job_repository import AnalysisJobRepository
@@ -45,6 +48,66 @@ _storage = MinioStorage(_settings)
 _connector = ManualUploadConnector(_storage, _parser_registry)
 _llm_client = get_llm_client(_settings)
 
+# Префикс Redis-ключа для кэшированного plain_text документа.
+_PARSED_DOC_KEY_PREFIX = "parsed_doc:"
+
+
+# ---------------------------------------------------------------------------
+# Parse-once: кэширование plain_text документа
+# ---------------------------------------------------------------------------
+
+def _parsed_doc_key(job_id: str) -> str:
+    return f"{_PARSED_DOC_KEY_PREFIX}{job_id}"
+
+
+async def _cache_parsed_document(
+    job_id: str,
+    storage_key: str,
+    document_format: str,
+    sources_count: int,
+) -> str:
+    """Скачать и распарсить документ один раз, сохранить plain_text в Redis.
+
+    TTL рассчитывается как max(llm_timeout * sources_count * 2, 300) секунд —
+    достаточно, чтобы дожить до последнего источника в chord с учётом retry.
+
+    Возвращает plain_text (нужен для первого источника без лишнего round-trip).
+    """
+    raw_bytes = await _storage.download(storage_key)
+    parsed = _parser_registry.parse_by_filename(storage_key, raw_bytes)
+    plain_text = parsed.plain_text
+
+    ttl = max(_settings.llm_timeout_seconds * sources_count * 2, 300)
+    redis = get_redis_client()
+    # setex: атомарный SET + EXPIRE — не нужен отдельный EXPIRE
+    await redis.setex(_parsed_doc_key(job_id), ttl, plain_text)
+
+    return plain_text
+
+
+async def _get_cached_plain_text(job_id: str) -> str | None:
+    """Прочитать plain_text из Redis. Возвращает None при cache miss."""
+    try:
+        redis = get_redis_client()
+        return await redis.get(_parsed_doc_key(job_id))
+    except Exception:  # noqa: BLE001
+        # Redis недоступен — деградируем до прямого скачивания в caller.
+        logger.warning(
+            "Redis недоступен при чтении кэша документа",
+            extra={"job_id": job_id},
+        )
+        return None
+
+
+async def _cleanup_parsed_cache(job_id: str) -> None:
+    """Удалить ключ кэша после финализации job."""
+    try:
+        redis = get_redis_client()
+        await redis.delete(_parsed_doc_key(job_id))
+    except Exception:  # noqa: BLE001
+        # Некритично — TTL всё равно очистит ключ.
+        logger.debug("Не удалось удалить кэш документа", extra={"job_id": job_id})
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -61,11 +124,7 @@ class _Tally(NamedTuple):
 
 
 def _tally_results(source_results: list[dict]) -> _Tally:
-    """Один проход по результатам источников → счётчики.
-
-    Заменяет три отдельных list-comprehension + sum, которые были в _finalize_job.
-    Сложность O(N), память O(N) — то же самое, но читабельнее.
-    """
+    """Один проход по результатам источников → счётчики."""
     succeeded: list[dict] = []
     failed: list[dict] = []
     suggestions_count = 0
@@ -85,11 +144,7 @@ async def _apply_job_outcome(
     tally: _Tally,
     job_repo: AnalysisJobRepository,
 ) -> None:
-    """Записать итоговый статус job и документа по итогам тальирования.
-
-    Инкапсулирует три ветки (partial / all-failed / no-sources) — убирает
-    дублирование `document.status = DocumentStatus.DRAFT` по всему _finalize_job.
-    """
+    """Записать итоговый статус job и документа по итогам тальирования."""
     is_current = document.current_analysis_job_id == job.id
 
     if tally.succeeded:
@@ -127,10 +182,7 @@ async def _recover_after_commit_failure(
     document_id: uuid.UUID,
     commit_exc: Exception,
 ) -> None:
-    """Компенсирующая транзакция: job → FAILED, документ → DRAFT.
-
-    Вынесена из _finalize_job, чтобы основной try/except был ≤5 строк.
-    """
+    """Компенсирующая транзакция: job → FAILED, документ → DRAFT."""
     try:
         async with isolated_db_session() as recovery_session:
             recovery_job_repo = AnalysisJobRepository(recovery_session)
@@ -161,6 +213,13 @@ async def _recover_after_commit_failure(
 # ---------------------------------------------------------------------------
 
 async def _start_job(job_id: str) -> list[str]:
+    """Подготовить job к выполнению и вернуть список source_id.
+
+    Дополнительно кэширует plain_text документа в Redis (parse-once),
+    чтобы каждый _process_source не скачивал и не парсил файл повторно.
+    Если кэширование не удалось — продолжаем: каждый источник деградирует
+    до прямого скачивания.
+    """
     async with isolated_db_session() as session:
         job_repo = AnalysisJobRepository(session)
         document_repo = DocumentRepository(session)
@@ -182,7 +241,9 @@ async def _start_job(job_id: str) -> list[str]:
                 extra={"job_id": job_id, "document_id": str(job.document_id)},
             )
             await job_repo.update_status(
-                job, AnalysisJobStatus.FAILED, error_code="DOCUMENT_NOT_FOUND", error_message="Документ не найден"
+                job, AnalysisJobStatus.FAILED,
+                error_code="DOCUMENT_NOT_FOUND",
+                error_message="Документ не найден",
             )
             return []
         if document.current_analysis_job_id == job.id:
@@ -190,7 +251,26 @@ async def _start_job(job_id: str) -> list[str]:
             await session.commit()
 
         await session.refresh(document, ["sources"])
-        return [str(source.id) for source in document.sources]
+        source_ids = [str(source.id) for source in document.sources]
+
+    # Parse-once: кэшируем plain_text вне DB-сессии.
+    if source_ids and document.storage_key:
+        try:
+            await _cache_parsed_document(
+                job_id=job_id,
+                storage_key=document.storage_key,
+                document_format=document.format.value,
+                sources_count=len(source_ids),
+            )
+        except Exception:  # noqa: BLE001
+            # Некритично — каждый источник скачает документ самостоятельно.
+            logger.warning(
+                "Не удалось закэшировать plain_text документа; "
+                "каждый источник будет скачивать файл отдельно",
+                extra={"job_id": job_id, "document_id": str(document.id)},
+            )
+
+    return source_ids
 
 
 async def _run_source_pipeline(
@@ -199,22 +279,32 @@ async def _run_source_pipeline(
     document_format: str,
     source_ref: SourceRef,
 ) -> list:
-    """I/O-тяжёлая часть обработки источника: download → parse → LLM → map.
+    """I/O-тяжёлая часть обработки источника: plain_text → LLM → map.
 
-    Вынесена из _process_source — не требует DB-сессии, легко тестируется
-    и переиспользуется. Возвращает список ORM-объектов Suggestion (без flush).
+    Читает plain_text из Redis-кэша (parse-once). При cache miss (TTL истёк
+    или Redis недоступен) — деградирует до прямого скачивания из MinIO.
+    Это гарантирует, что ни один источник не упадёт из-за проблем с кэшем.
     """
-    try:
-        raw_bytes = await _storage.download(document_storage_key)
-        parsed_document = _parser_registry.parse_by_filename(document_storage_key, raw_bytes)
-    except Exception as exc:
-        raise DocumentParseError(
-            f"Не удалось распарсить документ (storage_key={document_storage_key}): {exc}"
-        ) from exc
+    plain_text = await _get_cached_plain_text(str(job_id))
+
+    if plain_text is None:
+        # Cache miss — скачиваем и парсим документ напрямую (fallback).
+        logger.debug(
+            "Cache miss для plain_text документа; скачиваем из MinIO",
+            extra={"job_id": str(job_id), "storage_key": document_storage_key},
+        )
+        try:
+            raw_bytes = await _storage.download(document_storage_key)
+            parsed = _parser_registry.parse_by_filename(document_storage_key, raw_bytes)
+            plain_text = parsed.plain_text
+        except Exception as exc:
+            raise DocumentParseError(
+                f"Не удалось распарсить документ (storage_key={document_storage_key}): {exc}"
+            ) from exc
 
     source_text = await _connector.fetch(source_ref)
     batch = await _llm_client.generate_suggestions(
-        parsed_document.plain_text, source_text, document_format
+        plain_text, source_text, document_format
     )
     return map_to_suggestions(batch, job_id, source_reference=source_ref.name)
 
@@ -222,15 +312,13 @@ async def _run_source_pipeline(
 async def _process_source(job_id: str, source_id: str) -> dict:
     """DB-оркестрация для одного источника.
 
-    I/O-пайплайн вынесен в _run_source_pipeline() — _process_source отвечает
-    только за чтение/запись в БД и обработку «не найдено».
+    I/O-пайплайн вынесен в _run_source_pipeline().
     C(15) → C(7).
     """
     async with isolated_db_session() as session:
         job_repo = AnalysisJobRepository(session)
         document_repo = DocumentRepository(session)
         source_repo = SourceRepository(session)
-        suggestion_repo = SuggestionRepository(session)
 
         job = await job_repo.get_by_id(uuid.UUID(job_id))
         if job is None:
@@ -268,12 +356,14 @@ async def _process_source(job_id: str, source_id: str) -> dict:
             url=source.url,
             uploaded_at=source.uploaded_at,
         )
+        document_storage_key = document.storage_key
+        document_format = document.format.value
 
     # I/O-пайплайн выполняется вне сессии — не держим соединение в ожидании LLM.
     suggestions = await _run_source_pipeline(
         job_id=uuid.UUID(job_id),
-        document_storage_key=document.storage_key,
-        document_format=document.format.value,
+        document_storage_key=document_storage_key,
+        document_format=document_format,
         source_ref=source_ref,
     )
 
@@ -281,7 +371,7 @@ async def _process_source(job_id: str, source_id: str) -> dict:
         job_repo = AnalysisJobRepository(session)
         suggestion_repo = SuggestionRepository(session)
 
-        # Перепроверяем CANCELLED после долгого I/O — пока шёл LLM, job могли отменить.
+        # Перепроверяем CANCELLED после долгого I/O.
         job = await job_repo.get_by_id(uuid.UUID(job_id))
         if job is None or _is_cancelled(job):
             return {"source_id": source_id, "status": "cancelled"}
@@ -293,10 +383,7 @@ async def _process_source(job_id: str, source_id: str) -> dict:
 
 
 async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
-    """Финализировать job и обновить статус документа.
-
-    D(21) → D(6): вся логика тальирования и ветвления вынесена в helpers.
-    """
+    """Финализировать job, обновить статус документа, очистить кэш."""
     async with isolated_db_session() as session:
         job_repo = AnalysisJobRepository(session)
         document_repo = DocumentRepository(session)
@@ -306,11 +393,13 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
             logger.error("finalize_analysis_job вызван для несуществующего job_id", extra={"job_id": job_id})
             return
         if _is_cancelled(job):
+            await _cleanup_parsed_cache(job_id)
             return
 
         document = await document_repo.get_by_id(job.document_id)
         if document is None:
             await job_repo.update_status(job, AnalysisJobStatus.FAILED, "DOCUMENT_NOT_FOUND", "Документ не найден")
+            await _cleanup_parsed_cache(job_id)
             return
 
         tally = _tally_results(source_results)
@@ -325,6 +414,9 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
             )
             await session.rollback()
             await _recover_after_commit_failure(job_id, job.document_id, commit_exc)
+        finally:
+            # Кэш очищается в любом исходе — TTL подчищает остатки.
+            await _cleanup_parsed_cache(job_id)
 
 
 # ---------------------------------------------------------------------------

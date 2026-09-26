@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 
 
@@ -91,7 +92,13 @@ class AuditActionVO(StrEnum):
 
 @dataclass(frozen=True)
 class PaginationParams:
-    """Параметры постраничной навигации."""
+    """Параметры постраничной навигации на основе OFFSET.
+
+    Оставлен для обратной совместимости в admin-эндпоинтах и внутренних
+    запросах, где порядок страниц предсказуем и таблицы маленькие.
+    Для пользовательских списков (documents, suggestions) используйте
+    KeysetPage — он не деградирует на больших таблицах.
+    """
     limit: int
     offset: int
 
@@ -100,6 +107,45 @@ class PaginationParams:
             raise ValueError(f"limit должен быть >= 1, получено {self.limit}")
         if self.offset < 0:
             raise ValueError(f"offset должен быть >= 0, получено {self.offset}")
+
+
+@dataclass(frozen=True)
+class KeysetPage:
+    """Параметры курсорной (keyset) пагинации.
+
+    Как использовать:
+      Первая страница:  KeysetPage(limit=20)
+      Следующая:        KeysetPage(limit=20, before_created_at=last.created_at,
+                                             before_id=last.id)
+
+    SQL-условие (добавляет репозиторий):
+      WHERE (created_at, id) < (:before_created_at, :before_id)
+      ORDER BY created_at DESC, id DESC
+      LIMIT :limit
+
+    Преимущество перед OFFSET:
+      - O(log N) на любой странице (используется составной индекс)
+      - Нет «дрейфа» при одновременных вставках
+    """
+    limit: int
+    before_created_at: datetime | None = None
+    before_id: uuid.UUID | None = None
+
+    def __post_init__(self) -> None:
+        if self.limit < 1:
+            raise ValueError(f"limit должен быть >= 1, получено {self.limit}")
+        # Курсор либо полный, либо отсутствует — частичный курсор недопустим.
+        has_ts = self.before_created_at is not None
+        has_id = self.before_id is not None
+        if has_ts != has_id:
+            raise ValueError(
+                "KeysetPage: before_created_at и before_id должны быть указаны вместе "
+                "или не указаны вовсе"
+            )
+
+    @property
+    def has_cursor(self) -> bool:
+        return self.before_created_at is not None
 
 
 @dataclass(frozen=True)
