@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from types import TracebackType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from app.domain.interfaces.repositories import (
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 
 class IUnitOfWork(ABC):
-    """Async context-manager, управляющий временем жизни транзакции.
+    """Асинхронный context-manager, управляющий временем жизни транзакции.
 
     Использование:
         async with uow:
@@ -77,3 +77,11 @@ class IUnitOfWork(ABC):
     @abstractmethod
     async def rollback(self) -> None:
         """Откатить незафиксированные изменения."""
+
+    @abstractmethod
+    async def refresh(self, obj: Any, attribute_names: list[str] | None = None) -> None:
+        """Обновить ORM-объект из БД через интерфейс (H-4).
+
+        Используется в воркере вместо прямого обращения к uow._session.
+        attribute_names: список ленивых атрибутов для загрузки (напр., ["sources"]).
+        """
