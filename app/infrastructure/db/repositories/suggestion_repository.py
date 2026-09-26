@@ -10,6 +10,8 @@ SQLAlchemy-адаптер для Suggestion.
 - Конвертация VO ↔ ORM-enum инкапсулирована в _to_orm / _from_orm.
 - list_by_analysis_job переведён на KeysetPage: O(log N) вместо O(N) на OFFSET.
 - bulk_update_status / update_status принимают ReviewDecisions или SuggestionDecision.
+- list_with_total: один SELECT с COUNT(*) OVER() вместо двух запросов (H-3).
+- bulk_accept_all: один UPDATE без предварительной загрузки UUID в память (H-4).
 """
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func, select, tuple_, update
+from sqlalchemy import case, func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.repositories import ISuggestionRepository
@@ -92,6 +94,33 @@ class SuggestionRepository(ISuggestionRepository):
 
         result = await self._session.execute(q)
         return list(result.scalars().all())
+
+    async def list_with_total(
+        self,
+        analysis_job_id: uuid.UUID,
+        pagination: PaginationParams,
+    ) -> tuple[list[Suggestion], int]:
+        """Один SELECT с оконной функцией COUNT(*) OVER() вместо двух запросов.
+
+        Возвращает (items, total) за один round-trip к БД.
+        Использует индекс ix_suggestions_job_created_at_id.
+        """
+        from app.infrastructure.db.models.suggestion import Suggestion as SuggestionModel
+
+        total_col = func.count().over().label("total_count")
+        q = (
+            select(SuggestionModel, total_col)
+            .where(SuggestionModel.analysis_job_id == analysis_job_id)
+            .order_by(SuggestionModel.created_at, SuggestionModel.id)
+            .limit(pagination.limit)
+            .offset(pagination.offset)
+        )
+        rows = (await self._session.execute(q)).all()
+        if not rows:
+            return [], 0
+        items = [row[0] for row in rows]
+        total = rows[0][1]
+        return items, total
 
     async def count_by_analysis_job(self, analysis_job_id: uuid.UUID) -> int:
         from app.infrastructure.db.models.suggestion import Suggestion as SuggestionModel
@@ -207,7 +236,6 @@ class SuggestionRepository(ISuggestionRepository):
         if not all_ids:
             return []
 
-        from sqlalchemy import case
         stmt = (
             update(SuggestionModel)
             .where(
@@ -224,6 +252,37 @@ class SuggestionRepository(ISuggestionRepository):
                     value=SuggestionModel.id.in_(decisions.accepted_ids),
                 ),
                 decided_by=decisions.decided_by,
+                decided_at=datetime.now(UTC),
+            )
+            .returning(SuggestionModel)
+        )
+        result = await self._session.execute(stmt)
+        updated = list(result.scalars().all())
+        await self._session.flush()
+        return updated
+
+    async def bulk_accept_all(
+        self,
+        analysis_job_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> list[Suggestion]:
+        """Принять все PENDING-правки одним UPDATE без загрузки UUID в память (H-4).
+
+        UPDATE ... WHERE analysis_job_id=X AND status='pending' RETURNING *
+        вместо list_ids → bulk_update_status(IN (uuid, uuid, ...)).
+        """
+        from app.infrastructure.db.models.suggestion import Suggestion as SuggestionModel
+        from app.infrastructure.db.models.enums import SuggestionStatus
+
+        stmt = (
+            update(SuggestionModel)
+            .where(
+                SuggestionModel.analysis_job_id == analysis_job_id,
+                SuggestionModel.status == SuggestionStatus.PENDING,
+            )
+            .values(
+                status=SuggestionStatus.ACCEPTED,
+                decided_by=user_id,
                 decided_at=datetime.now(UTC),
             )
             .returning(SuggestionModel)

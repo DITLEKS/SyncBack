@@ -128,15 +128,13 @@ class SuggestionService:
         document_id: uuid.UUID,
         pagination: PaginationParams,
     ) -> "tuple[list[Suggestion], int]":
+        """Один SELECT с COUNT(*) OVER() вместо двух запросов (H-3)."""
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             if document.current_analysis_job_id is None:
                 return [], 0
-            items = await self._uow.suggestions.list_by_analysis_job(
+            items, total = await self._uow.suggestions.list_with_total(
                 document.current_analysis_job_id, pagination
-            )
-            total = await self._uow.suggestions.count_by_analysis_job(
-                document.current_analysis_job_id
             )
         return items, total
 
@@ -180,11 +178,7 @@ class SuggestionService:
         suggestion: "Suggestion",
         decision: SuggestionDecision,
     ) -> "Suggestion":
-        """CAS-обновление одной правки.
-
-        update_status() возвращает None, если правка уже обработана
-        (optimistic lock на уровне репозитория).
-        """
+        """CAS-обновление одной правки."""
         self._assert_awaiting_approval(document)
         updated = await self._uow.suggestions.update_status(suggestion, decision)
         if updated is None:
@@ -241,26 +235,14 @@ class SuggestionService:
         document_id: uuid.UUID,
         user_id: uuid.UUID,
     ) -> BulkAcceptResult:
-        """Принять все PENDING-правки одним SQL UPDATE."""
+        """Принять все PENDING-правки одним UPDATE без загрузки UUID в память (H-4)."""
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             self._assert_awaiting_approval(document)
             job_id = self._assert_has_active_job(document)
 
-            pending_ids = await self._uow.suggestions.list_ids_by_analysis_job_and_status(
-                job_id, SuggestionStatusVO.PENDING
-            )
-            if not pending_ids:
-                return BulkAcceptResult(suggestions=[], document=document)
-
-            decisions = ReviewDecisions(
-                analysis_job_id=job_id,
-                decided_by=user_id,
-                review_version=document.review_version,
-                accepted_ids=tuple(pending_ids),
-                rejected_ids=(),
-            )
-            accepted = await self._uow.suggestions.bulk_update_status(decisions)
+            # H-4: один UPDATE ... WHERE job_id=X AND status='pending' RETURNING *
+            accepted = await self._uow.suggestions.bulk_accept_all(job_id, user_id)
             refreshed = await self._uow.documents.get_by_id(document_id)
             await self._uow.commit()
         return BulkAcceptResult(suggestions=accepted, document=refreshed or document)
@@ -332,8 +314,6 @@ class SuggestionService:
             self._assert_awaiting_approval(document)
             job_id = self._assert_has_active_job(document)
 
-            # Инварианты ReviewDecisions проверяются в __post_init__ VO;
-            # здесь дополнительно убеждаемся, что передан правильный job.
             decisions_vo = ReviewDecisions(
                 analysis_job_id=job_id,
                 decided_by=user_id,
@@ -342,7 +322,6 @@ class SuggestionService:
                 rejected_ids=review_decisions.rejected_ids,
             )
 
-            # CAS review_version
             locked_doc = await self._uow.documents.compare_and_increment_review_version(
                 document.id, decisions_vo.review_version
             )
@@ -352,7 +331,6 @@ class SuggestionService:
                 )
             document = locked_doc
 
-            # Единый UPDATE через ReviewDecisions VO
             updated = await self._uow.suggestions.bulk_update_status(decisions_vo)
 
             expected_total = len(decisions_vo.all_ids)
