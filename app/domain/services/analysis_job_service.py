@@ -19,8 +19,12 @@
     Ранее метод возвращал job.id (UUID), что делало вызов _job_response(existing)
     в роутере падающим — AnalysisJobResponse.model_validate(UUID) бросает ValidationError.
     Контракт выровнен: метод возвращает AnalysisJob, роутер получает объект напрямую.
-  - H-NEW-3: get_document_for_job теперь возвращает полный DocumentProtocol
-    (не UUID), чтобы роутер мог проверить document.status без дополнительного запроса.
+  - N-4 (ревью): удалён импорт DocumentStatus (ORM-enum) из роутера.
+    Сравнение статуса перенесено в check_document_is_ready() — выполняется внутри
+    открытой сессии, использует DocumentStatusVO (доменный тип).
+  - N-5 (ревью): check_document_is_ready() возвращает bool, а не ORM-объект.
+    Роутер не получает detached ORM-атрибутов за пределами сессии —
+    DetachedInstanceError невозможен.
   - N-2 (ревью): добавлен revoke_celery_task() — тонкий делегат к Celery,
     изолирует инфраструктурный импорт celery_app внутри сервиса.
 """
@@ -40,7 +44,6 @@ from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO
 
 if TYPE_CHECKING:
-    from app.domain.interfaces.entities import DocumentProtocol
     from app.infrastructure.db.models.analysis_job import AnalysisJob
 
 # Статусы документа, из которых разрешён запуск анализа:
@@ -94,15 +97,18 @@ class AnalysisJobService:
     # Document helpers
     # ------------------------------------------------------------------
 
-    async def get_document_for_job(
+    async def check_document_is_ready(
         self, project_id: uuid.UUID, document_id: uuid.UUID
-    ) -> "DocumentProtocol":
-        """Проверить, что документ существует в проекте, вернуть его.
+    ) -> bool:
+        """N-4/N-5: проверить, что документ в статусе READY, не выходя из сессии.
 
-        H-NEW-3 (пересмотр): возвращает полный DocumentProtocol, чтобы роутер мог
-        проверить document.status без дополнительного round-trip в БД.
-        Сессия закрывается после выхода из async with, объект остаётся доступным
-        т.к. все нужные поля уже загружены (не lazy).
+        Возвращает True если документ существует и status == DocumentStatusVO.READY.
+        Сравнение выполняется внутри `async with self._uow` — сессия открыта,
+        DetachedInstanceError невозможен.
+        Роутер получает только bool — никакой ORM-объект не передаётся за пределы сессии.
+
+        Заменяет get_document_for_job() для цели проверки статуса перед созданием job.
+        Бросает DocumentNotFoundError если документ не найден в проекте.
         """
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
@@ -110,7 +116,25 @@ class AnalysisJobService:
                 raise DocumentNotFoundError(
                     f"Документ {document_id} не найден в проекте {project_id}"
                 )
-            return document
+            # N-4: сравниваем с DocumentStatusVO (domain), не с ORM DocumentStatus
+            return document.status == DocumentStatusVO.READY
+
+    async def get_document_for_job(
+        self, project_id: uuid.UUID, document_id: uuid.UUID
+    ) -> uuid.UUID:
+        """Проверить, что документ существует в проекте, вернуть его id.
+
+        Оставлен для совместимости с другими вызывающими сторонами.
+        Возвращает document_id (UUID) — не ORM-объект.
+        Роутер использует check_document_is_ready() для P0-9 guard.
+        """
+        async with self._uow:
+            document = await self._uow.documents.get_by_id(document_id)
+            if document is None or document.project_id != project_id:
+                raise DocumentNotFoundError(
+                    f"Документ {document_id} не найден в проекте {project_id}"
+                )
+            return document_id
 
     # ------------------------------------------------------------------
     # Core job lifecycle

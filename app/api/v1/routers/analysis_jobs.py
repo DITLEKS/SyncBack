@@ -11,6 +11,10 @@ P0-9: Повторный анализ READY-документа требует fo
 N-2 (ревью): убран прямой импорт celery_app из роутера.
   Отзыв Celery-задачи делегирован в AnalysisJobService.revoke_celery_task().
   Роутер больше не зависит от инфраструктуры Celery напрямую.
+
+N-4 (ревью): убран импорт DocumentStatus (ORM-enum из инфраструктуры).
+  Сравнение статуса перенесено внутрь сервисного метода get_document_for_job(),
+  где сессия гарантированно открыта (N-5). Роутер получает простой bool.
 """
 
 import uuid
@@ -34,7 +38,6 @@ from app.domain.exceptions import (
     InvalidDocumentStatusError,
 )
 from app.domain.services.analysis_job_service import AnalysisJobService
-from app.infrastructure.db.models.enums import DocumentStatus
 from app.infrastructure.db.models.project import Project
 from app.workers.tasks.analysis_tasks import run_analysis_job
 
@@ -81,13 +84,15 @@ async def start_analysis_job(
         if existing is not None:
             return _job_response(existing, status.HTTP_200_OK)  # #9
 
-    # P0-9: повторный анализ документа в статусе READY без force
+    # P0-9: повторный анализ документа в статусе READY без force.
+    # N-5: проверка статуса выполняется внутри сессии сервиса (get_document_for_job),
+    #      роутер получает только bool — никакого доступа к ORM-атрибутам за пределами сессии.
     try:
-        document = await service.get_document_for_job(project.id, document_id)
+        is_ready = await service.check_document_is_ready(project.id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    if document.status == DocumentStatus.READY and not body.force:
+    if is_ready and not body.force:
         # #4 model_dump() вместо jsonable_encoder на ещё несериализованном Pydantic-объекте
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
