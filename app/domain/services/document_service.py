@@ -18,6 +18,7 @@
 
 CRIT-NEW-2: list_documents передаёт PaginationParams-объект, а не limit/offset позиционно.
 CRIT-NEW-3: attach_sources удалён — метода нет в IDocumentRepository.
+LOW: exc_info=True добавлен в logger.warning внутри delete_document.
 """
 from __future__ import annotations
 
@@ -203,8 +204,11 @@ class DocumentService:
             try:
                 await self._storage.delete(key)
             except Exception:  # noqa: BLE001
+                # LOW: exc_info=True — трейсбэк записывается в журнал;
+                # без него ошибка тихо поглощалась без контекста в Loki/Sentry.
                 logger.warning(
                     "Не удалось удалить файл из MinIO при удалении документа",
+                    exc_info=True,
                     extra={"storage_key": key, "document_id": str(document.id)},
                 )
         async with self._uow:
