@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from typing import Protocol, runtime_checkable
 
-from app.infrastructure.db.models.enums import SuggestionStatus
+from app.domain.value_objects import SuggestionStatusVO
 from app.infrastructure.db.models.suggestion import Suggestion
 
 
@@ -26,27 +26,47 @@ class SuggestionPort(Protocol):
     async def count_by_analysis_job(self, analysis_job_id: uuid.UUID) -> int: ...
 
     async def count_by_analysis_job_and_status(
-        self, analysis_job_id: uuid.UUID, status: SuggestionStatus
+        self, analysis_job_id: uuid.UUID, status: SuggestionStatusVO
     ) -> int: ...
 
     async def list_by_analysis_job_and_status(
-        self, analysis_job_id: uuid.UUID, status: SuggestionStatus
+        self, analysis_job_id: uuid.UUID, status: SuggestionStatusVO
     ) -> list[Suggestion]: ...
 
+    async def list_by_analysis_job_and_status_page(
+        self,
+        analysis_job_id: uuid.UUID,
+        status: SuggestionStatusVO,
+        limit: int,
+        offset: int,
+    ) -> list[Suggestion]:
+        """Постраничная выборка правок по job + статус.
+
+        Используется стриминговым экспортом (_iter_accepted_changes_pages),
+        чтобы не загружать весь результат сразу в память.
+
+        WHERE analysis_job_id = ? AND status = ?
+        ORDER BY created_at, id
+        LIMIT limit OFFSET offset
+
+        Покрывается индексом ix_suggestions_job_status (0015).
+        """
+        ...
+
     async def list_ids_by_analysis_job_and_status(
-        self, analysis_job_id: uuid.UUID, status: SuggestionStatus
+        self, analysis_job_id: uuid.UUID, status: SuggestionStatusVO
     ) -> list[uuid.UUID]: ...
 
     async def update_status(
         self,
         suggestion: Suggestion,
-        status: SuggestionStatus,
+        status: SuggestionStatusVO,
         decided_by: uuid.UUID,
     ) -> Suggestion | None: ...
 
     async def bulk_update_status(
         self,
         suggestion_ids: list[uuid.UUID],
-        status: SuggestionStatus,
+        status: SuggestionStatusVO,
         decided_by: uuid.UUID,
     ) -> list[Suggestion]: ...
