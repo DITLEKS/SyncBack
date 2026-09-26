@@ -17,6 +17,7 @@ Namespace-атрибуты (все объявлены здесь для type-che
   projects    — IProjectRepository
   sources     — ISourceRepository
   dashboard   — IDashboardRepository
+  users       — UserRepository (HIGH-A: добавлен в интерфейс для type-safety)
 """
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
         ISourceRepository,
         ISuggestionRepository,
     )
+    from app.infrastructure.db.repositories.user_repository import UserRepository
 
 
 class IUnitOfWork(ABC):
@@ -44,6 +46,9 @@ class IUnitOfWork(ABC):
             doc = await uow.documents.get_by_id(doc_id)
             await uow.suggestions.bulk_update_status(decisions)
             await uow.commit()   # один flush на всю операцию
+
+    Celery-задачи создают свой экземпляр через isolated_uow()
+    (см. app/infrastructure/db/session.py).
     """
 
     # Core
@@ -52,10 +57,13 @@ class IUnitOfWork(ABC):
     jobs:        "IAnalysisJobRepository"
     audit:       "IAuditLogRepository"
 
-    # Extended (добавлены при переводе на UoW)
+    # Extended
     projects:    "IProjectRepository"
     sources:     "ISourceRepository"
     dashboard:   "IDashboardRepository"
+
+    # Auth (HIGH-A)
+    users:       "UserRepository"
 
     @abstractmethod
     async def __aenter__(self) -> "IUnitOfWork":
@@ -80,7 +88,7 @@ class IUnitOfWork(ABC):
 
     @abstractmethod
     async def refresh(self, obj: Any, attribute_names: list[str] | None = None) -> None:
-        """Обновить ORM-объект из БД через интерфейс (H-4).
+        """H-4: Обновить ORM-объект из БД через интерфейс (H-4).
 
         Используется в воркере вместо прямого обращения к uow._session.
         attribute_names: список ленивых атрибутов для загрузки (напр., ["sources"]).
