@@ -2,10 +2,6 @@
 
 Каждое исключение соответствует одной бизнес-ситуации и конвертируется
 в HTTP-ответ на уровне роутера или глобального exception handler.
-
-fix/review-critical-p0:
-- Добавлены все исключения, которые импортируются сервисами, но отсутствовали.
-- StaleReviewVersionError = алиас ReviewVersionConflictError (обратная совместимость).
 """
 
 
@@ -16,6 +12,7 @@ class SyncBackError(Exception):
 # ---------------------------------------------------------------------------
 # Document / Project / Source
 # ---------------------------------------------------------------------------
+
 
 class DocumentNotFoundError(SyncBackError):
     """Документ не найден или не принадлежит проекту."""
@@ -41,6 +38,7 @@ class UnsupportedFormatError(SyncBackError):
 # Document status transitions
 # ---------------------------------------------------------------------------
 
+
 class InvalidDocumentStatusError(SyncBackError):
     """Операция недопустима для текущего статуса документа.
 
@@ -51,6 +49,7 @@ class InvalidDocumentStatusError(SyncBackError):
 # ---------------------------------------------------------------------------
 # Analysis jobs
 # ---------------------------------------------------------------------------
+
 
 class AnalysisJobNotFoundError(SyncBackError):
     """Задание анализа не найдено."""
@@ -74,6 +73,7 @@ class AnalysisJobNotCancellableError(SyncBackError):
 # Suggestions / Review
 # ---------------------------------------------------------------------------
 
+
 class SuggestionNotFoundError(SyncBackError):
     """Правка не найдена или не принадлежит текущему документу."""
 
@@ -93,32 +93,24 @@ class ReviewNotCompleteError(SyncBackError):
 
 
 class ReviewVersionConflictError(SyncBackError):
-    """P0-2: review_version в БД изменилась пока клиент редактировал документ.
+    """review_version в БД изменилась, пока клиент редактировал документ.
 
     Сигнализирует роутеру вернуть HTTP 409 Conflict.
     """
 
 
-class InvalidDocumentStatusError(DomainError):
-    pass
+# Алиас для обратной совместимости — suggestions router импортирует это имя.
+StaleReviewVersionError = ReviewVersionConflictError
 
 
-class AnalysisJobNotCancellableError(DomainError):
-    pass
-
-
-class ReviewNotCompleteError(DomainError):
-    pass
-
-
-class OptimisticLockError(DomainError):
-    """P0-2: версия ревью на клиенте устарела — документ был изменён параллельным запросом.
+class OptimisticLockError(SyncBackError):
+    """Версия ревью на клиенте устарела — документ был изменён параллельным запросом.
 
     Клиент должен перезагрузить состояние (GET /editor) и повторить сохранение.
     """
 
 
-class SourceLockError(DomainError):
-    """P0-6: изменение источников запрещено, пока документ находится
+class SourceLockError(SyncBackError):
+    """Изменение источников запрещено, пока документ находится
     в статусе IN_PROGRESS или AWAITING_APPROVAL.
     """
