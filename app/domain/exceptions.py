@@ -1,33 +1,25 @@
-<<<<<<< HEAD
 """Доменные исключения SyncBack.
 
 Каждое исключение соответствует одной бизнес-ситуации и конвертируется
 в HTTP-ответ на уровне роутера или глобального exception handler.
 """
-=======
-"""Expected application and domain errors."""
->>>>>>> origin/fix/high-priority-review-findings
 
 
 class SyncBackError(Exception):
     """Base class for expected failures handled by the API layer."""
 
 
-<<<<<<< HEAD
+# Алиас — всё доменное наследуется от DomainError
+DomainError = SyncBackError
+
+
 # ---------------------------------------------------------------------------
 # Document / Project / Source
 # ---------------------------------------------------------------------------
 
 
-class DocumentNotFoundError(SyncBackError):
-    """Документ не найден или не принадлежит проекту."""
-=======
-DomainError = SyncBackError
->>>>>>> origin/fix/high-priority-review-findings
-
-
 class DocumentNotFoundError(DomainError):
-    pass
+    """Документ не найден или не принадлежит проекту."""
 
 
 class ProjectNotFoundError(DomainError):
@@ -42,17 +34,27 @@ class FileTooLargeError(DomainError):
     pass
 
 
-<<<<<<< HEAD
+class UnsupportedFormatError(DomainError):
+    pass
+
+
+UnsupportedFileFormatError = UnsupportedFormatError
+
+
 # ---------------------------------------------------------------------------
 # Document status transitions
 # ---------------------------------------------------------------------------
 
 
-class InvalidDocumentStatusError(SyncBackError):
+class InvalidDocumentStatusError(DomainError):
     """Операция недопустима для текущего статуса документа.
 
     Сигнализирует роутеру вернуть HTTP 409 Conflict.
     """
+
+
+class DocumentParseError(DomainError):
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -60,18 +62,18 @@ class InvalidDocumentStatusError(SyncBackError):
 # ---------------------------------------------------------------------------
 
 
-class AnalysisJobNotFoundError(SyncBackError):
+class AnalysisJobNotFoundError(DomainError):
     """Задание анализа не найдено."""
 
 
-class AnalysisAlreadyRunningError(SyncBackError):
+class AnalysisAlreadyRunningError(DomainError):
     """Для документа уже выполняется анализ — нельзя запустить повторно.
 
     Сигнализирует роутеру вернуть HTTP 409 Conflict.
     """
 
 
-class AnalysisJobNotCancellableError(SyncBackError):
+class AnalysisJobNotCancellableError(DomainError):
     """Задание анализа нельзя отменить (уже завершено или отменено).
 
     Сигнализирует роутеру вернуть HTTP 422 Unprocessable Entity.
@@ -83,87 +85,39 @@ class AnalysisJobNotCancellableError(SyncBackError):
 # ---------------------------------------------------------------------------
 
 
-class SuggestionNotFoundError(SyncBackError):
+class SuggestionNotFoundError(DomainError):
     """Правка не найдена или не принадлежит текущему документу."""
 
 
-class SuggestionAlreadyDecidedError(SyncBackError):
+class SuggestionAlreadyDecidedError(DomainError):
     """Правка уже была принята/отклонена другим запросом (race condition).
 
     Сигнализирует роутеру вернуть HTTP 409 Conflict.
     """
 
 
-class ReviewNotCompleteError(SyncBackError):
+class ReviewNotCompleteError(DomainError):
     """Review нельзя завершить: не все правки рассмотрены или экспорт не удался.
 
     Сигнализирует роутеру вернуть HTTP 422 Unprocessable Entity.
     """
 
 
-class ReviewVersionConflictError(SyncBackError):
+class ReviewVersionConflictError(DomainError):
     """review_version в БД изменилась, пока клиент редактировал документ.
 
     Сигнализирует роутеру вернуть HTTP 409 Conflict.
     """
-=======
-class UnsupportedFormatError(DomainError):
-    pass
 
 
-UnsupportedFileFormatError = UnsupportedFormatError
->>>>>>> origin/fix/high-priority-review-findings
-
-
-# Алиас для обратной совместимости — suggestions router импортирует это имя.
-StaleReviewVersionError = ReviewVersionConflictError
-
-
-<<<<<<< HEAD
-class OptimisticLockError(SyncBackError):
-    """Версия ревью на клиенте устарела — документ был изменён параллельным запросом.
-=======
-class AnalysisJobNotFoundError(DomainError):
-    pass
-
-
-class AnalysisAlreadyRunningError(DomainError):
-    pass
-
-
-class AnalysisJobNotCancellableError(DomainError):
-    pass
-
-
-class SuggestionNotFoundError(DomainError):
-    pass
-
-
-class SuggestionAlreadyDecidedError(DomainError):
-    pass
-
-
-class ReviewNotCompleteError(DomainError):
-    pass
-
-
-class ReviewVersionConflictError(DomainError):
-    pass
->>>>>>> origin/fix/high-priority-review-findings
-
-
+# Алиасы для обратной совместимости
 StaleReviewVersionError = ReviewVersionConflictError
 OptimisticLockError = ReviewVersionConflictError
 
 
-<<<<<<< HEAD
-class SourceLockError(SyncBackError):
-    """Изменение источников запрещено, пока документ находится
-    в статусе IN_PROGRESS или AWAITING_APPROVAL.
-    """
-=======
-class SourceLockError(DomainError):
-    pass
+# ---------------------------------------------------------------------------
+# Auth / Credentials
+# ---------------------------------------------------------------------------
 
 
 class InvalidCredentialsError(DomainError):
@@ -182,8 +136,20 @@ class AccountTemporarilyLockedError(DomainError):
     pass
 
 
-class DocumentParseError(DomainError):
-    pass
+# ---------------------------------------------------------------------------
+# Sources / Infrastructure
+# ---------------------------------------------------------------------------
+
+
+class SourceLockError(DomainError):
+    """Изменение источников запрещено, пока документ находится
+    в статусе IN_PROGRESS или AWAITING_APPROVAL.
+    """
+
+
+# ---------------------------------------------------------------------------
+# LLM
+# ---------------------------------------------------------------------------
 
 
 class LLMTimeoutError(DomainError):
@@ -192,4 +158,3 @@ class LLMTimeoutError(DomainError):
 
 class LLMInvalidResponseError(DomainError):
     pass
->>>>>>> origin/fix/high-priority-review-findings
