@@ -32,13 +32,15 @@ class DashboardResponse(BaseModel):
 # ── #2 Attention ──────────────────────────────────────────────────────────────
 
 class AttentionDocumentItem(BaseModel):
+    """Документы блока «Требует внимания».
+
+    status не возвращается: все документы здесь по контракту
+    находятся в AWAITING_APPROVAL — фронту незачем его читать.
+    """
     id: uuid.UUID
     title: str
     project_id: uuid.UUID
     project_name: str
-    # статус документа — всегда awaiting_approval, но фронт использует
-    # для отображения цветного бейджа статуса на плашке
-    status: str
     pending_suggestions: int
     updated_at: datetime
 
