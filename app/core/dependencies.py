@@ -1,8 +1,11 @@
 """
-DI-фабрики зависимостей FastAPI.
+DI-фабрики FastAPI.
 
-ProjectService принимает file_storage — нужен для delete_project().
-DashboardService подключён с реальным DashboardRepository (CR-2).
+После введения UoW:
+  - Сервисы получают IUnitOfWork вместо набора репозиториев.
+  - SqlAlchemyUnitOfWork создаётся per-request через get_db_session().
+  - Конкретные репозитории больше не инстанцируются в этом файле напрямую
+    (они создаются внутри SqlAlchemyUnitOfWork).
 """
 
 from functools import lru_cache
@@ -21,14 +24,13 @@ from app.domain.services.project_service import ProjectService
 from app.domain.services.source_service import SourceService
 from app.domain.services.suggestion_service import SuggestionService
 from app.infrastructure.cache.redis_client import get_redis_client
-from app.infrastructure.db.repositories.analysis_job_repository import AnalysisJobRepository
-from app.infrastructure.db.repositories.audit_log_repository import AuditLogRepository
 from app.infrastructure.db.repositories.dashboard_repository import DashboardRepository
 from app.infrastructure.db.repositories.document_repository import DocumentRepository
 from app.infrastructure.db.repositories.project_repository import ProjectRepository
 from app.infrastructure.db.repositories.source_repository import SourceRepository
-from app.infrastructure.db.repositories.suggestion_repository import SuggestionRepository
+from app.infrastructure.db.repositories.user_repository import UserRepository
 from app.infrastructure.db.session import get_db_session
+from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.exporters.exporter_registry import DocumentExporterRegistry
 from app.infrastructure.llm.factory import get_llm_client
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
@@ -53,17 +55,46 @@ def _get_exporter_registry() -> DocumentExporterRegistry:
     return DocumentExporterRegistry()
 
 
-def get_project_repository(
+# ---------------------------------------------------------------------------
+# Unit of Work (per-request)
+# ---------------------------------------------------------------------------
+
+def get_uow(
     session: AsyncSession = Depends(get_db_session),
-) -> ProjectRepository:
-    return ProjectRepository(session)
+) -> SqlAlchemyUnitOfWork:
+    """Per-request Unit of Work.
+
+    Один экземпляр на HTTP-запрос — все операции одного запроса
+    видят одно и то же состояние сессии и фиксируются одним commit().
+    """
+    return SqlAlchemyUnitOfWork(session)
 
 
-def get_user_repository(session: AsyncSession = Depends(get_db_session)):
-    from app.infrastructure.db.repositories.user_repository import UserRepository
+# ---------------------------------------------------------------------------
+# Services that use UoW
+# ---------------------------------------------------------------------------
 
-    return UserRepository(session)
+def get_suggestion_service(
+    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
+) -> SuggestionService:
+    return SuggestionService(uow)
 
+
+def get_analysis_job_service(
+    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
+) -> AnalysisJobService:
+    return AnalysisJobService(uow)
+
+
+def get_audit_log_service(
+    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
+) -> AuditLogService:
+    return AuditLogService(uow)
+
+
+# ---------------------------------------------------------------------------
+# Services that still use individual repos (next iteration)
+# ---------------------------------------------------------------------------
 
 async def get_project_service(
     session: AsyncSession = Depends(get_db_session),
@@ -97,30 +128,6 @@ async def get_source_service(
     )
 
 
-async def get_analysis_job_service(
-    session: AsyncSession = Depends(get_db_session),
-) -> AnalysisJobService:
-    return AnalysisJobService(
-        analysis_job_repository=AnalysisJobRepository(session),
-        document_repository=DocumentRepository(session),
-    )
-
-
-async def get_suggestion_service(
-    session: AsyncSession = Depends(get_db_session),
-) -> SuggestionService:
-    return SuggestionService(
-        suggestion_repository=SuggestionRepository(session),
-        document_repository=DocumentRepository(session),
-    )
-
-
-async def get_audit_log_service(
-    session: AsyncSession = Depends(get_db_session),
-) -> AuditLogService:
-    return AuditLogService(audit_log_repository=AuditLogRepository(session))
-
-
 async def get_document_export_service(
     session: AsyncSession = Depends(get_db_session),
 ) -> DocumentExportService:
@@ -132,8 +139,10 @@ async def get_document_export_service(
     )
 
 
-def get_llm_client_instance(settings: Settings = Depends(get_settings)):
-    return get_llm_client(settings)
+async def get_dashboard_service(
+    session: AsyncSession = Depends(get_db_session),
+) -> DashboardService:
+    return DashboardService(dashboard_repository=DashboardRepository(session))
 
 
 async def get_login_rate_limiter() -> LoginRateLimiter:
@@ -151,12 +160,27 @@ async def get_auth_service(
     rate_limiter: LoginRateLimiter = Depends(get_login_rate_limiter),
     settings: Settings = Depends(get_settings),
 ) -> AuthService:
-    from app.infrastructure.db.repositories.user_repository import UserRepository
+    return AuthService(
+        UserRepository(session),
+        PasswordHasher(),
+        JWTHandler(settings),
+        rate_limiter,
+    )
 
-    return AuthService(UserRepository(session), PasswordHasher(), JWTHandler(settings), rate_limiter)
 
-
-async def get_dashboard_service(
+def get_user_repository(
     session: AsyncSession = Depends(get_db_session),
-) -> DashboardService:
-    return DashboardService(dashboard_repository=DashboardRepository(session))
+) -> UserRepository:
+    return UserRepository(session)
+
+
+def get_project_repository(
+    session: AsyncSession = Depends(get_db_session),
+) -> ProjectRepository:
+    return ProjectRepository(session)
+
+
+def get_llm_client_instance(
+    settings: Settings = Depends(get_settings),
+):
+    return get_llm_client(settings)
