@@ -1,7 +1,7 @@
 """
-Бизнес-логика проектов. Правило видимости (admin — всё, иначе только свои) продублировано
-здесь для листинга и отдельно проверяется в api/deps.get_allowed_project для точечного доступа.
+Бизнес-логика проектов.
 
+<<<<<<< HEAD
 ДОБАВЛЕНО:
 - update_project() — частичное обновление (переименование / изменение описания).
 - delete_project() — каскадное удаление всех дочерних объектов и MinIO-файлов.
@@ -9,9 +9,19 @@
 H2.2: сервис принимает ProjectPort вместо конкретного ProjectRepository.
 Сonkrete SQLAlchemy-репозиторий по-прежнему передаётся из core/dependencies.py,
 но тип в сигнатуре — порт домена.
+=======
+Архитектурные правила:
+  - Зависит только от IUnitOfWork (порт) и FileStorage (порт).
+  - Нет импортов из app.infrastructure.* при выполнении.
+  - Один uow.commit() на операцию.
+>>>>>>> origin/fix/high-priority-review-findings
 """
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from app.domain.interfaces.file_storage import FileStorage
+<<<<<<< HEAD
 from app.domain.ports.project_port import ProjectPort
 from app.infrastructure.db.models.enums import UserRole
 from app.infrastructure.db.models.project import Project
@@ -21,43 +31,76 @@ from app.infrastructure.db.models.user import User
 class ProjectService:
     def __init__(self, project_repository: ProjectPort, file_storage: FileStorage):
         self._projects = project_repository
+=======
+from app.domain.interfaces.unit_of_work import IUnitOfWork
+from app.domain.value_objects import UserRoleVO
+
+if TYPE_CHECKING:
+    from app.infrastructure.db.models.project import Project
+    from app.infrastructure.db.models.user import User
+
+
+class ProjectService:
+    def __init__(self, uow: IUnitOfWork, file_storage: FileStorage) -> None:
+        self._uow = uow
+>>>>>>> origin/fix/high-priority-review-findings
         self._storage = file_storage
 
-    async def create_project(self, owner: User, name: str, description: str | None = None) -> Project:
-        project = Project(owner_id=owner.id, name=name, description=description)
-        return await self._projects.create(project)
+    async def create_project(
+        self, owner: "User", name: str, description: str | None = None
+    ) -> "Project":
+        async with self._uow:
+            project = await self._uow.projects.create(
+                owner_id=owner.id, name=name, description=description
+            )
+            await self._uow.commit()
+        return project
 
-    async def list_projects_for_user(self, user: User, limit: int, offset: int) -> tuple[list[Project], int]:
-        if user.role == UserRole.ADMIN:
-            items = await self._projects.list_all(limit=limit, offset=offset)
-            total = await self._projects.count_all()
-        else:
-            items = await self._projects.list_by_owner(user.id, limit=limit, offset=offset)
-            total = await self._projects.count_by_owner(user.id)
+    async def list_projects_for_user(
+        self, user: "User", limit: int, offset: int
+    ) -> "tuple[list[Project], int]":
+        async with self._uow:
+            if user.role == UserRoleVO.ADMIN:
+                items = await self._uow.projects.list_all(limit=limit, offset=offset)
+                total = await self._uow.projects.count_all()
+            else:
+                items = await self._uow.projects.list_by_owner(
+                    user.id, limit=limit, offset=offset
+                )
+                total = await self._uow.projects.count_by_owner(user.id)
         return items, total
 
     async def update_project(
         self,
-        project: Project,
+        project: "Project",
         name: str | None = None,
         description: str | None = None,
-    ) -> Project:
-        """Частичное обновление. Передаём только те поля, которые пришли в запросе."""
-        return await self._projects.update(project, name=name, description=description)
+    ) -> "Project":
+        """Частичное обновление полей проекта."""
+        async with self._uow:
+            updated = await self._uow.projects.update(
+                project, name=name, description=description
+            )
+            await self._uow.commit()
+        return updated
 
-    async def delete_project(self, project: Project) -> None:
+    async def delete_project(self, project: "Project") -> None:
         """
         Каскадное удаление:
-        1. Загружаем все storage_key документов и источников проекта.
-        2. Удаляем их из MinIO (ошибки — best-effort, логируем и продолжаем).
-        3. Удаляем запись проекта — ON DELETE CASCADE в БД уберёт всё остальное.
+        1. Собираем storage_key всех файлов проекта.
+        2. Удаляем их из MinIO (best-effort).
+        3. Удаляем запись — ON DELETE CASCADE убирает дочерние строки.
         """
-        storage_keys = await self._projects.collect_storage_keys(project.id)
+        async with self._uow:
+            storage_keys = await self._uow.projects.collect_storage_keys(project.id)
+
         for key in storage_keys:
             try:
                 await self._storage.delete(key)
             except Exception:  # noqa: BLE001
-                # Best-effort: MinIO-объект мог быть уже удалён вручную.
-                # Не прерываем удаление проекта из-за «битой» ссылки на файл.
+                # MinIO-объект мог быть уже удалён вручную — не прерываем удаление.
                 pass
-        await self._projects.delete(project)
+
+        async with self._uow:
+            await self._uow.projects.delete(project)
+            await self._uow.commit()

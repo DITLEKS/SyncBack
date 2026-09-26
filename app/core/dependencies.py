@@ -1,8 +1,9 @@
 """
-DI-фабрики зависимостей FastAPI.
+DI-фабрики FastAPI.
 
-ProjectService принимает file_storage — нужен для delete_project().
-DashboardService подключён с реальным DashboardRepository (CR-2).
+Все сервисы получают UoW (или отдельные репозитории для AuthService, у которого
+nет собственного UoW-метода). Конкретные репозитории НЕ инстансируются в этом
+файле напрямую — их создаёт SqlAlchemyUnitOfWork или фабрика сервиса.
 
 H2.2: фабрики по-прежнему создают concrete SQLAlchemy-репозитории,
 но передают их сервисам как значения, удовлетворяющие доменным портам.
@@ -19,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.domain.services.audit_log_service import AuditLogService
+from app.domain.services.auth_service import AuthService
 from app.domain.services.dashboard_service import DashboardService
 from app.domain.services.document_export_service import DocumentExportService
 from app.domain.services.document_service import DocumentService
@@ -26,24 +28,21 @@ from app.domain.services.project_service import ProjectService
 from app.domain.services.source_service import SourceService
 from app.domain.services.suggestion_service import SuggestionService
 from app.infrastructure.cache.redis_client import get_redis_client
-from app.infrastructure.db.repositories.analysis_job_repository import AnalysisJobRepository
-from app.infrastructure.db.repositories.audit_log_repository import AuditLogRepository
-from app.infrastructure.db.repositories.dashboard_repository import DashboardRepository
-from app.infrastructure.db.repositories.document_repository import DocumentRepository
-from app.infrastructure.db.repositories.project_repository import ProjectRepository
-from app.infrastructure.db.repositories.source_repository import SourceRepository
-from app.infrastructure.db.repositories.suggestion_repository import SuggestionRepository
-from app.infrastructure.db.session import get_db
+from app.infrastructure.db.repositories.user_repository import UserRepository
+from app.infrastructure.db.session import get_db_session
+from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.exporters.exporter_registry import DocumentExporterRegistry
-from app.infrastructure.llm.factory import create_llm_client
+from app.infrastructure.llm.factory import get_llm_client
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
+from app.infrastructure.security.jwt_handler import JWTHandler
 from app.infrastructure.security.login_rate_limiter import LoginRateLimiter
+from app.infrastructure.security.password_hasher import PasswordHasher
 from app.infrastructure.storage.minio_storage import MinioStorage
 from app.infrastructure.db.repositories.user_repository import UserRepository
 
 
 # ---------------------------------------------------------------------------
-# Stateless singletons
+# Singleton-like infrastructure (one instance per process)
 # ---------------------------------------------------------------------------
 
 @lru_cache
@@ -62,7 +61,22 @@ def _get_exporter_registry() -> DocumentExporterRegistry:
 
 
 # ---------------------------------------------------------------------------
-# Per-request services
+# Unit of Work (per-request)
+# ---------------------------------------------------------------------------
+
+def get_uow(
+    session: AsyncSession = Depends(get_db_session),
+) -> SqlAlchemyUnitOfWork:
+    """Per-request Unit of Work.
+
+    Один экземпляр на HTTP-запрос — все операции одного запроса
+    видят одно и то же состояние сессии и фиксируются одним commit().
+    """
+    return SqlAlchemyUnitOfWork(session)
+
+
+# ---------------------------------------------------------------------------
+# Services — все используют UoW
 # ---------------------------------------------------------------------------
 
 async def get_project_repository(
@@ -77,74 +91,76 @@ async def get_user_repository(
     return UserRepository(session)
 
 
-async def get_project_service(
-    session: AsyncSession = Depends(get_db),
+def get_suggestion_service(
+    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
+) -> SuggestionService:
+    return SuggestionService(uow)
+
+
+def get_analysis_job_service(
+    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
+) -> AnalysisJobService:
+    return AnalysisJobService(uow)
+
+
+def get_audit_log_service(
+    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
+) -> AuditLogService:
+    return AuditLogService(uow)
+
+
+def get_project_service(
+    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
 ) -> ProjectService:
     return ProjectService(
-        project_repository=ProjectRepository(session),
+        uow=uow,
         file_storage=_get_minio_storage(),
     )
 
 
-async def get_document_service(
-    session: AsyncSession = Depends(get_db),
+def get_document_service(
+    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
     settings: Settings = Depends(get_settings),
 ) -> DocumentService:
     return DocumentService(
-        document_repository=DocumentRepository(session),
+        uow=uow,
         file_storage=_get_minio_storage(),
         parser_registry=_get_parser_registry(),
         settings=settings,
     )
 
 
-async def get_source_service(
-    session: AsyncSession = Depends(get_db),
+def get_source_service(
+    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
     settings: Settings = Depends(get_settings),
 ) -> SourceService:
     return SourceService(
-        source_repository=SourceRepository(session),
+        uow=uow,
         file_storage=_get_minio_storage(),
         settings=settings,
     )
 
 
-async def get_analysis_job_service(
-    session: AsyncSession = Depends(get_db),
-) -> AnalysisJobService:
-    return AnalysisJobService(
-        analysis_job_repository=AnalysisJobRepository(session),
-        document_repository=DocumentRepository(session),
-    )
-
-
-async def get_suggestion_service(
-    session: AsyncSession = Depends(get_db),
-) -> SuggestionService:
-    return SuggestionService(
-        suggestion_repository=SuggestionRepository(session),
-        document_repository=DocumentRepository(session),
-    )
-
-
-async def get_audit_log_service(
-    session: AsyncSession = Depends(get_db),
-) -> AuditLogService:
-    return AuditLogService(
-        audit_log_repository=AuditLogRepository(session),
-    )
-
-
-async def get_document_export_service(
-    session: AsyncSession = Depends(get_db),
+def get_document_export_service(
+    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
 ) -> DocumentExportService:
     return DocumentExportService(
-        suggestion_repository=SuggestionRepository(session),
+        uow=uow,
         file_storage=_get_minio_storage(),
         exporter_registry=_get_exporter_registry(),
         parser_registry=_get_parser_registry(),
     )
 
+
+def get_dashboard_service(
+    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
+) -> DashboardService:
+    return DashboardService(uow=uow)
+
+
+# ---------------------------------------------------------------------------
+# Auth (UserRepository живёт вне UoW — отдельная сессия по дизайну)
+# ---------------------------------------------------------------------------
 
 async def get_login_rate_limiter() -> LoginRateLimiter:
     redis = await get_redis_client()
@@ -156,10 +172,26 @@ async def get_login_rate_limiter() -> LoginRateLimiter:
     )
 
 
-async def get_dashboard_service(
-    session: AsyncSession = Depends(get_db),
-) -> DashboardService:
-    """CR-2: реальный DashboardRepository с сессией вместо заглушки."""
-    return DashboardService(
-        dashboard_repository=DashboardRepository(session),
+async def get_auth_service(
+    session: AsyncSession = Depends(get_db_session),
+    rate_limiter: LoginRateLimiter = Depends(get_login_rate_limiter),
+    settings: Settings = Depends(get_settings),
+) -> AuthService:
+    return AuthService(
+        UserRepository(session),
+        PasswordHasher(),
+        JWTHandler(settings),
+        rate_limiter,
     )
+
+
+def get_user_repository(
+    session: AsyncSession = Depends(get_db_session),
+) -> UserRepository:
+    return UserRepository(session)
+
+
+def get_llm_client_instance(
+    settings: Settings = Depends(get_settings),
+):
+    return get_llm_client(settings)

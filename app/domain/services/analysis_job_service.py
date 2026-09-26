@@ -1,9 +1,23 @@
 """
+<<<<<<< HEAD
 Бизнес-логика управления задачами анализа.
 
 H2.2: сервис принимает AnalysisJobPort / DocumentPort вместо конкретных репозиториев.
 """
+=======
+Бизнес-логика задач анализа документов.
+
+Архитектурные правила:
+  - Сервис зависит только от IUnitOfWork — не от конкретных репозиториев.
+  - Один uow.commit() на операцию (кроме компенсирующих транзакций при ошибках).
+  - ORM-модели под TYPE_CHECKING — временная мера до замены на domain entities.
+  - Никаких импортов из app.infrastructure.* при выполнении (НЕ TYPE_CHECKING).
+"""
+from __future__ import annotations
+
+>>>>>>> origin/fix/high-priority-review-findings
 import uuid
+from typing import TYPE_CHECKING
 
 from sqlalchemy.exc import IntegrityError
 
@@ -13,24 +27,37 @@ from app.domain.exceptions import (
     DocumentNotFoundError,
     InvalidDocumentStatusError,
 )
+<<<<<<< HEAD
 from app.domain.ports.analysis_job_port import AnalysisJobPort
 from app.domain.ports.document_port import DocumentPort
 from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.enums import AnalysisJobStatus, DocumentStatus
+=======
+from app.domain.interfaces.unit_of_work import IUnitOfWork
+from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO
+
+if TYPE_CHECKING:
+    from app.infrastructure.db.models.analysis_job import AnalysisJob
+    from app.infrastructure.db.models.document import Document
+>>>>>>> origin/fix/high-priority-review-findings
 
 # Статусы документа, из которых разрешён запуск анализа:
-#   DRAFT              — первичный / повторный запуск (переходы №2, №7→2)
-#   AWAITING_APPROVAL  — повторный запуск после изменений (переход №9)
-#   READY              — повторный анализ с force=True (#9 роутер)
-_ANALYSIS_ALLOWED_STATUSES = (
-    DocumentStatus.DRAFT,
-    DocumentStatus.AWAITING_APPROVAL,
-    DocumentStatus.READY,
-)
+_ANALYSIS_ALLOWED_STATUSES = frozenset({
+    DocumentStatusVO.DRAFT,
+    DocumentStatusVO.AWAITING_APPROVAL,
+    DocumentStatusVO.READY,
+})
+
+# Статусы job, из которых допустима отмена:
+_CANCELLABLE_JOB_STATUSES = frozenset({
+    AnalysisJobStatusVO.PENDING,
+    AnalysisJobStatusVO.PROCESSING,
+})
 
 
 class AnalysisJobService:
+<<<<<<< HEAD
     def __init__(
         self,
         analysis_job_repository: AnalysisJobPort,
@@ -38,9 +65,13 @@ class AnalysisJobService:
     ):
         self._jobs = analysis_job_repository
         self._documents = document_repository
+=======
+    def __init__(self, uow: IUnitOfWork) -> None:
+        self._uow = uow
+>>>>>>> origin/fix/high-priority-review-findings
 
     # ------------------------------------------------------------------
-    # Idempotency helpers (P0-7)
+    # Idempotency helpers
     # ------------------------------------------------------------------
 
     async def find_job_by_idempotency_key(
@@ -48,6 +79,7 @@ class AnalysisJobService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         idempotency_key: str,
+<<<<<<< HEAD
     ) -> AnalysisJob | None:
         """Найти существующий job по ключу идемпотентности.
 
@@ -59,6 +91,16 @@ class AnalysisJobService:
         if document is None or document.project_id != project_id:
             return None
         return await self._jobs.get_by_idempotency_key(document_id, idempotency_key)
+=======
+    ) -> "AnalysisJob | None":
+        async with self._uow:
+            document = await self._uow.documents.get_by_id(document_id)
+            if document is None or document.project_id != project_id:
+                return None
+            return await self._uow.jobs.get_by_idempotency_key(
+                document_id, idempotency_key
+            )
+>>>>>>> origin/fix/high-priority-review-findings
 
     # ------------------------------------------------------------------
     # Document helpers
@@ -66,6 +108,7 @@ class AnalysisJobService:
 
     async def get_document_for_job(
         self, project_id: uuid.UUID, document_id: uuid.UUID
+<<<<<<< HEAD
     ) -> Document:
         """Вернуть ORM-документ для проверки статуса (#9).
 
@@ -77,6 +120,15 @@ class AnalysisJobService:
             raise DocumentNotFoundError(
                 f"Документ {document_id} не найден в проекте {project_id}"
             )
+=======
+    ) -> "Document":
+        async with self._uow:
+            document = await self._uow.documents.get_by_id(document_id)
+            if document is None or document.project_id != project_id:
+                raise DocumentNotFoundError(
+                    f"Документ {document_id} не найден в проекте {project_id}"
+                )
+>>>>>>> origin/fix/high-priority-review-findings
         return document
 
     # ------------------------------------------------------------------
@@ -88,125 +140,145 @@ class AnalysisJobService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         idempotency_key: str | None = None,
+<<<<<<< HEAD
     ) -> AnalysisJob:
+=======
+    ) -> "AnalysisJob":
+>>>>>>> origin/fix/high-priority-review-findings
         """Создать задачу анализа.
 
-        Разрешённые исходные статусы документа (таблица переходов):
-          • DRAFT             → переход №2 (первичный/ручной запуск)
-          • AWAITING_APPROVAL → переход №9 (повторный запуск)
-          • READY             → разрешен только с force=True (#9),
-                               роутер проверяет это до вызова create_job
-
-        При повторном запуске из AWAITING_APPROVAL/READY документ сбрасывается
-        в DRAFT (пайплайн всегда стартует из DRAFT → IN_PROGRESS).
+        Одна транзакция:
+          1. Проверка статуса документа
+          2. Idempotency-check (если ключ передан)
+          3. Сброс документа в DRAFT (если не DRAFT)
+          4. INSERT job + UPDATE document.current_analysis_job_id
+          5. commit
         """
-        document = await self._documents.get_by_id(document_id)
-        if document is None or document.project_id != project_id:
-            raise DocumentNotFoundError(
-                f"Документ {document_id} не найден в проекте {project_id}"
+        async with self._uow:
+            document = await self._uow.documents.get_by_id(document_id)
+            if document is None or document.project_id != project_id:
+                raise DocumentNotFoundError(
+                    f"Документ {document_id} не найден в проекте {project_id}"
+                )
+
+            if idempotency_key is not None:
+                existing = await self._uow.jobs.get_by_idempotency_key(
+                    document_id, idempotency_key
+                )
+                if existing is not None:
+                    return existing
+
+            if document.status not in _ANALYSIS_ALLOWED_STATUSES:
+                raise InvalidDocumentStatusError(
+                    f"Анализ можно запустить только для документа в статусе "
+                    f"{' или '.join(_ANALYSIS_ALLOWED_STATUSES)}, "
+                    f"текущий статус: {document.status}"
+                )
+
+            if await self._uow.jobs.get_active_by_document_id(document.id) is not None:
+                raise AnalysisAlreadyRunningError(
+                    "Для документа уже выполняется анализ"
+                )
+
+            if document.status != DocumentStatusVO.DRAFT:
+                document = await self._uow.documents.update_status(
+                    document, DocumentStatusVO.DRAFT
+                )
+
+            # ORM-объект AnalysisJob создаётся здесь, а не в репозитории,
+            # т.к. сервис владеет id-генерацией и начальным статусом.
+            from app.infrastructure.db.models.analysis_job import AnalysisJob  # noqa: PLC0415
+            job = AnalysisJob(
+                id=uuid.uuid4(),
+                document_id=document.id,
+                status=AnalysisJobStatusVO.PENDING,
+                idempotency_key=idempotency_key,
             )
-
-        # Idempotency-check (P0-7)
-        if idempotency_key is not None:
-            existing = await self._jobs.get_by_idempotency_key(document_id, idempotency_key)
-            if existing is not None:
-                return existing
-
-        if document.status not in _ANALYSIS_ALLOWED_STATUSES:
-            raise InvalidDocumentStatusError(
-                f"Анализ можно запустить только для документа в статусе "
-                f"{' или '.join(s.value for s in _ANALYSIS_ALLOWED_STATUSES)}, "
-                f"текущий статус: {document.status.value}"
-            )
-        if await self._jobs.get_active_by_document_id(document.id) is not None:
-            raise AnalysisAlreadyRunningError("Для документа уже выполняется анализ")
-
-        previous_status = document.status
-
-        if document.status != DocumentStatus.DRAFT:
-            document = await self._documents.update_status(document, DocumentStatus.DRAFT)
-
-        job = AnalysisJob(
-            id=uuid.uuid4(),
-            document_id=document.id,
-            status=AnalysisJobStatus.PENDING,
-            idempotency_key=idempotency_key,
-        )
-        try:
-            return await self._jobs.create_for_document(job, document)
-        except IntegrityError as exc:
-            if previous_status != DocumentStatus.DRAFT:
-                await self._documents.update_status(document, previous_status)
-            raise AnalysisAlreadyRunningError("Для документа уже выполняется анализ") from exc
-        except Exception:
-            if previous_status != DocumentStatus.DRAFT:
-                await self._documents.update_status(document, previous_status)
-            raise
-
-    async def mark_dispatched(self, job: AnalysisJob, task_id: str) -> AnalysisJob:
-        document = await self._documents.get_by_id(job.document_id)
-        if document is None:
-            raise DocumentNotFoundError(f"Документ {job.document_id} не найден")
-        return await self._jobs.mark_dispatched(job, document, task_id)
-
-    async def mark_job_queue_unavailable(
-        self, job: AnalysisJob, error_message: str | None = None
-    ) -> AnalysisJob:
-        """Очередь недоступна — задача не поставлена, документ остаётся в DRAFT (переход №3)."""
-        document = await self._documents.get_by_id(job.document_id)
-        if document is None:
-            raise DocumentNotFoundError(f"Документ {job.document_id} не найден")
-        return await self._jobs.mark_failed_queue_unavailable(job, document, error_message)
-
-    async def cancel_job(
-        self, project_id: uuid.UUID, document_id: uuid.UUID, job_id: uuid.UUID
-    ) -> AnalysisJob:
-        """Отменить активную задачу анализа (переход №7 → документ возвращается в DRAFT)."""
-        job = await self.get_job(project_id, document_id, job_id)
-        if job.status == AnalysisJobStatus.CANCELLED:
-            return job
-        if job.status not in (AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING):
-            raise AnalysisJobNotCancellableError("Завершённую задачу анализа отменить нельзя")
-        document = await self._documents.get_by_id(document_id)
-        if document is None:
-            raise DocumentNotFoundError(f"Документ {document_id} не найден")
-        return await self._jobs.cancel(job, document)
-
-    async def get_job(
-        self, project_id: uuid.UUID, document_id: uuid.UUID, job_id: uuid.UUID
-    ) -> AnalysisJob:
-        job = await self._jobs.get_by_id(job_id)
-        if job is None or job.document_id != document_id:
-            raise DocumentNotFoundError(
-                f"Задача анализа {job_id} не найдена для документа {document_id}"
-            )
-        document = await self._documents.get_by_id(document_id)
-        if document is None or document.project_id != project_id:
-            raise DocumentNotFoundError(
-                f"Документ {document_id} не найден в проекте {project_id}"
-            )
+            try:
+                job = await self._uow.jobs.create_for_document(job, document)
+                await self._uow.commit()
+            except IntegrityError as exc:
+                await self._uow.rollback()
+                raise AnalysisAlreadyRunningError(
+                    "Для документа уже выполняется анализ"
+                ) from exc
         return job
 
-    # ------------------------------------------------------------------
-    # Bulk (#10)
-    # ------------------------------------------------------------------
+    async def mark_dispatched(
+        self, job: "AnalysisJob", task_id: str
+    ) -> "AnalysisJob":
+        async with self._uow:
+            document = await self._uow.documents.get_by_id(job.document_id)
+            if document is None:
+                raise DocumentNotFoundError(
+                    f"Документ {job.document_id} не найден"
+                )
+            result = await self._uow.jobs.mark_dispatched(job, document, task_id)
+            await self._uow.commit()
+        return result
+
+    async def mark_job_queue_unavailable(
+        self, job: "AnalysisJob", error_message: str | None = None
+    ) -> "AnalysisJob":
+        async with self._uow:
+            document = await self._uow.documents.get_by_id(job.document_id)
+            if document is None:
+                raise DocumentNotFoundError(
+                    f"Документ {job.document_id} не найден"
+                )
+            result = await self._uow.jobs.mark_failed_queue_unavailable(
+                job, document, error_message
+            )
+            await self._uow.commit()
+        return result
+
+    async def cancel_job(
+        self,
+        project_id: uuid.UUID,
+        document_id: uuid.UUID,
+        job_id: uuid.UUID,
+    ) -> "AnalysisJob":
+        async with self._uow:
+            job = await self._get_job(project_id, document_id, job_id)
+            if job.status == AnalysisJobStatusVO.CANCELLED:
+                return job
+            if job.status not in _CANCELLABLE_JOB_STATUSES:
+                raise AnalysisJobNotCancellableError(
+                    "Завершённую задачу анализа отменить нельзя"
+                )
+            document = await self._uow.documents.get_by_id(document_id)
+            if document is None:
+                raise DocumentNotFoundError(
+                    f"Документ {document_id} не найден"
+                )
+            result = await self._uow.jobs.cancel(job, document)
+            await self._uow.commit()
+        return result
+
+    async def get_job(
+        self,
+        project_id: uuid.UUID,
+        document_id: uuid.UUID,
+        job_id: uuid.UUID,
+    ) -> "AnalysisJob":
+        async with self._uow:
+            return await self._get_job(project_id, document_id, job_id)
 
     async def bulk_create_jobs_for_project(
         self, project_id: uuid.UUID
     ) -> list[dict]:
         """Запустить анализ для всех документов проекта в статусе draft/awaiting_approval.
 
-        Возвращает list[dict] вида:
-          {"document_id": UUID, "job": AnalysisJob}           — успешный запуск
-          {"document_id": UUID, "job": None, "error": str}    — ошибка
-
-        Ошибка для одного документа не блокирует остальные.
+        Каждый документ — отдельный UoW, чтобы ошибка одного
+        не откатывала остальных.
         """
-        # Документы в статусах DRAFT и AWAITING_APPROVAL
-        # (без READY — bulk не перезапускает готовые документы без явного force)
-        analyzable_documents = await self._documents.list_analyzable_for_project(project_id)
+        async with self._uow:
+            analyzable = await self._uow.documents.list_analyzable_for_project(
+                project_id
+            )
+
         results: list[dict] = []
-        for document in analyzable_documents:
+        for document in analyzable:
             try:
                 job = await self.create_job(project_id, document.id)
                 results.append({"document_id": document.id, "job": job})
@@ -223,3 +295,26 @@ class AnalysisJobService:
                     }
                 )
         return results
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    async def _get_job(
+        self,
+        project_id: uuid.UUID,
+        document_id: uuid.UUID,
+        job_id: uuid.UUID,
+    ) -> "AnalysisJob":
+        """Проверить принадлежность job → document → project."""
+        job = await self._uow.jobs.get_by_id(job_id)
+        if job is None or job.document_id != document_id:
+            raise DocumentNotFoundError(
+                f"Задача анализа {job_id} не найдена для документа {document_id}"
+            )
+        document = await self._uow.documents.get_by_id(document_id)
+        if document is None or document.project_id != project_id:
+            raise DocumentNotFoundError(
+                f"Документ {document_id} не найден в проекте {project_id}"
+            )
+        return job

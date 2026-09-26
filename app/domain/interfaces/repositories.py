@@ -114,6 +114,7 @@ class ISuggestionRepository(ABC):
     @abstractmethod
     async def list_by_analysis_job_and_status(
         self, analysis_job_id: uuid.UUID, status: SuggestionStatusVO
+<<<<<<< HEAD
     ) -> "list[Suggestion]":
         """
         Намеренно без LIMIT: этот метод является источником курсорной итерации
@@ -135,6 +136,9 @@ class ISuggestionRepository(ABC):
         исключительно для DocumentExportService._iter_accepted_changes_pages.
         Внешние потребители должны использовать list_by_analysis_job_and_status.
         """
+=======
+    ) -> "list[Suggestion]": ...
+>>>>>>> origin/fix/high-priority-review-findings
 
     @abstractmethod
     async def list_ids_by_analysis_job_and_status(
