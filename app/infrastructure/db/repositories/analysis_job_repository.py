@@ -33,7 +33,9 @@ class AnalysisJobRepository:
             select(AnalysisJob)
             .where(
                 AnalysisJob.document_id == document_id,
-                AnalysisJob.status.in_((AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING)),
+                AnalysisJob.status.in_(
+                    (AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING)
+                ),
             )
             .order_by(AnalysisJob.created_at.desc())
             .limit(1)
@@ -43,15 +45,13 @@ class AnalysisJobRepository:
     async def create_for_document(self, job: AnalysisJob, document: Document) -> AnalysisJob:
         self._session.add(job)
         document.current_analysis_job_id = job.id
-        try:
-            await self._session.commit()
-        except Exception:
-            await self._session.rollback()
-            raise
+        await self._session.flush()
         await self._session.refresh(job)
         return job
 
-    async def mark_dispatched(self, job: AnalysisJob, document: Document, task_id: str) -> AnalysisJob:
+    async def mark_dispatched(
+        self, job: AnalysisJob, document: Document, task_id: str
+    ) -> AnalysisJob:
         await self._session.refresh(job)
         job.celery_task_id = task_id
         if (
@@ -59,7 +59,7 @@ class AnalysisJobRepository:
             and document.current_analysis_job_id == job.id
         ):
             document.status = DocumentStatus.IN_PROGRESS
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(job)
         return job
 
@@ -72,7 +72,7 @@ class AnalysisJobRepository:
         job.finished_at = datetime.now(UTC)
         if document.current_analysis_job_id == job.id:
             document.status = DocumentStatus.DRAFT
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(job)
         return job
 
@@ -83,7 +83,7 @@ class AnalysisJobRepository:
         job.finished_at = datetime.now(UTC)
         if document.current_analysis_job_id == job.id:
             document.status = DocumentStatus.DRAFT
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(job)
         return job
 
@@ -92,14 +92,16 @@ class AnalysisJobRepository:
             update(AnalysisJob)
             .where(
                 AnalysisJob.id == job_id,
-                AnalysisJob.status.in_((AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING)),
+                AnalysisJob.status.in_(
+                    (AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING)
+                ),
             )
             .values(
                 status=AnalysisJobStatus.PROCESSING,
                 started_at=func.coalesce(AnalysisJob.started_at, datetime.now(UTC)),
             )
         )
-        await self._session.commit()
+        await self._session.flush()
         return bool(result.rowcount)
 
     async def update_status(
@@ -115,8 +117,12 @@ class AnalysisJobRepository:
         now = datetime.now(UTC)
         if status == AnalysisJobStatus.PROCESSING and job.started_at is None:
             job.started_at = now
-        if status in (AnalysisJobStatus.SUCCESS, AnalysisJobStatus.FAILED, AnalysisJobStatus.CANCELLED):
+        if status in (
+            AnalysisJobStatus.SUCCESS,
+            AnalysisJobStatus.FAILED,
+            AnalysisJobStatus.CANCELLED,
+        ):
             job.finished_at = now
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(job)
         return job
