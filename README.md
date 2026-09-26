@@ -13,14 +13,16 @@ Backend построен по принципам чистой (hexagonal) арх
 ```
 app/
 ├── api/            — HTTP-слой (FastAPI роутеры, Pydantic-схемы, зависимости авторизации)
-├── domain/         — бизнес-логика (сервисы), доменные исключения, порты (интерфейсы)
+├── domain/         — бизнес-логика (сервисы), доменные исключения, порты (интерфейсы/Protocol)
 ├── infrastructure/ — реализации портов: БД (SQLAlchemy), Minio, Redis, LLM-клиенты,
 │                     парсеры документов, экспортёры, security
-├── workers/         — Celery: приложение, задачи пайплайна анализа, вспомогательные модули
+├── workers/        — Celery: приложение, задачи пайплайна анализа, вспомогательные модули
 └── core/           — конфигурация (Settings), логирование, DI-фабрики, middleware
 ```
 
-Ключевой принцип: **зависимости направлены внутрь** — `domain` не знает о FastAPI, SQLAlchemy или Celery. Все внешние системы (LLM-провайдер, источники истины, файловое хранилище, парсер документа, экспортёр) подключены через абстрактные интерфейсы (`Protocol`) в `domain/interfaces`, что позволяет менять конкретную реализацию (например, LLM-провайдера) без правок бизнес-логики. Именно это позволит подключить реальный ИИ-пайплайн (LangGraph и т.д.) вместо `StubLLMClient`, не трогая API-контракт.
+Ключевой принцип: **зависимости направлены внутрь** — `domain` не знает о FastAPI, SQLAlchemy или Celery. Все внешние системы (LLM-провайдер, источники истины, файловое хранилище, парсер документа, экспортёр) подключены через абстрактные `Protocol`-интерфейсы в `domain/interfaces`, что позволяет менять конкретную реализацию без правок бизнес-логики.
+
+Доменные сущности (`Document`, `Suggestion`, `AnalysisJob` и т.д.) аннотированы через `Protocol` (`DocumentProtocol`, `SuggestionProtocol`), а не через ORM-модели — сервисный слой не импортирует `infrastructure.*` ни при выполнении, ни под `TYPE_CHECKING`.
 
 ## Технологический стек
 
@@ -62,8 +64,10 @@ docker compose exec backend ruff check .
 ```
 
 - **Unit-тесты** (`tests/unit`) проверяют конкретные инварианты безопасности: пароль хранится только как солёный bcrypt-хэш, JWT всегда имеет срок жизни, presigned URL никогда не бессрочный, rate limiter изолирует попытки по email, а `_process_source` корректно возвращает `..._NOT_FOUND` вместо падения, если job/document/source удалены между постановкой в очередь и выполнением.
-- **Integration-тесты** (`tests/integration`) гоняют реальный Postgres/Redis/MinIO через `AsyncClient` поверх ASGI-приложения. Fixture `_isolated_redis_client` (autouse, `tests/integration/conftest.py`) сбрасывает глобальный Redis-синглтон между тестами, чтобы асинхронное соединение не оказывалось привязанным к закрытому event loop предыдущего теста (актуально только для pytest-асинхронного окружения, в проде не проявляется).
+- **Integration-тесты** (`tests/integration`) гоняют реальный Postgres/Redis/MinIO через `AsyncClient` поверх ASGI-приложения. Fixture `_isolated_redis_client` (autouse, `tests/integration/conftest.py`) сбрасывает глобальный Redis-синглтон между тестами, чтобы асинхронное соединение не оказывалось привязанным к закрытому event loop предыдущего теста.
 - CI (`.github/workflows/ci.yml`) запускает оба набора автоматически: `lint-and-test` (ruff + unit) и отдельный job `integration-tests` с Postgres/Redis как service containers и MinIO через `docker run`.
+
+> **Тестирование воркер-слоя**: зависимости `_get_storage`, `_get_connector`, `_get_llm_client` в `analysis_tasks.py` оформлены как `@functools.cache` provider-функции — в тестах достаточно переопределить функцию (`t._get_storage = lambda: FakeStorage()`), SQLAlchemy-сессия и Celery-воркер не нужны.
 
 ## Переменные окружения (`.env`)
 
@@ -72,7 +76,7 @@ docker compose exec backend ruff check .
 | БД | `DATABASE_URL` | Строка подключения PostgreSQL (async, `postgresql+asyncpg://`) |
 | Redis | `REDIS_URL` | Брокер и result backend Celery, кэш rate limiting |
 | Minio | `MINIO_ENDPOINT`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `MINIO_BUCKET`, `MINIO_SECURE`, `MINIO_PRESIGNED_URL_EXPIRE_SECONDS` | Файловое хранилище документов и источников |
-| JWT | `JWT_SECRET`, `JWT_ALGORITHM`, `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | Подпись и срок жизни токенов доступа. **`JWT_SECRET` должен быть ≥ 32 байт** для HS256 — иначе PyJWT выдаёт `InsecureKeyLengthWarning` |
+| JWT | `JWT_SECRET`, `JWT_ALGORITHM`, `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | Подпись и срок жизни токенов доступа. **`JWT_SECRET` должен быть ≥ 32 байт** для HS256 |
 | Логин | `LOGIN_MAX_ATTEMPTS`, `LOGIN_LOCKOUT_SECONDS` | Защита от брутфорса (счётчик в Redis) |
 | Загрузка | `MAX_UPLOAD_SIZE_MB` | Лимит размера файла (документ/источник) |
 | LLM | `LLM_PROVIDER` (`stub`\|`remote_http`\|`onprem`), `LLM_ENDPOINT`, `LLM_API_KEY`, `LLM_TIMEOUT_SECONDS`, `LLM_MAX_RETRIES` | Выбор и настройка провайдера инференса |
@@ -83,17 +87,17 @@ docker compose exec backend ruff check .
 | Таблица | Назначение | Ключевые связи |
 |---|---|---|
 | `users` | Пользователи, глобальная роль `admin`/`user` | 1:N `projects` (через `owner_id`) |
-| `projects` | Проекты — единица группировки | владелец через `owner_id`, без `project_members` в MVP |
+| `projects` | Проекты — единица группировки | владелец через `owner_id` |
 | `documents` | Целевые документы (doc/docx/txt/markdown) | M:N с `sources`, ссылка на последний `analysis_job` |
 | `sources` | Источники истины (file/note/link), переиспользуемые | M:N с `documents` через `document_sources` |
 | `document_sources` | Связка документ↔источник | — |
 | `analysis_jobs` | Запуски анализа (pending/processing/success/failed/cancelled) | 1:N `suggestions` |
-| `suggestions` | Точечные правки (add/modify/delete) | заготовки `source_reference`/`confidence_score`/`explanation` под будущую верификацию |
-| `audit_logs` | Журнал действий (accept/reject/download) | по `suggestion_id` или `document_id` (взаимно исключающие, оба nullable, корректная комбинация гарантируется CHECK-constraint `ck_audit_logs_target`); поле `user_id` всегда заполняется реальным UUID пользователя из DI — заглушка `00000000-…` полностью устранена |
+| `suggestions` | Точечные правки (add/modify/delete) | `source_reference`/`confidence_score`/`explanation` |
+| `audit_logs` | Журнал действий (accept/reject/download/finalize) | `suggestion_id` или `document_id` (CHECK-constraint `ck_audit_logs_target`) |
 
-Роли: только `admin` (видит и модифицирует всё) и `user` (только свои проекты через `owner_id`). Точка расширения на будущий `project_members` — единая функция `get_allowed_project`.
+Роли: `admin` (видит всё) и `user` (только свои проекты). Точка расширения — `project_members`.
 
-Миграции (`alembic/versions`): `0001_initial_schema` → `0002_audit_logs_download` (добавляет `download` в `audit_action`) → `0003_audit_logs_columns` (добавляет `document_id` и CHECK-constraint) → `0004_suggestion_id_nullable` (снимает `NOT NULL` с `suggestion_id`, забытый в 0003). Важно: `alembic/env.py` использует `transaction_per_migration=True` — `0002` добавляет значение enum, а `0003` его сразу же использует в CHECK constraint — PostgreSQL требует коммита нового значения enum перед использованием, иначе — `UnsafeNewEnumValueUsageError`.
+Миграции: `0001_initial_schema` → `0002_audit_logs_download` → `0003_audit_logs_columns` → `0004_suggestion_id_nullable`. `alembic/env.py` использует `transaction_per_migration=True` — PostgreSQL требует коммита нового значения enum перед использованием в CHECK constraint.
 
 ## API — сводка эндпоинтов (префикс `/api/v1`)
 
@@ -122,6 +126,7 @@ GET    /projects/{project_id}/documents/{document_id}/analysis-jobs/{job_id}
 POST   /projects/{project_id}/documents/{document_id}/analysis-jobs/{job_id}/cancel
 
 GET    /projects/{project_id}/documents/{document_id}/suggestions                        (пагинация: ?limit=&offset=)
+PUT    /projects/{project_id}/documents/{document_id}/suggestions/review                 (bulk: If-Match / optimistic lock)
 POST   /projects/{project_id}/documents/{document_id}/suggestions/{suggestion_id}/accept
 POST   /projects/{project_id}/documents/{document_id}/suggestions/{suggestion_id}/reject
 POST   /projects/{project_id}/documents/{document_id}/suggestions/bulk-accept
@@ -132,50 +137,74 @@ GET    /system/llm-health                                         (диагно�
 GET    /health                                                    (без префикса /api/v1)
 ```
 
-**Пагинация**: все list-эндпоинты (`GET /projects`, `/documents`, `/sources`, `/suggestions`) принимают запросные параметры `limit` (по умолчанию 50, максимум 200) и `offset` (по умолчанию 0), возвращая объект `{"items": [...], "total": N, "limit": L, "offset": O}` (схема `Page[T]` в `app/api/schemas/pagination.py`). `limit`/`offset` передаются напрямую в репозиторий — срезка выполняется на уровне SQL, а не в Python.
+**Пагинация**: все list-эндпоинты принимают `limit` (по умолчанию 50, максимум 200) и `offset` (по умолчанию 0), возвращают `{"items": [...], "total": N, "limit": L, "offset": O}` (схема `Page[T]`). Срезка выполняется на уровне SQL.
 
-**Сериализация списков**: `list_documents` использует `TypeAdapter[list[DocumentResponse]]` — один проход по результату запроса вместо цикличных `model_validate` (устранено после кода-ревью PERF-4).
+**Оптимистичный лок review**: `PUT /suggestions/review` поддерживает заголовок `If-Match: <review_version>` — при конфликте версий возвращает `412 Precondition Failed`; без заголовка (legacy) — `409 Conflict`.
 
-## Дашборд рабочего пространства
-
-`GET /workspace/dashboard` возвращает агрегированную статистику: общее число документов, документы в ожидании подтверждения, готовые документы и итоговый коэффициент. Данные получаются одним SQL-запросом с `COUNT(*) FILTER(WHERE ...)` вместо трёх отдельных обращений к БД — это устраняет 2 лишних RTT на каждую загрузку дашборда (устранено после кода-ревью PERF-1). `DashboardService` получает корректно инициализированный `DashboardRepository(session)` через DI; zombie-файл `app/services/dashboard_service.py` удалён (устранено CR-1, CR-2).
+**OpenAPI-схема**: `response_model` для list-эндпоинтов указывает на конкретный алиас `PageSuggestionResponse = Page[SuggestionResponse]`, разрешённый при определении класса — FastAPI корректно строит схему без runtime-introspection generic alias.
 
 ## Жизненный цикл документа
 
-Документ имеет четыре пользовательских статуса: `draft`, `in_progress`,
-`awaiting_approval`, `ready`. После загрузки документ создаётся в `draft`; после
-успешной отправки задачи в Celery переходит в `in_progress`. Успешный анализ с
-правками переводит его в `awaiting_approval`, без правок — в `ready`. Ошибка или
-отмена анализа возвращает документ в `draft`; техническая причина хранится в
-`analysis_jobs`. Из `awaiting_approval` документ переходит в `ready` только через
-`POST .../suggestions/finalize`, когда у текущего анализа не осталось правок
-`pending`. Статус `ready` конечный в рамках MVP.
+Документ имеет четыре пользовательских статуса: `draft` → `in_progress` → `awaiting_approval` / `ready`.
 
-Для одного документа разрешена только одна активная задача (`pending` или
-`processing`). Ограничение обеспечено и сервисом, и частичным уникальным индексом
-PostgreSQL. Активную задачу можно отменить через
-`POST .../analysis-jobs/{job_id}/cancel`.
+- После загрузки — `draft`.
+- После успешной постановки задачи в Celery — `in_progress`.
+- Успешный анализ с правками — `awaiting_approval`; без правок — `ready`.
+- Ошибка или отмена — обратно в `draft`.
+- Из `awaiting_approval` в `ready` — только через `POST .../suggestions/finalize` при отсутствии `pending`-правок.
+
+Для одного документа разрешена только одна активная задача (`pending` или `processing`). Ограничение обеспечено сервисом и частичным уникальным индексом PostgreSQL.
 
 ## Пайплайн анализа (Celery)
 
-1. `POST /analysis-jobs` создаёт запись `AnalysisJob` (status=`pending`) и ставит задачу `run_analysis_job` в очередь.
-2. `run_analysis_job` переводит job/документ в `processing` и запускает по одной под-задаче `process_source_for_analysis_job` на каждый привязанный источник (через Celery `group`/`chord`).
-3. Каждая под-задача независимо парсит документ, получает текст источника через `SourceConnector`, вызывает `LLMClient.generate_suggestions()` и сохраняет правки.
-4. **Retry/dead-letter — по каждому источнику отдельно**: при сбое LLM/парсинга под-задача ретраится с экспоненциальной задержкой (`LLM_TIMEOUT_SECONDS × 2^retries`) до `LLM_MAX_RETRIES` раз; после исчерпания попыток запись уходит в Redis-список `syncscribe:analysis:dead_letter`.
-5. `finalize_analysis_job` агрегирует результат: `SUCCESS`, если хотя бы один источник дал правки; `FAILED` с кодом `ALL_SOURCES_FAILED` или `NO_SOURCES_ATTACHED` в остальных случаях. При гонке параллельных `analysis_jobs` на одном документе `document.current_analysis_job_id` обновляется только если завершающийся job действительно новее уже сохранённого текущего. Дублирующийся блок экспорта вынесен в приватный хэлпер `_run_export()` (устранено CODE-3).
-6. **None-guard'ы**: все три этапа (`_start_job`, `_process_source`, `_finalize_job`) проверяют job/document/source на `None` после `get_by_id` — если запись удалена между постановкой задачи в очередь и выполнением (или Celery повторно доставил задачу после `acks_late`), подзадача возвращает контролируемый `"failed"`-результат вместо `AttributeError`.
+1. `POST /analysis-jobs` создаёт `AnalysisJob` (status=`pending`) и ставит `run_analysis_job` в очередь.
+2. `run_analysis_job` (`_start_job`) переводит job/документ в `processing`, скачивает и парсит документ **один раз** (parse-once), кэширует `plain_text` в Redis с TTL `max(llm_timeout × sources_count × 2, 300)` сек., затем запускает `chord` из `process_source_for_analysis_job` по одному на каждый источник.
+3. Каждая под-задача читает `plain_text` из Redis-кэша (при cache miss — деградирует до прямого скачивания из MinIO), получает текст источника через `SourceConnector`, вызывает `LLMClient.generate_suggestions()` и сохраняет правки.
+4. **Retry / dead-letter — по каждому источнику отдельно**: при сбое LLM/парсинга под-задача ретраится с экспоненциальной задержкой (`LLM_TIMEOUT_SECONDS × 2^retries`) до `LLM_MAX_RETRIES` раз; после исчерпания — запись уходит в Redis-список `syncscribe:analysis:dead_letter`.
+5. `finalize_analysis_job` агрегирует результат: `SUCCESS` если хотя бы один источник дал правки; `FAILED` с кодом `ALL_SOURCES_FAILED` или `NO_SOURCES_ATTACHED` иначе. Кэш `plain_text` очищается в `finally`.
+6. **chord on_error**: при падении Celery backend (недоступен result store) `_chord_error_handler` форсирует финализацию с пустым списком результатов — документ переходит в `FAILED/draft` вместо вечного `in_progress`.
+7. **Recovery при ошибке коммита финализации**: компенсирующая транзакция переводит job → `FAILED`, документ → `draft`. Если recovery-коммит тоже падает — вторичное исключение пробрасывается с `__cause__`, чтобы Celery применил retry/dead-letter (не поглощает ошибку).
+8. **None-guard'ы**: все три этапа проверяют job/document/source на `None`. Различаются `JOB_NOT_FOUND` («не существует в БД» — `logger.error`) от «job уже в финальном статусе» («race» — `logger.info`).
+
+### Зависимости воркера (M-8)
+
+`_get_storage()`, `_get_connector()`, `_get_llm_client()`, `_get_parser_registry()` — `@functools.cache` provider-функции вместо module-level синглтонов. Runtime-семантика не изменилась (один объект на процесс). В тестах:
+
+```python
+import app.workers.tasks.analysis_tasks as t
+t._get_storage   = lambda: FakeStorage()
+t._get_connector = lambda: FakeConnector()
+t._get_llm_client = lambda: FakeLLMClient()
+```
+
+## Доменные исключения
+
+Каждое исключение соответствует одной бизнес-ситуации и конвертируется в HTTP-ответ в роутере:
+
+| Исключение | HTTP | Когда |
+|---|---|---|
+| `DocumentNotFoundError` | 404 | Документ не существует или не в проекте |
+| `SuggestionNotFoundError` | 404 | Правка не найдена в БД вообще |
+| `StaleSuggestionJobError` | 404 | Правка существует, но принадлежит устаревшему job (документ переанализирован) |
+| `JobNotFoundError` | — | job_id в воркере не найден в БД (не «завершён», а «отсутствует») |
+| `SuggestionAlreadyDecidedError` | 409 | Race condition: правка уже обработана другим запросом |
+| `InvalidDocumentStatusError` | 409 | Операция недопустима для текущего статуса документа |
+| `ReviewVersionConflictError` | 409 / 412 | Optimistic lock: `review_version` изменился параллельным запросом |
+| `AnalysisAlreadyRunningError` | 409 | Для документа уже есть активный analysis job |
+| `ReviewNotCompleteError` | 422 | Финализация невозможна: остались `pending`-правки или экспорт не удался |
 
 ## Абстракции и точки расширения
 
-| Порт (`domain/interfaces`) | Единственная MVP-реализация | Назначение расширения |
+| Порт (`domain/interfaces`) | MVP-реализации | Назначение расширения |
 |---|---|---|
-| `LLMClient` | `StubLLMClient`, `HttpLLMClient`, `OnPremLLMClient` | Смена провайдера инференса без правок пайплайна (`LLM_PROVIDER` в `.env`) — точка подключения реального ИИ-пайплайна (например, LangGraph) |
-| `SourceConnector` | `ManualUploadConnector` | Будущие `ConfluenceConnector`, `JiraConnector` и т.д. |
-| `DocumentParser` | `TxtParser`, `MarkdownParser`, `DocxParser` (через `DocumentParserRegistry`) | Новые форматы документов |
-| `DocumentExporter` | `TextExporter`, `DocxExporter` (через `DocumentExporterRegistry`) | Новые форматы на экспорт |
-| `FileStorage` | `MinioStorage` | Смена хранилища файлов |
+| `LLMClientProtocol` | `StubLLMClient`, `HttpLLMClient`, `OnPremLLMClient` | Смена провайдера инференса без правок пайплайна (`LLM_PROVIDER` в `.env`) |
+| `SourceConnectorProtocol` | `ManualUploadConnector` | Будущие `ConfluenceConnector`, `JiraConnector` и т.д. |
+| `DocumentParserProtocol` | `TxtParser`, `MarkdownParser`, `DocxParser` | Новые форматы документов |
+| `DocumentExporterProtocol` | `TextExporter`, `DocxExporter` | Новые форматы на экспорт |
+| `FileStorageProtocol` | `MinioStorage` | Смена хранилища файлов |
+| `DocumentProtocol` / `SuggestionProtocol` | ORM-модели (через `Protocol`) | Сервисный слой не зависит от SQLAlchemy напрямую |
 
-**LLM-провайдер сознательно не привязан к вендору.** `HttpLLMClient` — generic-клиент для любого внешнего HTTP-провайдера, настраиваемого только через `.env`. `OnPremLLMClient` реализован независимо от `HttpLLMClient` (не наследует бизнес-контракт запроса/ответа — вероятно, у on-prem модели он будет другим), общая между ними только сетевая retry-логика (`HttpConnectionRetryMixin`). Контракт запроса/ответа в `infrastructure/llm/schemas.py` — **условный плейсхолдер**, не подтверждённая спецификация: при выборе реального провайдера правки нужны только там.
+`HttpLLMClient` — generic-клиент для любого внешнего HTTP-провайдера, настраиваемый только через `.env`. `OnPremLLMClient` реализован независимо (у on-prem может быть иной контракт запроса/ответа), общая между ними только retry-логика (`HttpConnectionRetryMixin`). Контракт в `infrastructure/llm/schemas.py` — **условный плейсхолдер** до выбора реального провайдера.
 
 ## Безопасность
 
@@ -184,23 +213,24 @@ PostgreSQL. Активную задачу можно отменить через
 - Rate limiting логина: счётчик неудачных попыток по email в Redis, блокировка после `LOGIN_MAX_ATTEMPTS`.
 - Валидация всех входящих запросов через Pydantic-схемы.
 - Авторизация на основе роли и владения проектом — единая точка `get_allowed_project`.
-- Приватный Minio-бакет; скачивание документа — через presigned URL с TTL; экспорт финального документа — потоково через backend.
-- Структурированные логи без секретов — редактирование рекурсивно обходит вложенные dict/list, а не только верхний уровень `extra`.
-- `X-Request-ID` санитизируется по безопасному шаблону — произвольное входящее значение заголовка не попадает в ответ напрямую.
-- Общий exception handler для доменных ошибок — исключает утечку внутренних деталей (стектрейсов) в ответах API.
-- `apply_review()` принимает `user_id: uuid.UUID` из DI и записывает его в `audit_log` — заглушка `00000000-0000-0000-0000-000000000000` устранена (устранено PERF-2).
+- Приватный Minio-бакет; скачивание — через presigned URL с TTL; экспорт финального файла — потоково через backend.
+- Структурированные логи без секретов — редактирование рекурсивно обходит вложенные dict/list.
+- `X-Request-ID` санитизируется по безопасному шаблону — произвольное значение не попадает в ответ напрямую.
+- Общий exception handler для доменных ошибок — исключает утечку стектрейсов в API.
+- `user_id` в `audit_log` — всегда реальный UUID из DI, заглушка `00000000-…` устранена.
+- Все поля `extra={"job_id": ...}` в structured logging явно приводятся к `str()` — JSON-сериализатор не падает на `uuid.UUID`.
 
 ## Осознанные упрощения MVP (зафиксированные ограничения)
 
 - **Версионирование не хранится**: только текущее состояние документа + результат последнего анализа.
-- **Роли внутри проекта не введены**: `project_members`/shared-доступ — точка расширения на будущее.
-- **Применение правок — без посимвольного diff**: текстовая замена `old_text → new_text` для txt/markdown; для docx — замена текста всего абзаца. При пересекающихся правках в одном абзаце вторая может не найти свой `old_text` после применения первой — известное ограничение, не блокирующее MVP.
-- **Источники типа "ссылка"**: контент по URL не парсится автоматически — передаётся в LLM только как текстовый адрес.
-- **LLM-контракт** — плейсхолдер до выбора реального провайдера; сейчас — `StubLLMClient` (всегда одна и та же фиктивная правка) — следующий этап развития продукта.
-- **`DocumentRepository.attach_sources`** — чтение-мёрж-запись без атомарности на уровне связующей таблицы — при параллельных вызовах для одного документа возможен lost update. Низкий риск при текущем объёме использования, зафиксирован как тех.долг.
-- **Движок СУБД в Celery-воркере**: `isolated_db_session()` создаёт новый `AsyncEngine` на каждый вызов подзадачи — правильно для корректности event loop, но цена — TCP/TLS handshake на каждый источник; при росте нагрузки стоит рассмотреть пул на уровне воркер-процесса.
+- **Роли внутри проекта не введены**: `project_members`/shared-доступ — точка расширения.
+- **Применение правок — без посимвольного diff**: замена `old_text → new_text` для txt/markdown; для docx — замена текста абзаца. При пересекающихся правках в одном абзаце вторая может не найти `old_text` — известное ограничение, не блокирует MVP.
+- **Источники типа «ссылка»**: контент по URL не парсится — передаётся в LLM как текстовый адрес.
+- **LLM-контракт** — плейсхолдер до выбора провайдера; сейчас `StubLLMClient` (фиктивная правка).
+- **`DocumentRepository.attach_sources`** — чтение-мёрж-запись без атомарности; при параллельных вызовах возможен lost update. Низкий риск, зафиксирован как тех.долг.
+- **Движок СУБД в Celery-воркере**: `isolated_uow()` создаёт новый `AsyncEngine` на каждый вызов под-задачи — корректно для event loop, но TCP/TLS handshake на каждый источник; при росте нагрузки стоит рассмотреть пул на уровне воркер-процесса.
 
-## Структура репозитория (полная)
+## Структура репозитория
 
 ```
 SyncBack/
@@ -219,16 +249,19 @@ SyncBack/
 │       └── 0004_audit_logs_suggestion_id_nullable.py
 └── app/
     ├── main.py
-    ├── core/{config, logging_setup, correlation_middleware, body_size_limit_middleware, dependencies}.py
+    ├── core/{config,logging_setup,correlation_middleware,body_size_limit_middleware,dependencies}.py
     ├── api/
     │   ├── deps.py
     │   ├── upload_utils.py
-    │   ├── schemas/{auth,project,document,source,analysis_job,suggestion,pagination}.py
+    │   ├── schemas/{auth,project,document,source,analysis_job,suggestion,review,pagination}.py
     │   └── v1/routers/{auth,projects,documents,sources,analysis_jobs,suggestions,system,workspace}.py
     ├── domain/
     │   ├── exceptions.py
-    │   ├── interfaces/{file_storage,llm_client,source_connector,document_parser,document_exporter}.py
-    │   └── services/{auth,project,document,source,audit_log,analysis_job,suggestion,document_export,dashboard}_service.py
+    │   ├── value_objects.py
+    │   ├── interfaces/{entities,file_storage,llm_client,source_connector,
+    │   │              document_parser,document_exporter,unit_of_work}.py
+    │   └── services/{auth,project,document,source,audit_log,analysis_job,
+    │                 suggestion,document_export,dashboard}_service.py
     ├── infrastructure/
     │   ├── db/{base,session,models/*,repositories/*}.py
     │   ├── security/{password_hasher,jwt_handler,login_rate_limiter}.py
