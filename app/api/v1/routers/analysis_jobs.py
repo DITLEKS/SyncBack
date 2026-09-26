@@ -7,6 +7,10 @@ P0-9: Повторный анализ READY-документа требует fo
 ОПТИМИЗАЦИЯ (код-ревью):
 - #4  detail HTTPException — .model_dump() вместо jsonable_encoder на Pydantic-объекте.
 - #9  _job_response() — хелпер вместо трёх одинаковых JSONResponse-блоков.
+
+N-2 (ревью): убран прямой импорт celery_app из роутера.
+  Отзыв Celery-задачи делегирован в AnalysisJobService.revoke_celery_task().
+  Роутер больше не зависит от инфраструктуры Celery напрямую.
 """
 
 import uuid
@@ -32,7 +36,6 @@ from app.domain.exceptions import (
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.infrastructure.db.models.enums import DocumentStatus
 from app.infrastructure.db.models.project import Project
-from app.workers.celery_app import celery_app
 from app.workers.tasks.analysis_tasks import run_analysis_job
 
 router = APIRouter(
@@ -141,7 +144,8 @@ async def cancel_analysis_job(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except AnalysisJobNotCancellableError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # N-2: revoke делегирован в сервис — роутер не знает о celery_app напрямую
     if job.celery_task_id:
         with suppress(Exception):
-            celery_app.control.revoke(job.celery_task_id, terminate=False)
+            await service.revoke_celery_task(job.celery_task_id)
     return AnalysisJobResponse.model_validate(job)

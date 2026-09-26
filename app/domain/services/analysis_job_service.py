@@ -15,10 +15,14 @@
   - CRIT-1: bulk_create_jobs_for_project загружает только document.id (list[UUID]).
   - CRIT-2: _get_job бросает AnalysisJobNotFoundError при ненайденном job.
   - HIGH-1: mark_dispatched явно проверяет job.status == PENDING.
-  - M-1: find_job_by_idempotency_key возвращает job.id (UUID), не ORM-объект.
-  - H-NEW-3: get_document_for_job возвращает UUID (не детачед ORM-объект)
-    — вызывающий код должен перезагрузить документ сам через document_service,
-    если нужен полный объект.
+  - N-3 (ревью): find_job_by_idempotency_key возвращает полный AnalysisJob | None.
+    Ранее метод возвращал job.id (UUID), что делало вызов _job_response(existing)
+    в роутере падающим — AnalysisJobResponse.model_validate(UUID) бросает ValidationError.
+    Контракт выровнен: метод возвращает AnalysisJob, роутер получает объект напрямую.
+  - H-NEW-3: get_document_for_job теперь возвращает полный DocumentProtocol
+    (не UUID), чтобы роутер мог проверить document.status без дополнительного запроса.
+  - N-2 (ревью): добавлен revoke_celery_task() — тонкий делегат к Celery,
+    изолирует инфраструктурный импорт celery_app внутри сервиса.
 """
 from __future__ import annotations
 
@@ -36,8 +40,8 @@ from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO
 
 if TYPE_CHECKING:
+    from app.domain.interfaces.entities import DocumentProtocol
     from app.infrastructure.db.models.analysis_job import AnalysisJob
-    from app.infrastructure.db.models.document import Document
 
 # Статусы документа, из которых разрешён запуск анализа:
 _ANALYSIS_ALLOWED_STATUSES = frozenset({
@@ -71,16 +75,20 @@ class AnalysisJobService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         idempotency_key: str,
-    ) -> uuid.UUID | None:
-        """M-1: возвращает job.id (UUID), не ORM-объект."""
+    ) -> "AnalysisJob | None":
+        """N-3: возвращает полный AnalysisJob | None.
+
+        Ранее (M-1) метод возвращал job.id (UUID) — это ломало роутер, который
+        передавал результат напрямую в _job_response() → model_validate(job).
+        Контракт исправлен: возвращается ORM-объект, совместимый с AnalysisJobResponse.
+        """
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
             if document is None or document.project_id != project_id:
                 return None
-            job = await self._uow.jobs.get_by_idempotency_key(
+            return await self._uow.jobs.get_by_idempotency_key(
                 document_id, idempotency_key
             )
-            return job.id if job is not None else None
 
     # ------------------------------------------------------------------
     # Document helpers
@@ -88,13 +96,13 @@ class AnalysisJobService:
 
     async def get_document_for_job(
         self, project_id: uuid.UUID, document_id: uuid.UUID
-    ) -> uuid.UUID:
-        """Проверить, что документ существует в проекте, вернуть его UUID.
+    ) -> "DocumentProtocol":
+        """Проверить, что документ существует в проекте, вернуть его.
 
-        H-NEW-3: раньше метод возвращал detached ORM-объект после закрытия сессии —
-        обращение к любому ленивому атрибуту вызывало DetachedInstanceError.
-        Теперь возвращает document_id (UUID).
-        Если вызывающему коду нужен полный объект — загрузить через document_service.get_document().
+        H-NEW-3 (пересмотр): возвращает полный DocumentProtocol, чтобы роутер мог
+        проверить document.status без дополнительного round-trip в БД.
+        Сессия закрывается после выхода из async with, объект остаётся доступным
+        т.к. все нужные поля уже загружены (не lazy).
         """
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
@@ -102,7 +110,7 @@ class AnalysisJobService:
                 raise DocumentNotFoundError(
                     f"Документ {document_id} не найден в проекте {project_id}"
                 )
-            return document_id
+            return document
 
     # ------------------------------------------------------------------
     # Core job lifecycle
@@ -217,6 +225,17 @@ class AnalysisJobService:
             await self._uow.commit()
         return job
 
+    async def revoke_celery_task(self, celery_task_id: str) -> None:
+        """N-2: изолирует инфраструктурный импорт celery_app внутри сервиса.
+
+        Роутер вызывает этот метод вместо прямого обращения к celery_app.control.revoke().
+        Импорт celery_app выполняется лениво (внутри метода), чтобы не нарушать
+        архитектурное правило «domain-сервисы не импортируют инфраструктуру при загрузке».
+        В тестах метод можно замокать без поднятия Celery-брокера.
+        """
+        from app.workers.celery_app import celery_app  # noqa: PLC0415 — lazy import
+        celery_app.control.revoke(celery_task_id, terminate=False)
+
     async def get_job(
         self,
         project_id: uuid.UUID,
@@ -251,14 +270,13 @@ class AnalysisJobService:
                 results.append(
                     {
                         "document_id": document_id,
-                        "job": None,
-                        "error": exc.__class__.__name__,
+                        "error": str(exc),
                     }
                 )
         return results
 
     # ------------------------------------------------------------------
-    # Internal
+    # Internal helpers
     # ------------------------------------------------------------------
 
     async def _get_job(
@@ -267,15 +285,15 @@ class AnalysisJobService:
         document_id: uuid.UUID,
         job_id: uuid.UUID,
     ) -> "AnalysisJob":
-        """CRIT-2: бросает AnalysisJobNotFoundError, если job не найден."""
-        job = await self._uow.jobs.get_by_id(job_id)
-        if job is None or job.document_id != document_id:
-            raise AnalysisJobNotFoundError(
-                f"Задача анализа {job_id} не найдена для документа {document_id}"
-            )
+        """CRIT-2: бросает AnalysisJobNotFoundError если job не найден."""
         document = await self._uow.documents.get_by_id(document_id)
         if document is None or document.project_id != project_id:
             raise DocumentNotFoundError(
                 f"Документ {document_id} не найден в проекте {project_id}"
+            )
+        job = await self._uow.jobs.get_by_id(job_id)
+        if job is None or job.document_id != document_id:
+            raise AnalysisJobNotFoundError(
+                f"Задача {job_id} не найдена для документа {document_id}"
             )
         return job
