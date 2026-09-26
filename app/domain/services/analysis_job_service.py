@@ -6,6 +6,10 @@
   - Один uow.commit() на операцию (кроме компенсирующих транзакций при ошибках).
   - H-2: ORM-объект AnalysisJob создаётся внутри репозитория через фабричный метод.
   - Никаких импортов из app.infrastructure.* при выполнении (НЕ TYPE_CHECKING).
+  - CRIT-A/B: mark_dispatched / mark_job_queue_unavailable / cancel_job адаптированы
+    под новую сигнатуру репозитория: методы больше не принимают document напрямую,
+    а возвращают (job, DocumentStatusVO | None). Сервис применяет изменение
+    документа через uow.documents.update_status().
 """
 from __future__ import annotations
 
@@ -146,30 +150,46 @@ class AnalysisJobService:
     async def mark_dispatched(
         self, job: "AnalysisJob", task_id: str
     ) -> "AnalysisJob":
+        """Отметить job как отправленный в Celery.
+
+        CRIT-A: репозиторий больше не принимает document. Сервис загружает
+        document самостоятельно и применяет new_doc_status через uow.documents.update_status().
+        """
         async with self._uow:
             document = await self._uow.documents.get_by_id(job.document_id)
             if document is None:
                 raise DocumentNotFoundError(
                     f"Документ {job.document_id} не найден"
                 )
-            result = await self._uow.jobs.mark_dispatched(job, document, task_id)
+            # Новая сигнатура: mark_dispatched(job, task_id) → (job, new_doc_status | None)
+            job, new_doc_status = await self._uow.jobs.mark_dispatched(job, task_id)
+            if new_doc_status is not None and document.current_analysis_job_id == job.id:
+                await self._uow.documents.update_status(document, new_doc_status)
             await self._uow.commit()
-        return result
+        return job
 
     async def mark_job_queue_unavailable(
         self, job: "AnalysisJob", error_message: str | None = None
     ) -> "AnalysisJob":
+        """Отметить job как недоступный из-за недоступности очереди.
+
+        CRIT-B: репозиторий больше не принимает document. Сервис загружает document
+        самостоятельно и применяет new_doc_status через uow.documents.update_status().
+        """
         async with self._uow:
             document = await self._uow.documents.get_by_id(job.document_id)
             if document is None:
                 raise DocumentNotFoundError(
                     f"Документ {job.document_id} не найден"
                 )
-            result = await self._uow.jobs.mark_failed_queue_unavailable(
-                job, document, error_message
+            # Новая сигнатура: mark_failed_queue_unavailable(job, message) → (job, DocumentStatusVO)
+            job, new_doc_status = await self._uow.jobs.mark_failed_queue_unavailable(
+                job, error_message
             )
+            if document.current_analysis_job_id == job.id:
+                await self._uow.documents.update_status(document, new_doc_status)
             await self._uow.commit()
-        return result
+        return job
 
     async def cancel_job(
         self,
@@ -177,6 +197,11 @@ class AnalysisJobService:
         document_id: uuid.UUID,
         job_id: uuid.UUID,
     ) -> "AnalysisJob":
+        """Отменить задачу анализа.
+
+        CRIT-B: репозиторий больше не принимает document. Сервис загружает document
+        самостоятельно и применяет new_doc_status через uow.documents.update_status().
+        """
         async with self._uow:
             job = await self._get_job(project_id, document_id, job_id)
             if job.status == AnalysisJobStatusVO.CANCELLED:
@@ -190,9 +215,12 @@ class AnalysisJobService:
                 raise DocumentNotFoundError(
                     f"Документ {document_id} не найден"
                 )
-            result = await self._uow.jobs.cancel(job, document)
+            # Новая сигнатура: cancel(job) → (job, DocumentStatusVO)
+            job, new_doc_status = await self._uow.jobs.cancel(job)
+            if document.current_analysis_job_id == job.id:
+                await self._uow.documents.update_status(document, new_doc_status)
             await self._uow.commit()
-        return result
+        return job
 
     async def get_job(
         self,
