@@ -23,6 +23,9 @@ Celery-задачи пайплайна анализа.
   записи в БД — отличает «не существует» от «уже завершён».
 - H-4: uow._session.refresh() заменён на await uow.refresh() (IUnitOfWork).
 - M-1/M-2: прямые мутации document.status заменены на uow.documents.update_status().
+- M-NEW-2: logger.critical при пустом job_id в _chord_error_handler.
+- M-NEW-4: два commit() в _start_job разнесены по отдельным isolated_uow()-блокам:
+  один UoW — одна транзакция.
 """
 
 import asyncio
@@ -261,15 +264,26 @@ async def _recover_after_commit_failure(
 async def _start_job(job_id: str) -> list[str]:
     """Подготовить job к выполнению и вернуть список source_id.
 
+    M-NEW-4: каждая транзакция живёт в своём isolated_uow()-блоке.
+    Первый блок: обновляем job/document → IN_PROGRESS (commit #1).
+    Второй блок: загружаем sources для chord (commit не нужен, read-only).
+
     Дополнительно кэширует plain_text документа в Redis (parse-once),
     чтобы каждый _process_source не скачивал и не парсил файл повторно.
     Если кэширование не удалось — продолжаем: каждый источник деградирует
     до прямого скачивания.
     """
+    # ------------------------------------------------------------------
+    # Транзакция 1: занять job и перевести документ в IN_PROGRESS.
+    # ------------------------------------------------------------------
+    document_id: uuid.UUID | None = None
+    storage_key: str | None = None
+    document_format: str | None = None
+
     async with isolated_uow() as uow:
         job = await uow.jobs.get_by_id(uuid.UUID(job_id))
         if job is None:
-            # M-10: явный error_code JOB_NOT_FOUND — «не существует» vs «уже завершён»
+            # M-10: явный error_code JOB_NOT_FOUND
             logger.error(
                 "run_analysis_job вызван для несуществующего job_id (JOB_NOT_FOUND)",
                 extra={"job_id": job_id},
@@ -279,20 +293,18 @@ async def _start_job(job_id: str) -> list[str]:
             AnalysisJobStatusVO.PENDING,
             AnalysisJobStatusVO.PROCESSING,
         ):
-            # job существует, но уже в финальном статусе — не ошибка, early-exit
             logger.info(
                 "_start_job: job уже в финальном статусе, пропускаем",
                 extra={"job_id": job_id, "status": job.status.value},
             )
             return []
         if not await uow.jobs.mark_processing_if_active(job.id):
-            # race: другой воркер занял job первым
             logger.info(
                 "_start_job: не удалось занять job (race), пропускаем",
                 extra={"job_id": job_id},
             )
             return []
-        # H-4: обновляем через IUnitOfWork.refresh(), не через uow._session.refresh()
+        # H-4: через IUnitOfWork.refresh()
         await uow.refresh(job)
 
         document = await uow.documents.get_by_id(job.document_id)
@@ -309,29 +321,48 @@ async def _start_job(job_id: str) -> list[str]:
             )
             await uow.commit()
             return []
-        if document.current_analysis_job_id == job.id:
-            # M-2: через репозиторий, не прямую мутацию .status
-            await uow.documents.update_status(document, DocumentStatusVO.IN_PROGRESS)
-            await uow.commit()
 
-        # H-4: обновляем через IUnitOfWork.refresh() с attribute_names
+        if document.current_analysis_job_id == job.id:
+            # M-2: через репозиторий
+            await uow.documents.update_status(document, DocumentStatusVO.IN_PROGRESS)
+
+        # Сохраняем скалярные значения до закрытия сессии.
+        document_id = document.id
+        storage_key = document.storage_key
+        document_format = document.format.value
+
+        await uow.commit()
+        # Сессия закрывается здесь — document/job больше не используются.
+
+    # ------------------------------------------------------------------
+    # Транзакция 2 (read-only): загрузить source_ids для chord.
+    # ------------------------------------------------------------------
+    source_ids: list[str] = []
+    async with isolated_uow() as uow:
+        document = await uow.documents.get_by_id(document_id)
+        if document is None:
+            return []
+        # H-4: через IUnitOfWork.refresh() с attribute_names
         await uow.refresh(document, ["sources"])
         source_ids = [str(source.id) for source in document.sources]
+        # Нет commit() — транзакция только читает.
 
+    # ------------------------------------------------------------------
     # Parse-once: кэшируем plain_text вне DB-сессии.
-    if source_ids and document.storage_key:
+    # ------------------------------------------------------------------
+    if source_ids and storage_key:
         try:
             await _cache_parsed_document(
                 job_id=job_id,
-                storage_key=document.storage_key,
-                document_format=document.format.value,
+                storage_key=storage_key,
+                document_format=document_format,
                 sources_count=len(source_ids),
             )
         except Exception:  # noqa: BLE001
             logger.warning(
                 "Не удалось закэшировать plain_text документа; "
                 "каждый источник будет скачивать файл отдельно",
-                extra={"job_id": job_id, "document_id": str(document.id)},
+                extra={"job_id": job_id, "document_id": str(document_id)},
             )
 
     return source_ids
@@ -380,7 +411,7 @@ async def _process_source(job_id: str, source_id: str) -> dict:
     async with isolated_uow() as uow:
         job = await uow.jobs.get_by_id(uuid.UUID(job_id))
         if job is None:
-            # M-10: явный JOB_NOT_FOUND — «не существует» отличается от race
+            # M-10: явный JOB_NOT_FOUND
             logger.error(
                 "process_source_for_analysis_job: job не найден (JOB_NOT_FOUND)",
                 extra={"job_id": job_id, "source_id": source_id},
@@ -447,7 +478,7 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
     async with isolated_uow() as uow:
         job = await uow.jobs.get_by_id(uuid.UUID(job_id))
         if job is None:
-            # M-10: явный JOB_NOT_FOUND — отличает «не существует» от «уже завершён»
+            # M-10: явный JOB_NOT_FOUND
             logger.error(
                 "finalize_analysis_job: job не найден (JOB_NOT_FOUND)",
                 extra={"job_id": job_id},
@@ -524,14 +555,24 @@ def _chord_error_handler(self, request, exc, traceback, job_id: str = "") -> Non
     Форсирует финализацию job с пустым списком результатов, чтобы документ
     перешёл в FAILED/DRAFT вместо вечного IN_PROGRESS.
 
+    M-NEW-2: если job_id пустой — логируем на уровне CRITICAL, так как
+    в этом случае финализация невозможна и документ гарантированно зависнет
+    в IN_PROGRESS. Оператор должен исправить вручную.
+
     Сигнатура (request, exc, traceback) + kwargs — стандарт Celery on_error.
     """
+    if not job_id:
+        logger.critical(
+            "_chord_error_handler вызван без job_id — финализация невозможна, "
+            "документ может зависнуть в IN_PROGRESS. Требуется ручное вмешательство.",
+            extra={"exc": str(exc)},
+        )
+        return
     logger.error(
         "chord завершился с ошибкой; запускаем аварийную финализацию job",
         extra={"job_id": job_id, "exc": str(exc)},
     )
-    if job_id:
-        asyncio.run(_finalize_job(job_id, []))
+    asyncio.run(_finalize_job(job_id, []))
 
 
 @celery_app.task(bind=True)
