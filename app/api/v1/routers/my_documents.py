@@ -6,6 +6,8 @@ GET /api/v1/documents — возвращает все документы тек�
 
 Параметры:
   status      — фильтр по статусу документа (draft|in_progress|awaiting_approval|ready)
+  outdated    — если true: только документы с хотя бы одной pending-правкой
+                (исключает источники истины is_source_of_truth=True)
   search      — поиск по названию (регистронезависимый, подстрока)
   sort_by     — поле сортировки: updated_at (по умолчанию), created_at, title
   sort_dir    — направление: desc (по умолчанию) | asc
@@ -42,6 +44,14 @@ router = APIRouter(prefix="/documents", tags=["my-documents"])
 @router.get("", response_model=DocumentListPage)
 async def list_my_documents(
     status: DocumentStatusVO | None = Query(None, description="Фильтр по статусу документа"),
+    outdated: bool = Query(
+        False,
+        description=(
+            "Если true — возвращать только устаревшие документы: "
+            "те, у которых есть хотя бы одна правка в статусе pending. "
+            "Источники истины (is_source_of_truth=True) исключаются."
+        ),
+    ),
     search: str | None = Query(None, max_length=200, description="Поиск по названию (подстрока)"),
     sort_by: Literal["created_at", "updated_at", "title"] = Query(
         "updated_at", description="Поле сортировки"
@@ -56,6 +66,7 @@ async def list_my_documents(
     rows, total = await document_service.list_all_for_user(
         current_user.id,
         status=status,
+        outdated=outdated,
         search=search,
         sort_by=sort_by,
         sort_dir=sort_dir,

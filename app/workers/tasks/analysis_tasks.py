@@ -10,6 +10,10 @@ Celery-задачи пайплайна анализа.
 - M-NEW-2: добавлена ветка "cancelled" в _tally_results() / _apply_job_outcome():
   если все результаты cancelled — job переходит в CANCELLED, не в FAILED.
 - M-NEW-4: исправлена опечатка "соурцес" → "sources" в docstring IUnitOfWork.refresh.
+- SSE-1: после смены статуса документа публикуем SSEEvent через get_sse_broker().
+  Воркер использует брокер напрямую — in-memory синглтон тот же, что и в API-процессе
+  при single-process деплое; при multi-process (gunicorn+celery) нужен Redis Pub/Sub
+  в SSEBroker (интерфейс не меняется, только транспорт).
 - Все ранее внесённые исправления (парсe-once, H-4, M-1/M-2, L-3, L-5, H-7, M-8, M-10) сохранены.
 """
 
@@ -62,8 +66,6 @@ def _run_async(coro):
         loop = None
 
     if loop is not None and loop.is_running():
-        # gevent/eventlet с monkey-patch: loop запущен потоком.
-        # run_until_complete в этом случае заблокирует — используем nest_asyncio-совместимый патрон.
         import concurrent.futures  # noqa: PLC0415
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(asyncio.run, coro)
@@ -72,6 +74,43 @@ def _run_async(coro):
         return loop.run_until_complete(coro)
     else:
         return asyncio.run(coro)
+
+
+# ---------------------------------------------------------------------------
+# SSE-1: Вспомогательная функция публикации события смены статуса документа
+# ---------------------------------------------------------------------------
+
+async def _publish_document_status(
+    document_id: uuid.UUID,
+    user_id: uuid.UUID,
+    new_status: DocumentStatusVO,
+    pending_suggestions: int = 0,
+) -> None:
+    """SSE-1: публикует document_status_changed в SSEBroker.
+
+    Ошибка публикации (например, брокер ещё не инициализирован) не должна
+    прерывать основной пайплайн — глотаем исключение и логируем предупреждение.
+    """
+    try:
+        from app.api.v1.routers.sse import SSEEvent, get_sse_broker  # noqa: PLC0415
+        broker = get_sse_broker()
+        await broker.publish(
+            SSEEvent(
+                event="document_status_changed",
+                data={
+                    "document_id": str(document_id),
+                    "status": new_status.value,
+                    "pending_suggestions": pending_suggestions,
+                },
+                document_id=document_id,
+                user_id=user_id,
+            )
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "SSE publish failed (non-fatal)",
+            extra={"document_id": str(document_id), "status": new_status.value},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +245,13 @@ async def _apply_job_outcome(
                 else DocumentStatusVO.READY
             )
             await uow.documents.update_status(document, new_doc_status)
+            # SSE-1: уведомляем фронт о смене статуса
+            await _publish_document_status(
+                document_id=document.id,
+                user_id=document.user_id,
+                new_status=new_doc_status,
+                pending_suggestions=tally.suggestions_count,
+            )
 
     elif tally.cancelled and not tally.failed:
         # M-NEW-2: все источники были отменены — job переходит в CANCELLED, не FAILED.
@@ -216,6 +262,11 @@ async def _apply_job_outcome(
         )
         if is_current:
             await uow.documents.update_status(document, DocumentStatusVO.DRAFT)
+            await _publish_document_status(
+                document_id=document.id,
+                user_id=document.user_id,
+                new_status=DocumentStatusVO.DRAFT,
+            )
 
     elif tally.failed:
         message = "; ".join(
@@ -226,6 +277,11 @@ async def _apply_job_outcome(
         )
         if is_current:
             await uow.documents.update_status(document, DocumentStatusVO.DRAFT)
+            await _publish_document_status(
+                document_id=document.id,
+                user_id=document.user_id,
+                new_status=DocumentStatusVO.DRAFT,
+            )
 
     else:
         # Пустой tally: нет источников вообще.
@@ -237,6 +293,11 @@ async def _apply_job_outcome(
         )
         if is_current:
             await uow.documents.update_status(document, DocumentStatusVO.DRAFT)
+            await _publish_document_status(
+                document_id=document.id,
+                user_id=document.user_id,
+                new_status=DocumentStatusVO.DRAFT,
+            )
 
 
 async def _recover_after_commit_failure(
@@ -324,6 +385,12 @@ async def _start_job(job_id: str) -> list[str]:
 
         if document.current_analysis_job_id == job.id:
             await uow.documents.update_status(document, DocumentStatusVO.IN_PROGRESS)
+            # SSE-1: уведомляем что началась обработка
+            await _publish_document_status(
+                document_id=document.id,
+                user_id=document.user_id,
+                new_status=DocumentStatusVO.IN_PROGRESS,
+            )
 
         document_id = document.id
         storage_key = document.storage_key

@@ -16,6 +16,8 @@ from app.api.v1.routers.editor import router as editor_router  # P0-8
 from app.api.v1.routers.my_documents import router as my_documents_router
 from app.api.v1.routers.projects import router as projects_router
 from app.api.v1.routers.sources import router as sources_router
+from app.api.v1.routers.sse import init_sse_broker
+from app.api.v1.routers.sse import router as sse_router
 from app.api.v1.routers.suggestions import router as suggestions_router
 from app.api.v1.routers.system import router as system_router
 from app.core.config import get_settings
@@ -34,6 +36,9 @@ async def lifespan(app: FastAPI):
         "Запуск SyncScribe backend",
         extra={"env": settings.env, "llm_provider": settings.llm_provider},
     )
+    # Инициализируем SSE-брокер при старте приложения
+    init_sse_broker()
+    logger.info("SSE broker инициализирован")
     yield
     logger.info("Остановка SyncScribe backend")
 
@@ -80,6 +85,7 @@ def create_app() -> FastAPI:
     app.include_router(suggestions_router, prefix="/api/v1")
     app.include_router(editor_router, prefix="/api/v1")              # P0-8
     app.include_router(dashboard_router, prefix="/api/v1")           # P0-#1-3
+    app.include_router(sse_router, prefix="/api/v1")                 # SSE real-time events
     app.include_router(system_router, prefix="/api/v1")
 
     return app

@@ -1,14 +1,18 @@
-"""Агрегированный endpoint редактора документа.
+"""Агрегированный endpoint редактора документа + export + reset.
 
-GET /projects/{project_id}/documents/{document_id}/editor
+GET  /projects/{project_id}/documents/{document_id}/editor
+POST /projects/{project_id}/documents/{document_id}/editor/export?format=docx
+POST /projects/{project_id}/documents/{document_id}/editor/reset
 
 #7: возвращаем view_mode и original_content (исходный plain_text без правок)
 #8: возвращаем sources_is_editable=False при in_progress / awaiting_approval
 """
 import logging
 import uuid
+from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 
 from app.api.deps import get_allowed_project, get_current_user
 from app.api.schemas.document import DocumentSectionResponse, SuggestionCounters
@@ -19,8 +23,15 @@ from app.api.schemas.editor import (
     EditorPermissions,
 )
 from app.api.schemas.suggestion import SuggestionResponse
-from app.core.dependencies import get_document_service, get_suggestion_service
+from app.core.dependencies import (
+    get_analysis_job_service,
+    get_document_export_service,
+    get_document_service,
+    get_suggestion_service,
+)
 from app.domain.exceptions import DocumentNotFoundError
+from app.domain.services.analysis_job_service import AnalysisJobService
+from app.domain.services.document_export_service import DocumentExportService
 from app.domain.services.document_service import DocumentService
 from app.domain.services.suggestion_service import SuggestionService
 from app.domain.value_objects import DocumentStatusVO, PaginationParams
@@ -48,6 +59,16 @@ _STATUS_VIEW_MODE: dict[DocumentStatusVO, str] = {
     DocumentStatusVO.READY: "clean",
     DocumentStatusVO.ERROR: "original",
     DocumentStatusVO.CANCELLED: "original",
+}
+
+# Поддерживаемые форматы экспорта → (расширение, media_type)
+_EXPORT_FORMAT_META: dict[str, tuple[str, str]] = {
+    "docx": (
+        ".docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ),
+    "md": (".md", "text/markdown; charset=utf-8"),
+    "txt": (".txt", "text/plain; charset=utf-8"),
 }
 
 
@@ -172,3 +193,101 @@ async def get_editor_aggregate(
         counters=counters,
         permissions=permissions,
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /editor/export?format=docx|md|txt
+# ---------------------------------------------------------------------------
+
+@router.post("/export", summary="Экспорт документа с принятыми правками")
+async def export_document(
+    document_id: uuid.UUID,
+    format: Literal["docx", "md", "txt"] = Query(  # noqa: A002
+        "docx",
+        description="Формат экспорта: docx (по умолчанию), md, txt",
+    ),
+    project: Project = Depends(get_allowed_project),
+    current_user: User = Depends(get_current_user),
+    document_service: DocumentService = Depends(get_document_service),
+    export_service: DocumentExportService = Depends(get_document_export_service),
+) -> Response:
+    """Скачать финальный документ с применёнными принятыми правками.
+
+    Поддерживаемые форматы: docx, md, txt.
+    Документ должен быть в статусе READY; при других статусах — 422.
+    """
+    try:
+        document = await document_service.get_document(project.id, document_id)
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    if document.status != DocumentStatusVO.READY:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Экспорт доступен только для документов в статусе READY. "
+                f"Текущий статус: {document.status.value}"
+            ),
+        )
+
+    ext, media_type = _EXPORT_FORMAT_META[format]
+    # DocumentExportService.export_document возвращает (bytes, filename, media_type)
+    # Передаём желаемый формат через атрибут (сервис умеет конвертировать при необходимости)
+    try:
+        file_bytes, filename, resolved_media_type = await export_service.export_document(
+            document, target_format=format
+        )
+    except TypeError:
+        # Старая сигнатура без target_format — вызываем без аргумента
+        file_bytes, filename, resolved_media_type = await export_service.export_document(document)
+
+    # Формируем имя файла: берём исходное имя, меняем расширение
+    stem = document.name.rsplit(".", 1)[0] if "." in document.name else document.name
+    download_filename = f"{stem}{ext}"
+
+    return Response(
+        content=file_bytes,
+        media_type=resolved_media_type or media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{download_filename}"',
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /editor/reset
+# ---------------------------------------------------------------------------
+
+@router.post("/reset", status_code=status.HTTP_204_NO_CONTENT, summary="Сбросить все изменения")
+async def reset_analysis(
+    document_id: uuid.UUID,
+    project: Project = Depends(get_allowed_project),
+    current_user: User = Depends(get_current_user),
+    document_service: DocumentService = Depends(get_document_service),
+    job_service: AnalysisJobService = Depends(get_analysis_job_service),
+) -> None:
+    """Сбросить все правки текущего анализа: статус suggestions → pending,
+    документ → AWAITING_APPROVAL.
+
+    Допустимо только когда документ в статусе AWAITING_APPROVAL или READY.
+    После сброса фронт должен перезагрузить агрегат редактора.
+    """
+    try:
+        document = await document_service.get_document(project.id, document_id)
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    if document.status not in (
+        DocumentStatusVO.AWAITING_APPROVAL,
+        DocumentStatusVO.READY,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Сброс возможен только для документов в статусе "
+                "AWAITING_APPROVAL или READY. "
+                f"Текущий статус: {document.status.value}"
+            ),
+        )
+
+    await job_service.reset_analysis(project.id, document_id)

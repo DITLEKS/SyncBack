@@ -20,6 +20,7 @@
   - N-5 (ревью): check_document_is_ready() возвращает bool, а не ORM-объект.
   - N-2 (ревью): добавлен revoke_celery_task() — тонкий делегат к Celery.
   - UI-fix: bulk_create_jobs_for_project принимает опциональный document_ids фильтр.
+  - FEAT: reset_analysis() — сброс всех suggestions → pending, документ → AWAITING_APPROVAL.
 """
 from __future__ import annotations
 
@@ -34,7 +35,7 @@ from app.domain.exceptions import (
     InvalidDocumentStatusError,
 )
 from app.domain.interfaces.unit_of_work import IUnitOfWork
-from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO
+from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO, SuggestionStatusVO
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models.analysis_job import AnalysisJob
@@ -55,6 +56,12 @@ _CANCELLABLE_JOB_STATUSES = frozenset({
 # Статусы job, из которых допустим диспатч:
 _DISPATCHABLE_JOB_STATUSES = frozenset({
     AnalysisJobStatusVO.PENDING,
+})
+
+# Статусы документа, из которых разрешён сброс:
+_RESET_ALLOWED_STATUSES = frozenset({
+    DocumentStatusVO.AWAITING_APPROVAL,
+    DocumentStatusVO.READY,
 })
 
 
@@ -240,6 +247,45 @@ class AnalysisJobService:
     ) -> "AnalysisJob":
         async with self._uow:
             return await self._get_job(project_id, document_id, job_id)
+
+    async def reset_analysis(
+        self,
+        project_id: uuid.UUID,
+        document_id: uuid.UUID,
+    ) -> None:
+        """Сбросить все правки текущего job: suggestions → pending,
+        документ → AWAITING_APPROVAL.
+
+        Допустимо только из статусов AWAITING_APPROVAL и READY.
+        Если у документа нет current_analysis_job_id — сбрасывать нечего,
+        выбрасываем AnalysisJobNotFoundError.
+        """
+        async with self._uow:
+            document = await self._uow.documents.get_by_id(document_id)
+            if document is None or document.project_id != project_id:
+                raise DocumentNotFoundError(
+                    f"Документ {document_id} не найден в проекте {project_id}"
+                )
+            if document.status not in _RESET_ALLOWED_STATUSES:
+                raise InvalidDocumentStatusError(
+                    f"Сброс невозможен для документа в статусе {document.status.value}. "
+                    f"Допустимые статусы: "
+                    + ", ".join(s.value for s in _RESET_ALLOWED_STATUSES)
+                )
+            if document.current_analysis_job_id is None:
+                raise AnalysisJobNotFoundError(
+                    "У документа нет активного анализа для сброса"
+                )
+
+            # Сбрасываем все правки текущего job обратно в pending
+            await self._uow.suggestions.reset_to_pending_by_job(
+                document.current_analysis_job_id
+            )
+            # Документ возвращается в AWAITING_APPROVAL (правки снова требуют ревью)
+            await self._uow.documents.update_status(
+                document, DocumentStatusVO.AWAITING_APPROVAL
+            )
+            await self._uow.commit()
 
     async def bulk_create_jobs_for_project(
         self,
