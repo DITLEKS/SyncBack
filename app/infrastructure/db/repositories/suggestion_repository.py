@@ -32,7 +32,9 @@ class SuggestionRepository:
     async def get_by_id(self, suggestion_id: uuid.UUID) -> Suggestion | None:
         return await self._session.get(Suggestion, suggestion_id)
 
-    async def list_by_analysis_job(self, analysis_job_id: uuid.UUID, limit: int, offset: int) -> list[Suggestion]:
+    async def list_by_analysis_job(
+        self, analysis_job_id: uuid.UUID, limit: int, offset: int
+    ) -> list[Suggestion]:
         result = await self._session.execute(
             select(Suggestion)
             .where(Suggestion.analysis_job_id == analysis_job_id)
@@ -52,9 +54,9 @@ class SuggestionRepository:
         self, analysis_job_id: uuid.UUID, status: SuggestionStatus
     ) -> int:
         result = await self._session.execute(
-            select(func.count()).select_from(Suggestion).where(
-                Suggestion.analysis_job_id == analysis_job_id, Suggestion.status == status
-            )
+            select(func.count())
+            .select_from(Suggestion)
+            .where(Suggestion.analysis_job_id == analysis_job_id, Suggestion.status == status)
         )
         return result.scalar_one()
 
@@ -72,11 +74,15 @@ class SuggestionRepository:
         self, analysis_job_id: uuid.UUID, status: SuggestionStatus
     ) -> list[uuid.UUID]:
         result = await self._session.execute(
-            select(Suggestion.id).where(Suggestion.analysis_job_id == analysis_job_id, Suggestion.status == status)
+            select(Suggestion.id).where(
+                Suggestion.analysis_job_id == analysis_job_id, Suggestion.status == status
+            )
         )
         return list(result.scalars().all())
 
-    async def update_status(self, suggestion: Suggestion, status: SuggestionStatus, decided_by: uuid.UUID) -> Suggestion | None:
+    async def update_status(
+        self, suggestion: Suggestion, status: SuggestionStatus, decided_by: uuid.UUID
+    ) -> Suggestion | None:
         """
         Атомарный UPDATE ... WHERE status = 'pending' — защита от гонки при двойном
         accept/reject одной и той же правки параллельными запросами: если suggestion уже
@@ -98,7 +104,11 @@ class SuggestionRepository:
         return updated
 
     async def bulk_update_status(
-        self, suggestion_ids: list[uuid.UUID], status: SuggestionStatus, decided_by: uuid.UUID
+        self,
+        analysis_job_id: uuid.UUID,
+        suggestion_ids: list[uuid.UUID],
+        status: SuggestionStatus,
+        decided_by: uuid.UUID,
     ) -> list[Suggestion]:
         """
         Принимает только id и делает один атомарный UPDATE ... WHERE status = 'pending' —
@@ -109,7 +119,11 @@ class SuggestionRepository:
             return []
         stmt = (
             update(Suggestion)
-            .where(Suggestion.id.in_(suggestion_ids), Suggestion.status == SuggestionStatus.PENDING)
+            .where(
+                Suggestion.id.in_(suggestion_ids),
+                Suggestion.analysis_job_id == analysis_job_id,
+                Suggestion.status == SuggestionStatus.PENDING,
+            )
             .values(status=status, decided_by=decided_by, decided_at=datetime.now(UTC))
             .returning(Suggestion)
         )

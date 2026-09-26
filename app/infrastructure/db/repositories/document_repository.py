@@ -4,6 +4,7 @@
 ДОБАВЛЕНО (P0-2): increment_review_version — атомарный UPDATE review_version += 1,
 возвращает обновлённый Document. Используется в SuggestionService.atomic_review_save.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -27,9 +28,7 @@ class DocumentRepository:
         result = await self._session.get(Document, document_id)
         return result
 
-    async def list_by_project(
-        self, project_id: uuid.UUID, limit: int, offset: int
-    ) -> list[Document]:
+    async def list_by_project(self, project_id: uuid.UUID, limit: int, offset: int) -> list[Document]:
         stmt = (
             select(Document)
             .where(Document.project_id == project_id)
@@ -51,18 +50,14 @@ class DocumentRepository:
         await self._session.refresh(document)
         return document
 
-    async def update_status(
-        self, document: Document, new_status: DocumentStatus
-    ) -> Document:
+    async def update_status(self, document: Document, new_status: DocumentStatus) -> Document:
         document.status = new_status
         self._session.add(document)
         await self._session.flush()
         await self._session.refresh(document)
         return document
 
-    async def update_current_job(
-        self, document: Document, job_id: uuid.UUID | None
-    ) -> Document:
+    async def update_current_job(self, document: Document, job_id: uuid.UUID | None) -> Document:
         document.current_analysis_job_id = job_id
         self._session.add(document)
         await self._session.flush()
@@ -101,6 +96,19 @@ class DocumentRepository:
         stmt = stmt.order_by(Document.uploaded_at.desc()).limit(limit).offset(offset)
         result = await self._session.execute(stmt)
         return list(result.scalars().all()), total
+
+    async def compare_and_increment_review_version(
+        self, document_id: uuid.UUID, expected_version: int
+    ) -> Document | None:
+        """Atomically claim a review version using compare-and-swap."""
+        stmt = (
+            update(Document)
+            .where(Document.id == document_id, Document.review_version == expected_version)
+            .values(review_version=Document.review_version + 1)
+            .returning(Document)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
 
     async def increment_review_version(self, document: Document) -> Document:
         """P0-2: Атомарный UPDATE review_version += 1.
