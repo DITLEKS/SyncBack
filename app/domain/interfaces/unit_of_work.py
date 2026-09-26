@@ -16,8 +16,11 @@ Namespace-атрибуты (все объявлены здесь для type-che
   audit       — IAuditLogRepository
   projects    — IProjectRepository
   sources     — ISourceRepository
-  dashboard   — IDashboardRepository
-  users       — UserRepository (HIGH-A: добавлен в интерфейс для type-safety)
+  users       — UserRepository (HIGH-A: добавлен для type-safety)
+
+L-C: dashboard УБРАН из IUnitOfWork. DashboardRepository — read-model, не агрегат.
+  Инжектируется как IDashboardQueryService через FastAPI Depends(get_dashboard_query_service).
+  См. app/domain/interfaces/dashboard_query_service.py.
 """
 from __future__ import annotations
 
@@ -29,7 +32,6 @@ if TYPE_CHECKING:
     from app.domain.interfaces.repositories import (
         IAnalysisJobRepository,
         IAuditLogRepository,
-        IDashboardRepository,
         IDocumentRepository,
         IProjectRepository,
         ISourceRepository,
@@ -60,7 +62,6 @@ class IUnitOfWork(ABC):
     # Extended
     projects:    "IProjectRepository"
     sources:     "ISourceRepository"
-    dashboard:   "IDashboardRepository"
 
     # Auth (HIGH-A)
     users:       "UserRepository"
@@ -88,7 +89,7 @@ class IUnitOfWork(ABC):
 
     @abstractmethod
     async def refresh(self, obj: Any, attribute_names: list[str] | None = None) -> None:
-        """H-4: Обновить ORM-объект из БД через интерфейс (H-4).
+        """H-4: Обновить ORM-объект из БД через интерфейс.
 
         Используется в воркере вместо прямого обращения к uow._session.
         attribute_names: список ленивых атрибутов для загрузки (напр., ["sources"]).
