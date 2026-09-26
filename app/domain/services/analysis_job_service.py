@@ -12,6 +12,16 @@
     документа через uow.documents.update_status().
   - CRIT-NEW-1: IntegrityError перехватывается в репозитории и транслируется
     в AnalysisAlreadyRunningError — инфраструктурные исключения в domain недопустимы.
+
+ИСПРАВЛЕНИЯ:
+  - CRIT-1: bulk_create_jobs_for_project загружает только document.id (list[UUID]),
+    не ORM-объекты. Объекты из первого UoW были бы detached при повторном входе в uow.
+  - CRIT-2: _get_job бросает AnalysisJobNotFoundError при ненайденном job,
+    а не DocumentNotFoundError — правильная семантика для API 404.
+  - HIGH-1: mark_dispatched явно проверяет job.status == PENDING перед делегированием
+    в репозиторий; диспатч завершённой или обработанной задачи — логическая ошибка.
+  - M-1: find_job_by_idempotency_key возвращает job.id (UUID), не ORM-объект,
+    чтобы избежать DetachedInstanceError после выхода из async with self._uow.
 """
 from __future__ import annotations
 
@@ -21,6 +31,7 @@ from typing import TYPE_CHECKING
 from app.domain.exceptions import (
     AnalysisAlreadyRunningError,
     AnalysisJobNotCancellableError,
+    AnalysisJobNotFoundError,
     DocumentNotFoundError,
     InvalidDocumentStatusError,
 )
@@ -44,6 +55,11 @@ _CANCELLABLE_JOB_STATUSES = frozenset({
     AnalysisJobStatusVO.PROCESSING,
 })
 
+# Статусы job, из которых допустим диспатч:
+_DISPATCHABLE_JOB_STATUSES = frozenset({
+    AnalysisJobStatusVO.PENDING,
+})
+
 
 class AnalysisJobService:
     def __init__(self, uow: IUnitOfWork) -> None:
@@ -58,14 +74,22 @@ class AnalysisJobService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         idempotency_key: str,
-    ) -> "AnalysisJob | None":
+    ) -> uuid.UUID | None:
+        """Найти job по ключу идемпотентности.
+
+        M-1: возвращает job.id (UUID), а не ORM-объект — после выхода из
+        async with self._uow сессия закрыта и ORM-объект стал бы detached.
+        Вызывающий код должен перезагрузить job через get_job() если нужен
+        полный объект.
+        """
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
             if document is None or document.project_id != project_id:
                 return None
-            return await self._uow.jobs.get_by_idempotency_key(
+            job = await self._uow.jobs.get_by_idempotency_key(
                 document_id, idempotency_key
             )
+            return job.id if job is not None else None
 
     # ------------------------------------------------------------------
     # Document helpers
@@ -151,9 +175,18 @@ class AnalysisJobService:
     ) -> "AnalysisJob":
         """Отметить job как отправленный в Celery.
 
+        HIGH-1: явная проверка job.status == PENDING перед делегированием.
+        Диспатч завершённой/обработанной задачи — логическая ошибка и должен
+        быть отклонён на уровне сервиса, не репозитория.
+
         CRIT-A: репозиторий больше не принимает document. Сервис загружает
         document самостоятельно и применяет new_doc_status через uow.documents.update_status().
         """
+        if job.status not in _DISPATCHABLE_JOB_STATUSES:
+            raise InvalidDocumentStatusError(
+                f"Диспатч недопустим для задачи в статусе {job.status!r}. "
+                f"Допустимые статусы: {', '.join(s.value for s in _DISPATCHABLE_JOB_STATUSES)}"
+            )
         async with self._uow:
             document = await self._uow.documents.get_by_id(job.document_id)
             if document is None:
@@ -232,19 +265,27 @@ class AnalysisJobService:
     ) -> list[dict]:
         """Запустить анализ для всех документов проекта в статусе draft/awaiting_approval.
 
+        CRIT-1: загружаем только document.id (UUID), не ORM-объекты.
+        После выхода из первого async with self._uow сессия закрыта — любые
+        ORM-объекты стали бы detached и обращение к их атрибутам в цикле
+        вызвало бы DetachedInstanceError.
+
         Каждый документ — отдельный UoW, чтобы ошибка одного
         не откатывала остальных.
         """
         async with self._uow:
-            analyzable = await self._uow.documents.list_analyzable_for_project(
-                project_id
-            )
+            analyzable_ids: list[uuid.UUID] = [
+                doc.id
+                for doc in await self._uow.documents.list_analyzable_for_project(
+                    project_id
+                )
+            ]
 
         results: list[dict] = []
-        for document in analyzable:
+        for document_id in analyzable_ids:
             try:
-                job = await self.create_job(project_id, document.id)
-                results.append({"document_id": document.id, "job": job})
+                job = await self.create_job(project_id, document_id)
+                results.append({"document_id": document_id, "job": job})
             except (
                 DocumentNotFoundError,
                 InvalidDocumentStatusError,
@@ -252,7 +293,7 @@ class AnalysisJobService:
             ) as exc:
                 results.append(
                     {
-                        "document_id": document.id,
+                        "document_id": document_id,
                         "job": None,
                         "error": exc.__class__.__name__,
                     }
@@ -269,10 +310,15 @@ class AnalysisJobService:
         document_id: uuid.UUID,
         job_id: uuid.UUID,
     ) -> "AnalysisJob":
-        """Проверить принадлежность job → document → project."""
+        """Проверить принадлежность job → document → project.
+
+        CRIT-2: бросает AnalysisJobNotFoundError если job не найден или не
+        принадлежит document_id — не DocumentNotFoundError, который семантически
+        означает «документ не найден» и маппится в другой HTTP-ответ.
+        """
         job = await self._uow.jobs.get_by_id(job_id)
         if job is None or job.document_id != document_id:
-            raise DocumentNotFoundError(
+            raise AnalysisJobNotFoundError(
                 f"Задача анализа {job_id} не найдена для документа {document_id}"
             )
         document = await self._uow.documents.get_by_id(document_id)
