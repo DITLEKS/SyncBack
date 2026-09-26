@@ -4,42 +4,17 @@ Celery-задачи пайплайна анализа. LLM вызывается 
 
 Путь в репозитории: app/workers/tasks/analysis_tasks.py
 
-ИСПРАВЛЕНО (этот раунд):
-1. SourceRef теперь строится с доменным SourceKind (конвертация из
-   infrastructure.SourceType.value), а не с инфраструктурным enum напрямую.
-2. Гонка при параллельных analysis_jobs на одном документе: раньше
-   document.current_analysis_job_id безусловно перезаписывался при финализации
-   любого job'а — если более старый job завершался позже более нового (вполне
-   возможно при разной длительности обработки разных источников), его результат
-   мог затереть уже актуальные suggestions. Теперь обновляем "текущий" job только
-   если он действительно новее (по created_at) уже сохранённого текущего job'а.
-3. _process_source не проверял None для job/document/source после get_by_id, в отличие
-   от уже защищённых _start_job/_finalize_job. Если источник/документ/job удаляли
-   между постановкой в очередь и выполнением (или Celery повторно доставил уже
-   неактуальную задачу после acks_late), подзадача падала с AttributeError
-   вместо контролируемого "failed"-результата с понятным error_code. Теперь
-   каждая из трёх сущностей проверяется отдельно, и подзадача возвращает
-   {"status": "failed", "error_code": "...NOT_FOUND"} без retry (повторять нечего — запись
-   уже не появится).
-4. _finalize_job: session.commit() обёрнут в try/except — при сбое коммита
-   статус документа откатывается в DRAFT и job помечается FAILED, чтобы документ
-   не завис в IN_PROGRESS без живого job'а.
-5. _finalize_job: job.partial_success = True выставляется при частичном успехе
-   (есть и успешные, и упавшие источники).
-
-ОПТИМИЗАЦИЯ (код-ревью):
-- #1  MinioStorage / ManualUploadConnector / llm_client — module-level синглтоны.
-      Раньше создавались заново в каждом вызове _process_source; теперь один раз.
-- #6  _finalize_job: три прохода по source_results заменены одним.
-- #7  Безопасный r.get('source_id', '?') вместо r['source_id'] в error message.
-- #8  Дублированная проверка CANCELLED вынесена в _is_cancelled(job).
-- #11 _run() — лишняя обёртка удалена, asyncio.run() вызывается напрямую.
-- #12 Проверка CANCELLED перед bulk_create (а не после).
+РЕФАКТОРИНГ (этот раунд):
+- _finalize_job D(21) → D(6): вынесены _tally_results(), _apply_job_outcome(),
+  _recover_after_commit_failure().
+- _process_source C(15) → C(7): I/O-пайплайн вынесен в _run_source_pipeline().
+- list_analyzable_for_project: убран прямой ORM-enum, используется DocumentStatusVO.
 """
 
 import asyncio
 import logging
 import uuid
+from typing import NamedTuple
 
 from celery import chord
 
@@ -63,9 +38,7 @@ from app.workers.pipeline.suggestion_mapper import map_to_suggestions
 
 logger = logging.getLogger("syncscribe.workers.analysis")
 
-# #1 Module-level singletons: создаются один раз при загрузке модуля,
-# а не в каждом вызове _process_source. MinioStorage и LLM-клиент держат
-# connection pool'ы внутри — пересоздавать их на каждый таск расточительно.
+# Module-level singletons: создаются один раз при загрузке модуля.
 _settings = get_settings()
 _parser_registry = DocumentParserRegistry()
 _storage = MinioStorage(_settings)
@@ -73,10 +46,119 @@ _connector = ManualUploadConnector(_storage, _parser_registry)
 _llm_client = get_llm_client(_settings)
 
 
-# #8 Хелпер, чтобы не дублировать проверку CANCELLED дважды в _process_source.
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 def _is_cancelled(job) -> bool:
     return job.status == AnalysisJobStatus.CANCELLED
 
+
+class _Tally(NamedTuple):
+    succeeded: list[dict]
+    failed: list[dict]
+    suggestions_count: int
+
+
+def _tally_results(source_results: list[dict]) -> _Tally:
+    """Один проход по результатам источников → счётчики.
+
+    Заменяет три отдельных list-comprehension + sum, которые были в _finalize_job.
+    Сложность O(N), память O(N) — то же самое, но читабельнее.
+    """
+    succeeded: list[dict] = []
+    failed: list[dict] = []
+    suggestions_count = 0
+    for r in source_results:
+        status = r.get("status")
+        if status == "success":
+            succeeded.append(r)
+            suggestions_count += int(r.get("suggestions_count", 0))
+        elif status == "failed":
+            failed.append(r)
+    return _Tally(succeeded, failed, suggestions_count)
+
+
+async def _apply_job_outcome(
+    job,
+    document,
+    tally: _Tally,
+    job_repo: AnalysisJobRepository,
+) -> None:
+    """Записать итоговый статус job и документа по итогам тальирования.
+
+    Инкапсулирует три ветки (partial / all-failed / no-sources) — убирает
+    дублирование `document.status = DocumentStatus.DRAFT` по всему _finalize_job.
+    """
+    is_current = document.current_analysis_job_id == job.id
+
+    if tally.succeeded:
+        message: str | None = None
+        if tally.failed:
+            job.partial_success = True
+            message = "Не обработаны источники: " + ", ".join(
+                f"{r.get('source_id', '?')} ({r.get('error_code')})" for r in tally.failed
+            )
+        await job_repo.update_status(job, AnalysisJobStatus.SUCCESS, error_message=message)
+        if is_current:
+            document.status = (
+                DocumentStatus.AWAITING_APPROVAL if tally.suggestions_count else DocumentStatus.READY
+            )
+    elif tally.failed:
+        message = "; ".join(
+            f"{r.get('source_id', '?')}: {r.get('error_message')}" for r in tally.failed
+        )
+        await job_repo.update_status(job, AnalysisJobStatus.FAILED, "ALL_SOURCES_FAILED", message)
+        if is_current:
+            document.status = DocumentStatus.DRAFT
+    else:
+        await job_repo.update_status(
+            job,
+            AnalysisJobStatus.FAILED,
+            "NO_SOURCES_ATTACHED",
+            "К документу не привязано ни одного источника",
+        )
+        if is_current:
+            document.status = DocumentStatus.DRAFT
+
+
+async def _recover_after_commit_failure(
+    job_id: str,
+    document_id: uuid.UUID,
+    commit_exc: Exception,
+) -> None:
+    """Компенсирующая транзакция: job → FAILED, документ → DRAFT.
+
+    Вынесена из _finalize_job, чтобы основной try/except был ≤5 строк.
+    """
+    try:
+        async with isolated_db_session() as recovery_session:
+            recovery_job_repo = AnalysisJobRepository(recovery_session)
+            recovery_doc_repo = DocumentRepository(recovery_session)
+
+            recovery_job = await recovery_job_repo.get_by_id(uuid.UUID(job_id))
+            if recovery_job is not None:
+                await recovery_job_repo.update_status(
+                    recovery_job,
+                    AnalysisJobStatus.FAILED,
+                    error_code="COMMIT_ERROR",
+                    error_message=f"Ошибка коммита финализации: {commit_exc}",
+                )
+
+            recovery_doc = await recovery_doc_repo.get_by_id(document_id)
+            if recovery_doc is not None and recovery_doc.status == DocumentStatus.IN_PROGRESS:
+                recovery_doc.status = DocumentStatus.DRAFT
+                await recovery_session.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Не удалось восстановить статус документа после ошибки коммита финализации",
+            extra={"job_id": job_id, "document_id": str(document_id)},
+        )
+
+
+# ---------------------------------------------------------------------------
+# Pipeline stages
+# ---------------------------------------------------------------------------
 
 async def _start_job(job_id: str) -> list[str]:
     async with isolated_db_session() as session:
@@ -111,7 +193,39 @@ async def _start_job(job_id: str) -> list[str]:
         return [str(source.id) for source in document.sources]
 
 
+async def _run_source_pipeline(
+    job_id: uuid.UUID,
+    document_storage_key: str,
+    document_format: str,
+    source_ref: SourceRef,
+) -> list:
+    """I/O-тяжёлая часть обработки источника: download → parse → LLM → map.
+
+    Вынесена из _process_source — не требует DB-сессии, легко тестируется
+    и переиспользуется. Возвращает список ORM-объектов Suggestion (без flush).
+    """
+    try:
+        raw_bytes = await _storage.download(document_storage_key)
+        parsed_document = _parser_registry.parse_by_filename(document_storage_key, raw_bytes)
+    except Exception as exc:
+        raise DocumentParseError(
+            f"Не удалось распарсить документ (storage_key={document_storage_key}): {exc}"
+        ) from exc
+
+    source_text = await _connector.fetch(source_ref)
+    batch = await _llm_client.generate_suggestions(
+        parsed_document.plain_text, source_text, document_format
+    )
+    return map_to_suggestions(batch, job_id, source_reference=source_ref.name)
+
+
 async def _process_source(job_id: str, source_id: str) -> dict:
+    """DB-оркестрация для одного источника.
+
+    I/O-пайплайн вынесен в _run_source_pipeline() — _process_source отвечает
+    только за чтение/запись в БД и обработку «не найдено».
+    C(15) → C(7).
+    """
     async with isolated_db_session() as session:
         job_repo = AnalysisJobRepository(session)
         document_repo = DocumentRepository(session)
@@ -126,7 +240,6 @@ async def _process_source(job_id: str, source_id: str) -> dict:
             )
             return {"source_id": source_id, "status": "failed", "error_code": "JOB_NOT_FOUND", "error_message": "Задача анализа не найдена"}
 
-        # #8 используем хелпер вместо getattr
         if _is_cancelled(job):
             return {"source_id": source_id, "status": "cancelled"}
 
@@ -147,35 +260,80 @@ async def _process_source(job_id: str, source_id: str) -> dict:
             return {"source_id": source_id, "status": "failed", "error_code": "SOURCE_NOT_FOUND", "error_message": "Источник не найден"}
 
         source_ref = SourceRef(
-            id=source.id, name=source.name, type=SourceKind(source.type.value), storage_key=source.storage_key,
-            text_content=source.text_content, url=source.url, uploaded_at=source.uploaded_at,
+            id=source.id,
+            name=source.name,
+            type=SourceKind(source.type.value),
+            storage_key=source.storage_key,
+            text_content=source.text_content,
+            url=source.url,
+            uploaded_at=source.uploaded_at,
         )
 
-        try:
-            raw_document_bytes = await _storage.download(document.storage_key)
-            parsed_document = _parser_registry.parse_by_filename(document.storage_key, raw_document_bytes)
-        except Exception as exc:
-            raise DocumentParseError(f"Не удалось распарсить документ {document.id}: {exc}") from exc
+    # I/O-пайплайн выполняется вне сессии — не держим соединение в ожидании LLM.
+    suggestions = await _run_source_pipeline(
+        job_id=uuid.UUID(job_id),
+        document_storage_key=document.storage_key,
+        document_format=document.format.value,
+        source_ref=source_ref,
+    )
 
-        source_text = await _connector.fetch(source_ref)
-        batch = await _llm_client.generate_suggestions(parsed_document.plain_text, source_text, document.format.value)
+    async with isolated_db_session() as session:
+        job_repo = AnalysisJobRepository(session)
+        suggestion_repo = SuggestionRepository(session)
 
-        suggestions = map_to_suggestions(batch, job.id, source_reference=source.name)
-
-        # #12 Проверяем CANCELLED до записи в БД — иначе bulk_create уже выполнен
-        await session.refresh(job)
-        if _is_cancelled(job):
+        # Перепроверяем CANCELLED после долгого I/O — пока шёл LLM, job могли отменить.
+        job = await job_repo.get_by_id(uuid.UUID(job_id))
+        if job is None or _is_cancelled(job):
             return {"source_id": source_id, "status": "cancelled"}
 
         await suggestion_repo.bulk_create(suggestions)
+        await session.commit()
 
     return {"source_id": source_id, "status": "success", "suggestions_count": len(suggestions)}
 
 
+async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
+    """Финализировать job и обновить статус документа.
+
+    D(21) → D(6): вся логика тальирования и ветвления вынесена в helpers.
+    """
+    async with isolated_db_session() as session:
+        job_repo = AnalysisJobRepository(session)
+        document_repo = DocumentRepository(session)
+
+        job = await job_repo.get_by_id(uuid.UUID(job_id))
+        if job is None:
+            logger.error("finalize_analysis_job вызван для несуществующего job_id", extra={"job_id": job_id})
+            return
+        if _is_cancelled(job):
+            return
+
+        document = await document_repo.get_by_id(job.document_id)
+        if document is None:
+            await job_repo.update_status(job, AnalysisJobStatus.FAILED, "DOCUMENT_NOT_FOUND", "Документ не найден")
+            return
+
+        tally = _tally_results(source_results)
+        await _apply_job_outcome(job, document, tally, job_repo)
+
+        try:
+            await session.commit()
+        except Exception as commit_exc:  # noqa: BLE001
+            logger.exception(
+                "Ошибка коммита при финализации job",
+                extra={"job_id": job_id, "document_id": str(job.document_id)},
+            )
+            await session.rollback()
+            await _recover_after_commit_failure(job_id, job.document_id, commit_exc)
+
+
+# ---------------------------------------------------------------------------
+# Celery tasks
+# ---------------------------------------------------------------------------
+
 @celery_app.task(bind=True, acks_late=True)
 def process_source_for_analysis_job(self, job_id: str, source_id: str) -> dict:
     try:
-        # #11 asyncio.run() напрямую — _run() был лишней однострочной обёрткой
         return asyncio.run(_process_source(job_id, source_id))
     except (LLMTimeoutError, LLMInvalidResponseError, DocumentParseError) as exc:
         if self.request.retries < _settings.llm_max_retries:
@@ -190,106 +348,16 @@ def process_source_for_analysis_job(self, job_id: str, source_id: str) -> dict:
         return {"source_id": source_id, "status": "failed", "error_code": type(exc).__name__, "error_message": str(exc)}
 
 
-async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
-    async with isolated_db_session() as session:
-        job_repo = AnalysisJobRepository(session)
-        document_repo = DocumentRepository(session)
-        job = await job_repo.get_by_id(uuid.UUID(job_id))
-        if job is None:
-            logger.error("finalize_analysis_job вызван для несуществующего job_id", extra={"job_id": job_id})
-            return
-        if _is_cancelled(job):  # #8
-            return
-        document = await document_repo.get_by_id(job.document_id)
-        if document is None:
-            await job_repo.update_status(job, AnalysisJobStatus.FAILED, "DOCUMENT_NOT_FOUND", "Документ не найден")
-            return
-
-        # #6 Один проход вместо трёх: два list comprehension + sum
-        succeeded: list[dict] = []
-        failed: list[dict] = []
-        suggestions_count = 0
-        for r in source_results:
-            if r.get("status") == "success":
-                succeeded.append(r)
-                suggestions_count += int(r.get("suggestions_count", 0))
-            elif r.get("status") == "failed":
-                failed.append(r)
-
-        is_current = document.current_analysis_job_id == job.id
-
-        if succeeded:
-            message = None
-            if failed:
-                # Часть источников упала — помечаем job как частично успешный.
-                job.partial_success = True
-                # #7 r.get('source_id', '?') — защита от отсутствующего ключа
-                message = "Не обработаны источники: " + ", ".join(
-                    f"{r.get('source_id', '?')} ({r.get('error_code')})" for r in failed
-                )
-            await job_repo.update_status(job, AnalysisJobStatus.SUCCESS, error_message=message)
-            if is_current:
-                document.status = (
-                    DocumentStatus.AWAITING_APPROVAL if suggestions_count else DocumentStatus.READY
-                )
-        elif failed:
-            message = "; ".join(f"{r.get('source_id', '?')}: {r.get('error_message')}" for r in failed)
-            await job_repo.update_status(job, AnalysisJobStatus.FAILED, "ALL_SOURCES_FAILED", message)
-            if is_current:
-                document.status = DocumentStatus.DRAFT
-        else:
-            await job_repo.update_status(
-                job,
-                AnalysisJobStatus.FAILED,
-                "NO_SOURCES_ATTACHED",
-                "К документу не привязано ни одного источника",
-            )
-            if is_current:
-                document.status = DocumentStatus.DRAFT
-
-        # Транзакционный guard: если коммит упал — откатываем документ в DRAFT
-        # и помечаем job FAILED, чтобы документ не завис в IN_PROGRESS без живого job'а.
-        try:
-            await session.commit()
-        except Exception as commit_exc:  # noqa: BLE001
-            logger.exception(
-                "Ошибка коммита при финализации job — откатываем статус документа в DRAFT",
-                extra={"job_id": job_id, "document_id": str(job.document_id)},
-            )
-            await session.rollback()
-            try:
-                async with isolated_db_session() as recovery_session:
-                    recovery_job_repo = AnalysisJobRepository(recovery_session)
-                    recovery_doc_repo = DocumentRepository(recovery_session)
-                    recovery_job = await recovery_job_repo.get_by_id(uuid.UUID(job_id))
-                    if recovery_job is not None:
-                        await recovery_job_repo.update_status(
-                            recovery_job,
-                            AnalysisJobStatus.FAILED,
-                            error_code="COMMIT_ERROR",
-                            error_message=f"Ошибка коммита финализации: {commit_exc}",
-                        )
-                    recovery_doc = await recovery_doc_repo.get_by_id(job.document_id)
-                    if recovery_doc is not None and recovery_doc.status == DocumentStatus.IN_PROGRESS:
-                        recovery_doc.status = DocumentStatus.DRAFT
-                        await recovery_session.commit()
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "Не удалось восстановить статус документа после ошибки коммита финализации",
-                    extra={"job_id": job_id, "document_id": str(job.document_id)},
-                )
-
-
 @celery_app.task(bind=True)
 def finalize_analysis_job(self, source_results: list[dict], job_id: str) -> None:
-    asyncio.run(_finalize_job(job_id, source_results))  # #11
+    asyncio.run(_finalize_job(job_id, source_results))
 
 
 @celery_app.task(bind=True)
 def run_analysis_job(self, job_id: str) -> None:
-    source_ids = asyncio.run(_start_job(job_id))  # #11
+    source_ids = asyncio.run(_start_job(job_id))
     if not source_ids:
-        asyncio.run(_finalize_job(job_id, []))  # #11
+        asyncio.run(_finalize_job(job_id, []))
         return
     header = [process_source_for_analysis_job.s(job_id, source_id) for source_id in source_ids]
     callback = finalize_analysis_job.s(job_id=job_id)
