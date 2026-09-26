@@ -23,12 +23,19 @@ from app.domain.exceptions import (
 )
 from app.domain.services.audit_log_service import AuditLogService
 from app.domain.services.suggestion_service import SuggestionService
-from app.domain.value_objects import AuditActionVO, PaginationParams, ReviewDecisions, SuggestionDecision
+from app.domain.value_objects import (
+    AuditActionVO,
+    PaginationParams,
+    ReviewDecisions,
+    SuggestionStatusVO,
+)
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.user import User
 
 logger = logging.getLogger("syncscribe.api.suggestions")
-_suggestion_list_adapter: TypeAdapter[list[SuggestionResponse]] = TypeAdapter(list[SuggestionResponse])
+_suggestion_list_adapter: TypeAdapter[list[SuggestionResponse]] = TypeAdapter(
+    list[SuggestionResponse]
+)
 
 router = APIRouter(
     prefix="/projects/{project_id}/documents/{document_id}/suggestions",
@@ -73,7 +80,10 @@ def _parse_if_match(if_match: str | None) -> int | None:
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Заголовок If-Match должен содержать целочисленный review_version, получено: {if_match!r}",
+            detail=(
+                f"Заголовок If-Match должен содержать целочисленный "
+                f"review_version, получено: {if_match!r}"
+            ),
         ) from None
 
 
@@ -87,10 +97,14 @@ async def _decide_suggestion(
     audit_log_service: AuditLogService,
 ) -> SuggestionResponse:
     service_method = (
-        suggestion_service.accept_suggestion if action == "accept" else suggestion_service.reject_suggestion
+        suggestion_service.accept_suggestion
+        if action == "accept"
+        else suggestion_service.reject_suggestion
     )
     try:
-        suggestion = await service_method(project.id, document_id, suggestion_id, current_user.id)
+        suggestion = await service_method(
+            project.id, document_id, suggestion_id, current_user.id
+        )
     except (DocumentNotFoundError, SuggestionNotFoundError) as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except (InvalidDocumentStatusError, SuggestionAlreadyDecidedError) as exc:
@@ -136,32 +150,43 @@ async def review_save(
 ) -> ReviewSaveResponse:
     client_version = _parse_if_match(if_match)
 
-    # Строим VO-список и audit-список за один проход
-    decision_vos: list[SuggestionDecision] = []
-    audit_decisions: list[tuple[uuid.UUID, AuditActionVO]] = []
+    # Разбиваем решения на два множества за один проход.
+    # O(1) lookup при построении audit_decisions вместо повторного итерирования.
+    accepted_ids: list[uuid.UUID] = []
+    rejected_ids: list[uuid.UUID] = []
+    accepted_set: set[uuid.UUID] = set()
+
     for d in payload.decisions:
-        accepted = d.decision == "accepted"
-        decision_vos.append(
-            SuggestionDecision(
-                suggestion_id=d.suggestion_id,
-                accepted=accepted,
-            )
-        )
-        audit_decisions.append(
-            (d.suggestion_id, AuditActionVO.ACCEPT if accepted else AuditActionVO.REJECT)
-        )
+        if d.decision == "accepted":
+            accepted_ids.append(d.suggestion_id)
+            accepted_set.add(d.suggestion_id)
+        else:
+            rejected_ids.append(d.suggestion_id)
 
     review_decisions = ReviewDecisions(
         document_id=document_id,
-        decisions=decision_vos,
+        accepted_ids=tuple(accepted_ids),
+        rejected_ids=tuple(rejected_ids),
+        decided_by=current_user.id,
     )
+
+    # Audit-список строится в O(N) без повторного обхода
+    audit_decisions: list[tuple[uuid.UUID, AuditActionVO]] = [
+        (
+            sid,
+            AuditActionVO.ACCEPT if sid in accepted_set else AuditActionVO.REJECT,
+        )
+        for sid in (*accepted_ids, *rejected_ids)
+    ]
 
     try:
         result = await suggestion_service.atomic_review_save(
             project_id=project.id,
             document_id=document_id,
             user_id=current_user.id,
-            review_version=(client_version if client_version is not None else payload.review_version),
+            review_version=(
+                client_version if client_version is not None else payload.review_version
+            ),
             decisions=review_decisions,
             finalize=payload.finalize,
         )
@@ -169,7 +194,9 @@ async def review_save(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except OptimisticLockError as exc:
         conflict_status = (
-            status.HTTP_412_PRECONDITION_FAILED if client_version is not None else status.HTTP_409_CONFLICT
+            status.HTTP_412_PRECONDITION_FAILED
+            if client_version is not None
+            else status.HTTP_409_CONFLICT
         )
         raise HTTPException(status_code=conflict_status, detail=str(exc)) from exc
     except SuggestionAlreadyDecidedError as exc:
@@ -202,7 +229,13 @@ async def accept_suggestion(
     audit_log_service: AuditLogService = Depends(get_audit_log_service),
 ) -> SuggestionResponse:
     return await _decide_suggestion(
-        "accept", document_id, suggestion_id, project, current_user, suggestion_service, audit_log_service
+        "accept",
+        document_id,
+        suggestion_id,
+        project,
+        current_user,
+        suggestion_service,
+        audit_log_service,
     )
 
 
@@ -216,7 +249,13 @@ async def reject_suggestion(
     audit_log_service: AuditLogService = Depends(get_audit_log_service),
 ) -> SuggestionResponse:
     return await _decide_suggestion(
-        "reject", document_id, suggestion_id, project, current_user, suggestion_service, audit_log_service
+        "reject",
+        document_id,
+        suggestion_id,
+        project,
+        current_user,
+        suggestion_service,
+        audit_log_service,
     )
 
 
@@ -250,6 +289,9 @@ async def bulk_accept_suggestions(
 async def finalize_review(
     document_id: uuid.UUID,
     project: Project = Depends(get_allowed_project),
+    # FIX: finalize изменяет статус документа — требует аутентифицированного пользователя.
+    # До исправления эндпоинт был открыт без авторизации.
+    current_user: User = Depends(get_current_user),  # noqa: ARG001
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
 ) -> DocumentResponse:
     try:
