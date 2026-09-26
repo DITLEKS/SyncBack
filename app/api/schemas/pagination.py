@@ -1,14 +1,15 @@
 """
-Общая схема постраничного ответа для list-эндпоинтов.
+Общие схемы постраничных ответов для list-эндпоинтов.
 
-ИСПРАВЛЕНО: раньше GET /projects, /documents, /sources, /suggestions возвращали весь
-результат целиком без LIMIT/OFFSET. По CustDev-данным клиенты держат 300+
-документов на продукт — без потолка объём ответа и память на сериализацию растут
-линейно без ограничения при росте данных. Фронтенда ещё нет — это безопасный момент
-изменить форму ответа этих endpoint'ов с "плоского списка" на объект с метаданными.
+Page[T]       — классическая OFFSET-пагинация (limit/offset/total).
+CursorPage[T] — cursor-based (keyset) пагинация (after_id → next_cursor).
+                Не содержит total — keyset COUNT(*) дорог и не нужен клиенту
+                при бесконечной прокрутке. Клиент знает, что достиг конца,
+                когда has_more=False.
 """
 
 from typing import Generic, TypeVar
+from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -20,3 +21,16 @@ class Page(BaseModel, Generic[T]):
     total: int
     limit: int
     offset: int
+
+
+class CursorPage(BaseModel, Generic[T]):
+    """Cursor-based (keyset) постраничный ответ.
+
+    next_cursor — UUID последнего элемента страницы; передаётся как ?after=<uuid>
+                  в следующем запросе. None если страница пустая или последняя.
+    has_more    — True если за этой страницей есть ещё элементы.
+    """
+
+    items: list[T]
+    next_cursor: UUID | None
+    has_more: bool

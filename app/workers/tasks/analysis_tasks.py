@@ -4,37 +4,32 @@ Celery-задачи пайплайна анализа. LLM вызывается 
 
 Путь в репозитории: app/workers/tasks/analysis_tasks.py
 
-ИСПРАВЛЕНО (этот раунд):
-1. SourceRef теперь строится с доменным SourceKind (конвертация из
-   infrastructure.SourceType.value), а не с инфраструктурным enum напрямую.
-2. Гонка при параллельных analysis_jobs на одном документе: раньше
-   document.current_analysis_job_id безусловно перезаписывался при финализации
-   любого job'а — если более старый job завершался позже более нового (вполне
-   возможно при разной длительности обработки разных источников), его результат
-   мог затереть уже актуальные suggestions. Теперь обновляем "текущий" job только
-   если он действительно новее (по created_at) уже сохранённого текущего job'а.
-3. _process_source не проверял None для job/document/source после get_by_id, в отличие
-   от уже защищённых _start_job/_finalize_job. Если источник/документ/job удаляли
-   между постановкой в очередь и выполнением (или Celery повторно доставил уже
-   неактуальную задачу после acks_late), подзадача падала с AttributeError
-   вместо контролируемого "failed"-результата с понятным error_code. Теперь
-   каждая из трёх сущностей проверяется отдельно, и подзадача возвращает
-   {"status": "failed", "error_code": "...NOT_FOUND"} без retry (повторять нечего — запись
-   уже не появится).
-4. _finalize_job: session.commit() обёрнут в try/except — при сбое коммита
-   статус документа откатывается в DRAFT и job помечается FAILED, чтобы документ
-   не завис в IN_PROGRESS без живого job'а.
-5. _finalize_job: job.partial_success = True выставляется при частичном успехе
-   (есть и успешные, и упавшие источники).
+ИСПРАВЛЕНО (предыдущие раунды):
+1. SourceRef теперь строится с доменным SourceKind.
+2. Гонка при параллельных analysis_jobs: обновляем current_analysis_job_id
+   только если job новее уже сохранённого.
+3. None-проверки job/document/source в _process_source.
+4. _finalize_job: session.commit() в try/except с recovery-сессией.
+5. _finalize_job: job.partial_success = True при частичном успехе.
+6. _finalize_job: один проход по source_results.
+7. Безопасный r.get('source_id', '?').
+8. _is_cancelled() хелпер.
+11. asyncio.run() напрямую без лишней _run() обёртки.
+12. Проверка CANCELLED перед bulk_create.
 
-ОПТИМИЗАЦИЯ (код-ревью):
-- #1  MinioStorage / ManualUploadConnector / llm_client — module-level синглтоны.
-      Раньше создавались заново в каждом вызове _process_source; теперь один раз.
-- #6  _finalize_job: три прохода по source_results заменены одним.
-- #7  Безопасный r.get('source_id', '?') вместо r['source_id'] в error message.
-- #8  Дублированная проверка CANCELLED вынесена в _is_cancelled(job).
-- #11 _run() — лишняя обёртка удалена, asyncio.run() вызывается напрямую.
-- #12 Проверка CANCELLED перед bulk_create (а не после).
+PERF-PARSE (этот раунд): parse-once document artifact.
+Проблема: _process_source скачивал и парсил документ заново для каждого
+источника — O(S) обращений к MinIO + O(S) парсингов одного файла.
+
+Решение:
+- _start_job: после получения source_ids скачивает документ один раз,
+  парсит, сохраняет plain_text в Redis с ключом doc_artifact:{job_id}
+  и TTL = DOC_ARTIFACT_TTL_SECONDS (1800 сек).
+- _load_doc_plain_text(job_id, document): читает plain_text из Redis;
+  при промахе кеша (истёк TTL, воркер перезапустился) делает
+  download+parse напрямую — graceful degradation, не ломает поведение.
+- _process_source: вызывает _load_doc_plain_text вместо прямого download.
+- _finalize_job: удаляет ключ из Redis после финализации (cleanup).
 """
 
 import asyncio
@@ -63,20 +58,66 @@ from app.workers.pipeline.suggestion_mapper import map_to_suggestions
 
 logger = logging.getLogger("syncscribe.workers.analysis")
 
-# #1 Module-level singletons: создаются один раз при загрузке модуля,
-# а не в каждом вызове _process_source. MinioStorage и LLM-клиент держат
-# connection pool'ы внутри — пересоздавать их на каждый таск расточительно.
+# Module-level singletons — создаются один раз при загрузке модуля.
 _settings = get_settings()
 _parser_registry = DocumentParserRegistry()
 _storage = MinioStorage(_settings)
 _connector = ManualUploadConnector(_storage, _parser_registry)
 _llm_client = get_llm_client(_settings)
 
+# PERF-PARSE: константы для Redis-артефакта parsed document.
+DOC_ARTIFACT_KEY_PREFIX = "doc_artifact"
+DOC_ARTIFACT_TTL_SECONDS = 1800  # 30 минут — достаточно для любого chord'а
 
-# #8 Хелпер, чтобы не дублировать проверку CANCELLED дважды в _process_source.
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 def _is_cancelled(job) -> bool:
+    """Проверка статуса CANCELLED — хелпер чтобы не дублировать условие."""
     return job.status == AnalysisJobStatus.CANCELLED
 
+
+def _doc_artifact_key(job_id: str) -> str:
+    """Redis-ключ для plain_text артефакта документа."""
+    return f"{DOC_ARTIFACT_KEY_PREFIX}:{job_id}"
+
+
+async def _load_doc_plain_text(job_id: str, document) -> str:
+    """PERF-PARSE: возвращает plain_text документа.
+
+    Сначала пробует Redis-кеш (заполняется в _start_job).
+    При промахе — fallback на прямой download+parse из MinIO.
+    Graceful degradation: если Redis недоступен, поведение деградирует
+    к старому пути без ошибки.
+    """
+    redis_key = _doc_artifact_key(job_id)
+    try:
+        redis = get_sync_redis_client()
+        cached = redis.get(redis_key)
+        if cached is not None:
+            return cached.decode("utf-8") if isinstance(cached, bytes) else cached
+    except Exception:
+        logger.warning(
+            "Redis недоступен при чтении doc_artifact — fallback на MinIO",
+            extra={"job_id": job_id, "document_id": str(document.id)},
+        )
+
+    # Fallback: download + parse напрямую.
+    try:
+        raw_bytes = await _storage.download(document.storage_key)
+        parsed = _parser_registry.parse_by_filename(document.storage_key, raw_bytes)
+        return parsed.plain_text
+    except Exception as exc:
+        raise DocumentParseError(
+            f"Не удалось распарсить документ {document.id}: {exc}"
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Pipeline functions
+# ---------------------------------------------------------------------------
 
 async def _start_job(job_id: str) -> list[str]:
     async with isolated_db_session() as session:
@@ -108,7 +149,32 @@ async def _start_job(job_id: str) -> list[str]:
             await session.commit()
 
         await session.refresh(document, ["sources"])
-        return [str(source.id) for source in document.sources]
+        source_ids = [str(source.id) for source in document.sources]
+
+        # PERF-PARSE: скачиваем и парсим документ один раз, кладём plain_text в Redis.
+        # Подзадачи (chord) читают из кеша — O(1) vs O(S) download+parse.
+        if source_ids:
+            try:
+                raw_bytes = await _storage.download(document.storage_key)
+                parsed = _parser_registry.parse_by_filename(document.storage_key, raw_bytes)
+                redis = get_sync_redis_client()
+                redis.setex(
+                    _doc_artifact_key(job_id),
+                    DOC_ARTIFACT_TTL_SECONDS,
+                    parsed.plain_text.encode("utf-8"),
+                )
+                logger.debug(
+                    "doc_artifact сохранён в Redis",
+                    extra={"job_id": job_id, "document_id": str(document.id), "text_len": len(parsed.plain_text)},
+                )
+            except Exception:
+                # Не прерываем pipeline — подзадачи используют fallback.
+                logger.warning(
+                    "Не удалось сохранить doc_artifact в Redis — подзадачи используют fallback",
+                    extra={"job_id": job_id, "document_id": str(document.id)},
+                )
+
+        return source_ids
 
 
 async def _process_source(job_id: str, source_id: str) -> dict:
@@ -126,7 +192,6 @@ async def _process_source(job_id: str, source_id: str) -> dict:
             )
             return {"source_id": source_id, "status": "failed", "error_code": "JOB_NOT_FOUND", "error_message": "Задача анализа не найдена"}
 
-        # #8 используем хелпер вместо getattr
         if _is_cancelled(job):
             return {"source_id": source_id, "status": "cancelled"}
 
@@ -151,18 +216,15 @@ async def _process_source(job_id: str, source_id: str) -> dict:
             text_content=source.text_content, url=source.url, uploaded_at=source.uploaded_at,
         )
 
-        try:
-            raw_document_bytes = await _storage.download(document.storage_key)
-            parsed_document = _parser_registry.parse_by_filename(document.storage_key, raw_document_bytes)
-        except Exception as exc:
-            raise DocumentParseError(f"Не удалось распарсить документ {document.id}: {exc}") from exc
+        # PERF-PARSE: используем кешированный plain_text вместо повторного download+parse.
+        plain_text = await _load_doc_plain_text(job_id, document)
 
         source_text = await _connector.fetch(source_ref)
-        batch = await _llm_client.generate_suggestions(parsed_document.plain_text, source_text, document.format.value)
+        batch = await _llm_client.generate_suggestions(plain_text, source_text, document.format.value)
 
         suggestions = map_to_suggestions(batch, job.id, source_reference=source.name)
 
-        # #12 Проверяем CANCELLED до записи в БД — иначе bulk_create уже выполнен
+        # Проверяем CANCELLED до записи в БД.
         await session.refresh(job)
         if _is_cancelled(job):
             return {"source_id": source_id, "status": "cancelled"}
@@ -170,24 +232,6 @@ async def _process_source(job_id: str, source_id: str) -> dict:
         await suggestion_repo.bulk_create(suggestions)
 
     return {"source_id": source_id, "status": "success", "suggestions_count": len(suggestions)}
-
-
-@celery_app.task(bind=True, acks_late=True)
-def process_source_for_analysis_job(self, job_id: str, source_id: str) -> dict:
-    try:
-        # #11 asyncio.run() напрямую — _run() был лишней однострочной обёрткой
-        return asyncio.run(_process_source(job_id, source_id))
-    except (LLMTimeoutError, LLMInvalidResponseError, DocumentParseError) as exc:
-        if self.request.retries < _settings.llm_max_retries:
-            backoff_seconds = _settings.llm_timeout_seconds * (2 ** self.request.retries)
-            raise self.retry(exc=exc, countdown=backoff_seconds) from exc
-        dead_letter_store = DeadLetterStore(get_sync_redis_client())
-        dead_letter_store.push(job_id, source_id, error_code=type(exc).__name__, error_message=str(exc))
-        logger.error(
-            "Источник не обработан после исчерпания retries",
-            extra={"job_id": job_id, "source_id": source_id, "error_type": type(exc).__name__, "retries": self.request.retries},
-        )
-        return {"source_id": source_id, "status": "failed", "error_code": type(exc).__name__, "error_message": str(exc)}
 
 
 async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
@@ -198,14 +242,17 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
         if job is None:
             logger.error("finalize_analysis_job вызван для несуществующего job_id", extra={"job_id": job_id})
             return
-        if _is_cancelled(job):  # #8
+        if _is_cancelled(job):
+            # Чистим артефакт даже при отмене.
+            _cleanup_doc_artifact(job_id)
             return
         document = await document_repo.get_by_id(job.document_id)
         if document is None:
             await job_repo.update_status(job, AnalysisJobStatus.FAILED, "DOCUMENT_NOT_FOUND", "Документ не найден")
+            _cleanup_doc_artifact(job_id)
             return
 
-        # #6 Один проход вместо трёх: два list comprehension + sum
+        # Один проход вместо трёх: два list comprehension + sum.
         succeeded: list[dict] = []
         failed: list[dict] = []
         suggestions_count = 0
@@ -221,9 +268,7 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
         if succeeded:
             message = None
             if failed:
-                # Часть источников упала — помечаем job как частично успешный.
                 job.partial_success = True
-                # #7 r.get('source_id', '?') — защита от отсутствующего ключа
                 message = "Не обработаны источники: " + ", ".join(
                     f"{r.get('source_id', '?')} ({r.get('error_code')})" for r in failed
                 )
@@ -247,8 +292,6 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
             if is_current:
                 document.status = DocumentStatus.DRAFT
 
-        # Транзакционный guard: если коммит упал — откатываем документ в DRAFT
-        # и помечаем job FAILED, чтобы документ не завис в IN_PROGRESS без живого job'а.
         try:
             await session.commit()
         except Exception as commit_exc:  # noqa: BLE001
@@ -278,18 +321,59 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
                     "Не удалось восстановить статус документа после ошибки коммита финализации",
                     extra={"job_id": job_id, "document_id": str(job.document_id)},
                 )
+        finally:
+            # PERF-PARSE: удаляем Redis-артефакт после финализации job'а.
+            _cleanup_doc_artifact(job_id)
+
+
+def _cleanup_doc_artifact(job_id: str) -> None:
+    """PERF-PARSE: удаляет Redis-ключ doc_artifact после завершения job.
+
+    Не блокирует pipeline — ошибки логируются и проглатываются.
+    TTL является страховкой: ключ удалится сам через DOC_ARTIFACT_TTL_SECONDS
+    даже если cleanup упал.
+    """
+    try:
+        redis = get_sync_redis_client()
+        redis.delete(_doc_artifact_key(job_id))
+    except Exception:
+        logger.warning(
+            "Не удалось удалить doc_artifact из Redis",
+            extra={"job_id": job_id},
+        )
+
+
+# ---------------------------------------------------------------------------
+# Celery tasks
+# ---------------------------------------------------------------------------
+
+@celery_app.task(bind=True, acks_late=True)
+def process_source_for_analysis_job(self, job_id: str, source_id: str) -> dict:
+    try:
+        return asyncio.run(_process_source(job_id, source_id))
+    except (LLMTimeoutError, LLMInvalidResponseError, DocumentParseError) as exc:
+        if self.request.retries < _settings.llm_max_retries:
+            backoff_seconds = _settings.llm_timeout_seconds * (2 ** self.request.retries)
+            raise self.retry(exc=exc, countdown=backoff_seconds) from exc
+        dead_letter_store = DeadLetterStore(get_sync_redis_client())
+        dead_letter_store.push(job_id, source_id, error_code=type(exc).__name__, error_message=str(exc))
+        logger.error(
+            "Источник не обработан после исчерпания retries",
+            extra={"job_id": job_id, "source_id": source_id, "error_type": type(exc).__name__, "retries": self.request.retries},
+        )
+        return {"source_id": source_id, "status": "failed", "error_code": type(exc).__name__, "error_message": str(exc)}
 
 
 @celery_app.task(bind=True)
 def finalize_analysis_job(self, source_results: list[dict], job_id: str) -> None:
-    asyncio.run(_finalize_job(job_id, source_results))  # #11
+    asyncio.run(_finalize_job(job_id, source_results))
 
 
 @celery_app.task(bind=True)
 def run_analysis_job(self, job_id: str) -> None:
-    source_ids = asyncio.run(_start_job(job_id))  # #11
+    source_ids = asyncio.run(_start_job(job_id))
     if not source_ids:
-        asyncio.run(_finalize_job(job_id, []))  # #11
+        asyncio.run(_finalize_job(job_id, []))
         return
     header = [process_source_for_analysis_job.s(job_id, source_id) for source_id in source_ids]
     callback = finalize_analysis_job.s(job_id=job_id)

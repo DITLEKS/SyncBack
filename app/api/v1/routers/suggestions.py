@@ -8,17 +8,22 @@
 - #10 accept_suggestion / reject_suggestion объединены через _decide_suggestion.
 - CR-3 / CODE-4: удалён дублирующий @router.put('/review'); добавлен
   Header в импорты; оба маршрута объединены в один обработчик review_save.
+
+PERF-OFFSET: list_suggestions поддерживает cursor-based пагинацию.
+Если клиент передаёт ?after=<uuid>, роутер возвращает CursorPage[SuggestionResponse].
+Если ?after отсутствует, поведение прежнее: Page[SuggestionResponse] с total.
+Оба формата живут на одном GET /suggestions — backward compatible.
 """
 import logging
 import uuid
-from typing import Literal
+from typing import Literal, Union
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import TypeAdapter
 
 from app.api.deps import get_allowed_project, get_current_user
 from app.api.schemas.document import DocumentResponse
-from app.api.schemas.pagination import Page
+from app.api.schemas.pagination import CursorPage, Page
 from app.api.schemas.review import ReviewSaveRequest, ReviewSaveResponse
 from app.api.schemas.suggestion import BulkAcceptResponse, SuggestionResponse
 from app.core.dependencies import get_audit_log_service, get_suggestion_service
@@ -32,7 +37,7 @@ from app.domain.exceptions import (
     SuggestionNotFoundError,
 )
 from app.domain.services.audit_log_service import AuditLogService
-from app.domain.services.suggestion_service import SuggestionService
+from app.domain.services.suggestion_service import KeysetPage, SuggestionService
 from app.infrastructure.db.models.enums import AuditAction, SuggestionStatus
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.user import User
@@ -139,22 +144,40 @@ async def _decide_suggestion(
 # Routes
 # ---------------------------------------------------------------------------
 
-@router.get("", response_model=Page[SuggestionResponse])
+@router.get("", response_model=Union[Page[SuggestionResponse], CursorPage[SuggestionResponse]])
 async def list_suggestions(
     document_id: uuid.UUID,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    after: uuid.UUID | None = Query(default=None, description="Cursor для keyset-пагинации. При передаче возвращает CursorPage вместо Page."),
     project: Project = Depends(get_allowed_project),
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
-) -> Page[SuggestionResponse]:
+) -> Page[SuggestionResponse] | CursorPage[SuggestionResponse]:
+    """Список правок для документа.
+
+    Два режима пагинации:
+    - ?limit=&offset= (классика) → Page{items, total, limit, offset}
+    - ?after=<uuid>&limit= (cursor) → CursorPage{items, next_cursor, has_more}
+
+    Режимы несовместимы: при ?after offset игнорируется.
+    """
     try:
-        suggestions, total = await suggestion_service.list_suggestions_for_document(
-            project.id, document_id, limit=limit, offset=offset
+        result = await suggestion_service.list_suggestions_for_document(
+            project.id, document_id, limit=limit, offset=offset, after_id=after
         )
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    if isinstance(result, KeysetPage):
+        return CursorPage[SuggestionResponse](
+            items=_suggestion_list_adapter.validate_python(result.items, from_attributes=True),
+            next_cursor=result.next_cursor,
+            has_more=result.has_more,
+        )
+
+    items, total = result
     return Page[SuggestionResponse](
-        items=_suggestion_list_adapter.validate_python(suggestions, from_attributes=True),
+        items=_suggestion_list_adapter.validate_python(items, from_attributes=True),
         total=total,
         limit=limit,
         offset=offset,

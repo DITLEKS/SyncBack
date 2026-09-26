@@ -6,6 +6,10 @@ list_by_analysis_job_and_status — фильтр по status теперь про
 (WHERE status = ...), а не выборкой всех строк с последующей фильтрацией в Python —
 используются в SuggestionService.bulk_accept()/get_accepted_changes(), где раньше
 тянулись ВСЕ правки документа ради подмножества нужного статуса.
+
+PERF-OFFSET: добавлен list_by_analysis_job_keyset для cursor-based пагинации.
+При передаче after_id делает WHERE id > after_id ORDER BY id LIMIT limit,
+используя составной индекс (analysis_job_id, id) из миграции 0013.
 """
 
 import uuid
@@ -32,7 +36,9 @@ class SuggestionRepository:
     async def get_by_id(self, suggestion_id: uuid.UUID) -> Suggestion | None:
         return await self._session.get(Suggestion, suggestion_id)
 
-    async def list_by_analysis_job(self, analysis_job_id: uuid.UUID, limit: int, offset: int) -> list[Suggestion]:
+    async def list_by_analysis_job(
+        self, analysis_job_id: uuid.UUID, limit: int, offset: int
+    ) -> list[Suggestion]:
         result = await self._session.execute(
             select(Suggestion)
             .where(Suggestion.analysis_job_id == analysis_job_id)
@@ -40,6 +46,30 @@ class SuggestionRepository:
             .limit(limit)
             .offset(offset)
         )
+        return list(result.scalars().all())
+
+    async def list_by_analysis_job_keyset(
+        self,
+        analysis_job_id: uuid.UUID,
+        limit: int,
+        after_id: uuid.UUID | None = None,
+    ) -> list[Suggestion]:
+        """Cursor-based (keyset) выборка правок для job'а.
+
+        Сортировка и курсор по id (PK, UUID v4). Составной индекс
+        (analysis_job_id, id) из миграции 0013 покрывает весь запрос.
+        Запрашиваем limit+1 строк — лишняя нужна только чтобы установить
+        has_more=True; из результата она не возвращается.
+        """
+        stmt = (
+            select(Suggestion)
+            .where(Suggestion.analysis_job_id == analysis_job_id)
+            .order_by(Suggestion.id)
+            .limit(limit + 1)  # +1 для детекции has_more
+        )
+        if after_id is not None:
+            stmt = stmt.where(Suggestion.id > after_id)
+        result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
     async def count_by_analysis_job(self, analysis_job_id: uuid.UUID) -> int:
@@ -76,7 +106,9 @@ class SuggestionRepository:
         )
         return list(result.scalars().all())
 
-    async def update_status(self, suggestion: Suggestion, status: SuggestionStatus, decided_by: uuid.UUID) -> Suggestion | None:
+    async def update_status(
+        self, suggestion: Suggestion, status: SuggestionStatus, decided_by: uuid.UUID
+    ) -> Suggestion | None:
         """
         Атомарный UPDATE ... WHERE status = 'pending' — защита от гонки при двойном
         accept/reject одной и той же правки параллельными запросами: если suggestion уже

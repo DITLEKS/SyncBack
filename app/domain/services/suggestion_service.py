@@ -7,6 +7,11 @@ finalize_review, атомарное сохранение сессии ревью
 - PERF-2: apply_review принимает user_id; больше нет uuid(int=0) в audit_log.
 - CODE-3: дублированный export-блок вынесен в _run_export().
 - P0-#13: bulk_accept() возвращает BulkAcceptResult(правки, документ).
+
+PERF-OFFSET: list_suggestions_for_document поддерживает keyset-путь
+(after_id передан) — делегирует в list_by_analysis_job_keyset, возвращает
+CursorPage-совместимый tuple без total; и классический OFFSET-путь (после_id=None)
+— возвращает (items, total) как раньше.
 """
 from __future__ import annotations
 
@@ -55,6 +60,20 @@ class BulkAcceptResult:
 
     suggestions: list[Suggestion]
     document: Document
+
+
+@dataclass
+class KeysetPage:
+    """PERF-OFFSET: результат keyset-запроса к репозиторию.
+
+    items      — элементы страницы (не более limit штук).
+    next_cursor — UUID последнего элемента для следующего ?after=; None если конец.
+    has_more   — True если за страницей есть ещё элементы.
+    """
+
+    items: list[Suggestion]
+    next_cursor: uuid.UUID | None
+    has_more: bool
 
 
 class SuggestionService:
@@ -123,10 +142,32 @@ class SuggestionService:
         document_id: uuid.UUID,
         limit: int,
         offset: int,
-    ) -> tuple[list[Suggestion], int]:
+        after_id: uuid.UUID | None = None,
+    ) -> tuple[list[Suggestion], int] | KeysetPage:
+        """Возвращает правки для документа.
+
+        Два режима:
+        - after_id=None  → классический OFFSET, возвращает (items, total).
+        - after_id=<uuid> → keyset-курсор, возвращает KeysetPage.
+          total не вычисляется — COUNT(*) при keyset не нужен клиенту.
+        """
         document = await self._get_document_or_raise(project_id, document_id)
         if document.current_analysis_job_id is None:
+            if after_id is not None:
+                return KeysetPage(items=[], next_cursor=None, has_more=False)
             return [], 0
+
+        if after_id is not None:
+            # Keyset path: запрашиваем limit+1, лишняя строка сигнализирует has_more.
+            rows = await self._suggestions.list_by_analysis_job_keyset(
+                document.current_analysis_job_id, limit=limit, after_id=after_id
+            )
+            has_more = len(rows) > limit
+            items = rows[:limit]
+            next_cursor = items[-1].id if (items and has_more) else None
+            return KeysetPage(items=items, next_cursor=next_cursor, has_more=has_more)
+
+        # OFFSET path (backward compatible).
         items = await self._suggestions.list_by_analysis_job(
             document.current_analysis_job_id, limit=limit, offset=offset
         )
