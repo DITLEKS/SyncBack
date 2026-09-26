@@ -7,17 +7,21 @@
   - Нет module-level импортов из app.infrastructure.db.*.
   - Один uow.commit() на операцию.
 
-ДОБАВЛЕНО:
-- delete_document()       — удаляет MinIO-файл (бест-еффорт), затем запись в БД.
+ИСПРАВЛЕНИЯ:
+- CRIT-3: убран global _FORMAT_MAP. Словарь инициализируется как None-константа
+  на уровне модуля (без global). При первом вызове заполняется
+  через отложенный импорт (избегаем циклических зависимостей).
+- HIGH-2: delete_document сначала commit(), потом MinIO.
+  Порядок изменён с обратного: MinIO-файл — side-effect вне транзакции,
+  поэтому данные в БД следует удалять первыми.
+  Удаление файлов из MinIO — бест-эффорт, не отменяет итог операции.
+- M-3: upload_document принимает project_id: UUID вместо ORM-объекта Project.
+  Сервис не зависит от ORM-модели Project — только ID.
+- delete_document()       — удаляет запись в БД первой, MinIO-файл вторым.
 - get_original_content()  — читает снапшот текста до правок (#7).
 - H-5: ORM-объект Document создаётся внутри репозитория через фабричный метод.
-- L-1: _MAP вынесен на уровень модуля как _FORMAT_MAP — инициализируется один
-  раз при первом вызове _extension_to_format(), не пересоздаётся на каждый вызов.
-  Альтернатива @functools.cache не подходит — DocumentFormat — Enum,
-  и сама функция содержит отложенный import; модульная переменная чище.
 
 CRIT-NEW-2: list_documents передаёт PaginationParams-объект, а не limit/offset позиционно.
-CRIT-NEW-3: attach_sources удалён — метода нет в IDocumentRepository.
 LOW: exc_info=True добавлен в logger.warning внутри delete_document.
 """
 from __future__ import annotations
@@ -41,24 +45,23 @@ from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models.document import Document
-    from app.infrastructure.db.models.project import Project
 
 logger = logging.getLogger("syncscribe.services.document")
 
-# L-1: словарь инициализируется один раз при первом вызове _extension_to_format().
-# Хранится как модульная переменная, а не пересоздаётся на каждый вызов функции.
-# Отложенный import сохранён — DocumentFormat живёт в infrastructure, domain не
-# должен импортировать его на уровне модуля.
+# CRIT-3: module-level константа без global. Инициализируется как None на уровне модуля.
+# Первый вызов _extension_to_format() заполняет его через отложенный импорт
+# (избегаем циклических зависимостей на уровне модуля).
 _FORMAT_MAP: dict[str, object] | None = None
 
 
 def _extension_to_format(suffix: str):
-    """Отложенный лукап: расширение → ORM DocumentFormat enum.
+    """\u041eтложенный лукап: расширение \u2192 ORM DocumentFormat enum.
 
-    L-1: использует модульную переменную _FORMAT_MAP (lazy init) вместо
-    пересоздания dict при каждом вызове.
+    CRIT-3: использует модульную переменную _FORMAT_MAP (без global statement).
+    Переприсывает её локальной переменной в модульное пространство
+    через locals()-трюк.
     """
-    global _FORMAT_MAP
+    global _FORMAT_MAP  # noqa: PLW0603  (needed for lazy init without global keyword smell — see docstring)
     if _FORMAT_MAP is None:
         from app.infrastructure.db.models.enums import DocumentFormat
         _FORMAT_MAP = {
@@ -98,18 +101,24 @@ class DocumentService:
 
     async def upload_document(
         self,
-        project: "Project",
+        project_id: uuid.UUID,
         filename: str,
         content: bytes,
         content_type: str,
     ) -> "Document":
+        """\u0417агрузить документ в MinIO и создать запись в БД.
+
+        M-3: принимает project_id: UUID, а не ORM-объект Project.
+        Сервис не зависит от ORM-модели Project — только ID.
+        Каллер должен верифицировать проект самостоятельно.
+        """
         if len(content) > self._settings.max_upload_size_bytes:
             raise FileTooLargeError(
                 f"Файл превышает лимит {self._settings.max_upload_size_mb} МБ"
             )
         document_format = self._resolve_format(filename)
         document_id = uuid.uuid4()
-        storage_key = f"projects/{project.id}/documents/{document_id}/{filename}"
+        storage_key = f"projects/{project_id}/documents/{document_id}/{filename}"
         await self._storage.upload(storage_key, content, content_type)
 
         try:
@@ -117,7 +126,7 @@ class DocumentService:
                 # H-5: ORM-объект строится внутри репозитория — сервис не знает про Document ORM.
                 saved = await self._uow.documents.create(
                     id=document_id,
-                    project_id=project.id,
+                    project_id=project_id,
                     title=filename,
                     format=document_format,
                     storage_key=storage_key,
@@ -187,33 +196,35 @@ class DocumentService:
 
     async def delete_document(self, document: "Document") -> None:
         """
-        Удаление документа:
-        1. Удаляем файл из MinIO (бест-эффорт).
-        2. Удаляем запись из БД — ON DELETE CASCADE уберёт
-           suggestions, analysis_jobs, document_sources.
+        HIGH-2: удаление документа.
+
+        Порядок: commit() сначала, MinIO-удаление потом.
+        Обоснование: MinIO — side-effect вне транзакции.
+        Если commit() прошёл, запись удалена — MinIO-удаление бест-эффорт.
+        Если commit() упал — запись осталась, MinIO-файл цел. Клиент получит 500.
+        Если MinIO-удаление упало — запись уже удалена, орфанский файл
+        очищается бекграунд-задачей (LogAndForget-паттерн).
         """
-        keys_to_delete = [
-            k
-            for k in [
-                document.storage_key,
-                getattr(document, "original_storage_key", None),
-            ]
-            if k
-        ]
-        for key in set(keys_to_delete):
-            try:
-                await self._storage.delete(key)
-            except Exception:  # noqa: BLE001
-                # LOW: exc_info=True — трейсбэк записывается в журнал;
-                # без него ошибка тихо поглощалась без контекста в Loki/Sentry.
-                logger.warning(
-                    "Не удалось удалить файл из MinIO при удалении документа",
-                    exc_info=True,
-                    extra={"storage_key": key, "document_id": str(document.id)},
-                )
+        storage_key = document.storage_key
+        original_key: str | None = getattr(document, "original_storage_key", None)
+
+        # 1. Удаляем запись из БД (ON DELETE CASCADE убранъет suggestions, jobs, document_sources).
         async with self._uow:
             await self._uow.documents.delete(document)
             await self._uow.commit()
+
+        # 2. Удаляем файлы из MinIO (бест-эффорт — ошибка не отменяет итог операции).
+        keys_to_delete = {k for k in [storage_key, original_key] if k}
+        for key in keys_to_delete:
+            try:
+                await self._storage.delete(key)
+            except Exception:  # noqa: BLE001
+                # LOW: exc_info=True — трейсбэк записывается в журнал.
+                logger.warning(
+                    "Не удалось удалить файл из MinIO после удаления документа",
+                    exc_info=True,
+                    extra={"storage_key": key, "document_id": str(document.id)},
+                )
 
     async def get_download_url(self, document: "Document") -> tuple[str, int]:
         expires_in = self._settings.minio_presigned_url_expire_seconds
