@@ -1,11 +1,13 @@
 """
 Абстрактный Unit of Work — единственная точка фиксации транзакции.
 
-Правило:
+Правила:
   - Репозитории только добавляют/изменяют объекты в сессии.
   - Вся логика commit()/rollback() — здесь.
   - domain/services зависят ТОЛЬКО от этого интерфейса;
     инфраструктурная реализация (SqlAlchemyUnitOfWork) подключается через DI.
+  - __aenter__ и __aexit__ объявлены @abstractmethod, чтобы тестовые фейки
+    были обязаны реализовать их явно.
 """
 from __future__ import annotations
 
@@ -34,13 +36,14 @@ class IUnitOfWork(ABC):
             await uow.commit()   # один flush на всю операцию
     """
 
-    documents: IDocumentRepository
-    suggestions: ISuggestionRepository
-    jobs: IAnalysisJobRepository
-    audit: IAuditLogRepository
+    documents: "IDocumentRepository"
+    suggestions: "ISuggestionRepository"
+    jobs: "IAnalysisJobRepository"
+    audit: "IAuditLogRepository"
 
     @abstractmethod
-    async def __aenter__(self) -> "IUnitOfWork": ...
+    async def __aenter__(self) -> "IUnitOfWork":
+        """Войти в транзакционный контекст."""
 
     @abstractmethod
     async def __aexit__(
@@ -48,7 +51,8 @@ class IUnitOfWork(ABC):
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
         tb: TracebackType | None,
-    ) -> None: ...
+    ) -> None:
+        """При исключении — rollback; иначе — ничего (commit явный)."""
 
     @abstractmethod
     async def commit(self) -> None:

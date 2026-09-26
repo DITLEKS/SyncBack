@@ -28,6 +28,7 @@ from app.infrastructure.db.repositories.dashboard_repository import DashboardRep
 from app.infrastructure.db.repositories.document_repository import DocumentRepository
 from app.infrastructure.db.repositories.project_repository import ProjectRepository
 from app.infrastructure.db.repositories.source_repository import SourceRepository
+from app.infrastructure.db.repositories.suggestion_repository import SuggestionRepository
 from app.infrastructure.db.repositories.user_repository import UserRepository
 from app.infrastructure.db.session import get_db_session
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
