@@ -7,32 +7,27 @@ Celery-задачи пайплайна анализа.
 - _finalize_job D(21) → D(6): вынесены _tally_results(), _apply_job_outcome(),
   _recover_after_commit_failure().
 - _process_source C(15) → C(7): I/O-пайплайн вынесен в _run_source_pipeline().
-- list_analyzable_for_project: убран прямой ORM-enum, используется DocumentStatusVO.
+- P2: заменены ORM enum на domain VO, все репозитории вынесены через IUnitOfWork.
 - Parse-once: document скачивается и парсится один раз в _start_job,
   plain_text кэшируется в Redis. _run_source_pipeline читает кэш и деградирует
   до прямого скачивания при cache miss (истёкший TTL, недоступный Redis).
-- P2: заменены прямые ORM enum AnalysisJobStatus/DocumentStatus
-  на domain VO AnalysisJobStatusVO/DocumentStatusVO везде в файле.
 """
 
 import asyncio
 import logging
 import uuid
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 from celery import chord
 
 from app.core.config import get_settings
 from app.domain.exceptions import DocumentParseError, LLMInvalidResponseError, LLMTimeoutError
 from app.domain.interfaces.source_connector import SourceKind, SourceRef
+from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO
 from app.infrastructure.cache.redis_client import get_redis_client
 from app.infrastructure.cache.sync_redis_client import get_sync_redis_client
-from app.infrastructure.db.repositories.analysis_job_repository import AnalysisJobRepository
-from app.infrastructure.db.repositories.document_repository import DocumentRepository
-from app.infrastructure.db.repositories.source_repository import SourceRepository
-from app.infrastructure.db.repositories.suggestion_repository import SuggestionRepository
-from app.infrastructure.db.session import isolated_db_session
+from app.infrastructure.db.session import isolated_uow
 from app.infrastructure.llm.factory import get_llm_client
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 from app.infrastructure.queue.dead_letter_store import DeadLetterStore
@@ -141,7 +136,7 @@ async def _apply_job_outcome(
     job,
     document,
     tally: _Tally,
-    job_repo: AnalysisJobRepository,
+    uow: IUnitOfWork,
 ) -> None:
     """Записать итоговый статус job и документа по итогам тальирования."""
     is_current = document.current_analysis_job_id == job.id
@@ -153,7 +148,7 @@ async def _apply_job_outcome(
             message = "Не обработаны источники: " + ", ".join(
                 f"{r.get('source_id', '?')} ({r.get('error_code')})" for r in tally.failed
             )
-        await job_repo.update_status(job, AnalysisJobStatusVO.SUCCESS, error_message=message)
+        await uow.jobs.update_status(job, AnalysisJobStatusVO.SUCCESS, error_message=message)
         if is_current:
             document.status = (
                 DocumentStatusVO.AWAITING_APPROVAL
@@ -164,13 +159,13 @@ async def _apply_job_outcome(
         message = "; ".join(
             f"{r.get('source_id', '?')}: {r.get('error_message')}" for r in tally.failed
         )
-        await job_repo.update_status(
+        await uow.jobs.update_status(
             job, AnalysisJobStatusVO.FAILED, "ALL_SOURCES_FAILED", message
         )
         if is_current:
             document.status = DocumentStatusVO.DRAFT
     else:
-        await job_repo.update_status(
+        await uow.jobs.update_status(
             job,
             AnalysisJobStatusVO.FAILED,
             "NO_SOURCES_ATTACHED",
@@ -187,26 +182,23 @@ async def _recover_after_commit_failure(
 ) -> None:
     """Компенсирующая транзакция: job → FAILED, документ → DRAFT."""
     try:
-        async with isolated_db_session() as recovery_session:
-            recovery_job_repo = AnalysisJobRepository(recovery_session)
-            recovery_doc_repo = DocumentRepository(recovery_session)
-
-            recovery_job = await recovery_job_repo.get_by_id(uuid.UUID(job_id))
+        async with isolated_uow() as uow:
+            recovery_job = await uow.jobs.get_by_id(uuid.UUID(job_id))
             if recovery_job is not None:
-                await recovery_job_repo.update_status(
+                await uow.jobs.update_status(
                     recovery_job,
                     AnalysisJobStatusVO.FAILED,
                     error_code="COMMIT_ERROR",
                     error_message=f"Ошибка коммита финализации: {commit_exc}",
                 )
 
-            recovery_doc = await recovery_doc_repo.get_by_id(document_id)
+            recovery_doc = await uow.documents.get_by_id(document_id)
             if (
                 recovery_doc is not None
                 and recovery_doc.status == DocumentStatusVO.IN_PROGRESS
             ):
                 recovery_doc.status = DocumentStatusVO.DRAFT
-                await recovery_session.commit()
+                await uow.commit()
     except Exception:  # noqa: BLE001
         logger.exception(
             "Не удалось восстановить статус документа после ошибки коммита финализации",
@@ -226,11 +218,8 @@ async def _start_job(job_id: str) -> list[str]:
     Если кэширование не удалось — продолжаем: каждый источник деградирует
     до прямого скачивания.
     """
-    async with isolated_db_session() as session:
-        job_repo = AnalysisJobRepository(session)
-        document_repo = DocumentRepository(session)
-
-        job = await job_repo.get_by_id(uuid.UUID(job_id))
+    async with isolated_uow() as uow:
+        job = await uow.jobs.get_by_id(uuid.UUID(job_id))
         if job is None:
             logger.error(
                 "run_analysis_job вызван для несуществующего job_id",
@@ -242,28 +231,29 @@ async def _start_job(job_id: str) -> list[str]:
             AnalysisJobStatusVO.PROCESSING,
         ):
             return []
-        if not await job_repo.mark_processing_if_active(job.id):
+        if not await uow.jobs.mark_processing_if_active(job.id):
             return []
-        await session.refresh(job)
+        await uow._session.refresh(job)
 
-        document = await document_repo.get_by_id(job.document_id)
+        document = await uow.documents.get_by_id(job.document_id)
         if document is None:
             logger.error(
                 "AnalysisJob ссылается на несуществующий документ",
                 extra={"job_id": job_id, "document_id": str(job.document_id)},
             )
-            await job_repo.update_status(
+            await uow.jobs.update_status(
                 job,
                 AnalysisJobStatusVO.FAILED,
                 error_code="DOCUMENT_NOT_FOUND",
                 error_message="Документ не найден",
             )
+            await uow.commit()
             return []
         if document.current_analysis_job_id == job.id:
             document.status = DocumentStatusVO.IN_PROGRESS
-            await session.commit()
+            await uow.commit()
 
-        await session.refresh(document, ["sources"])
+        await uow._session.refresh(document, ["sources"])
         source_ids = [str(source.id) for source in document.sources]
 
     # Parse-once: кэшируем plain_text вне DB-сессии.
@@ -324,14 +314,9 @@ async def _process_source(job_id: str, source_id: str) -> dict:
     """DB-оркестрация для одного источника.
 
     I/O-пайплайн вынесен в _run_source_pipeline().
-    C(15) → C(7).
     """
-    async with isolated_db_session() as session:
-        job_repo = AnalysisJobRepository(session)
-        document_repo = DocumentRepository(session)
-        source_repo = SourceRepository(session)
-
-        job = await job_repo.get_by_id(uuid.UUID(job_id))
+    async with isolated_uow() as uow:
+        job = await uow.jobs.get_by_id(uuid.UUID(job_id))
         if job is None:
             logger.error(
                 "process_source_for_analysis_job вызван для несуществующего job_id",
@@ -342,7 +327,7 @@ async def _process_source(job_id: str, source_id: str) -> dict:
         if _is_cancelled(job):
             return {"source_id": source_id, "status": "cancelled"}
 
-        document = await document_repo.get_by_id(job.document_id)
+        document = await uow.documents.get_by_id(job.document_id)
         if document is None:
             logger.error(
                 "AnalysisJob ссылается на несуществующий документ при обработке источника",
@@ -350,7 +335,7 @@ async def _process_source(job_id: str, source_id: str) -> dict:
             )
             return {"source_id": source_id, "status": "failed", "error_code": "DOCUMENT_NOT_FOUND", "error_message": "Документ не найден"}
 
-        source = await source_repo.get_by_id(uuid.UUID(source_id))
+        source = await uow.sources.get_by_id(uuid.UUID(source_id))
         if source is None:
             logger.error(
                 "Источник удалён до обработки подзадачи анализа",
@@ -378,28 +363,22 @@ async def _process_source(job_id: str, source_id: str) -> dict:
         source_ref=source_ref,
     )
 
-    async with isolated_db_session() as session:
-        job_repo = AnalysisJobRepository(session)
-        suggestion_repo = SuggestionRepository(session)
-
+    async with isolated_uow() as uow:
         # Перепроверяем CANCELLED после долгого I/O.
-        job = await job_repo.get_by_id(uuid.UUID(job_id))
+        job = await uow.jobs.get_by_id(uuid.UUID(job_id))
         if job is None or _is_cancelled(job):
             return {"source_id": source_id, "status": "cancelled"}
 
-        await suggestion_repo.bulk_create(suggestions)
-        await session.commit()
+        await uow.suggestions.bulk_create(suggestions)
+        await uow.commit()
 
     return {"source_id": source_id, "status": "success", "suggestions_count": len(suggestions)}
 
 
 async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
     """Финализировать job, обновить статус документа, очистить кэш."""
-    async with isolated_db_session() as session:
-        job_repo = AnalysisJobRepository(session)
-        document_repo = DocumentRepository(session)
-
-        job = await job_repo.get_by_id(uuid.UUID(job_id))
+    async with isolated_uow() as uow:
+        job = await uow.jobs.get_by_id(uuid.UUID(job_id))
         if job is None:
             logger.error(
                 "finalize_analysis_job вызван для несуществующего job_id",
@@ -410,28 +389,29 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
             await _cleanup_parsed_cache(job_id)
             return
 
-        document = await document_repo.get_by_id(job.document_id)
+        document = await uow.documents.get_by_id(job.document_id)
         if document is None:
-            await job_repo.update_status(
+            await uow.jobs.update_status(
                 job,
                 AnalysisJobStatusVO.FAILED,
                 "DOCUMENT_NOT_FOUND",
                 "Документ не найден",
             )
+            await uow.commit()
             await _cleanup_parsed_cache(job_id)
             return
 
         tally = _tally_results(source_results)
-        await _apply_job_outcome(job, document, tally, job_repo)
+        await _apply_job_outcome(job, document, tally, uow)
 
         try:
-            await session.commit()
+            await uow.commit()
         except Exception as commit_exc:  # noqa: BLE001
             logger.exception(
                 "Ошибка коммита при финализации job",
                 extra={"job_id": job_id, "document_id": str(job.document_id)},
             )
-            await session.rollback()
+            await uow.rollback()
             await _recover_after_commit_failure(job_id, job.document_id, commit_exc)
         finally:
             await _cleanup_parsed_cache(job_id)
