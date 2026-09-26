@@ -149,8 +149,9 @@ def get_dashboard_service(
 # Auth (UserRepository живёт вне UoW — отдельная сессия по дизайну)
 # ---------------------------------------------------------------------------
 
-async def get_login_rate_limiter() -> LoginRateLimiter:
-    redis = await get_redis_client()
+def get_login_rate_limiter() -> LoginRateLimiter:
+    # M-6: get_redis_client() — sync def, await здесь недопустим (TypeError в рантайме).
+    redis = get_redis_client()
     settings = get_settings()
     return LoginRateLimiter(
         redis_client=redis,
