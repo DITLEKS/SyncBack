@@ -239,18 +239,31 @@ class IAnalysisJobRepository(ABC):
 
     @abstractmethod
     async def mark_dispatched(
-        self, job: "AnalysisJob", document: DocumentProtocol, task_id: str
-    ) -> "AnalysisJob": ...
+        self,
+        job: "AnalysisJob",
+        task_id: str,
+    ) -> "tuple[AnalysisJob, DocumentStatusVO | None]":
+        """Пометить задачу как отправленную в Celery.
+
+        CRIT-NEW-1 / CRIT-A: document не принимается — репозиторий не мутирует
+        чужие агрегаты. Возвращает (job, new_doc_status | None); вызывающий код
+        применяет изменение документа через uow.documents.update_status().
+        """
 
     @abstractmethod
     async def mark_failed_queue_unavailable(
-        self, job: "AnalysisJob", document: DocumentProtocol, message: str | None
-    ) -> "AnalysisJob": ...
+        self,
+        job: "AnalysisJob",
+        message: str | None,
+    ) -> "tuple[AnalysisJob, DocumentStatusVO]":
+        """CRIT-NEW-1 / CRIT-B: не принимает document, возвращает (job, DocumentStatusVO.DRAFT)."""
 
     @abstractmethod
     async def cancel(
-        self, job: "AnalysisJob", document: DocumentProtocol
-    ) -> "AnalysisJob": ...
+        self,
+        job: "AnalysisJob",
+    ) -> "tuple[AnalysisJob, DocumentStatusVO]":
+        """CRIT-NEW-1 / CRIT-B: не принимает document, возвращает (job, DocumentStatusVO.DRAFT)."""
 
     @abstractmethod
     async def mark_processing_if_active(self, job_id: uuid.UUID) -> bool: ...
