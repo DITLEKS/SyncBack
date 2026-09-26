@@ -5,6 +5,7 @@ import uuid
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from app.domain.enums import SuggestionStatus
+from app.infrastructure.db.repositories.suggestion_repository import SuggestionCounts
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models.suggestion import Suggestion
@@ -31,13 +32,15 @@ class SuggestionPort(Protocol):
         self, analysis_job_id: uuid.UUID, status: SuggestionStatus
     ) -> int: ...
 
+    async def count_by_analysis_job_stats(
+        self, analysis_job_id: uuid.UUID
+    ) -> SuggestionCounts:
+        """Возвращает (accepted, rejected, pending) одним COUNT-запросом."""
+        ...
+
     async def list_by_analysis_job_and_status(
         self, analysis_job_id: uuid.UUID, status: SuggestionStatus
     ) -> "list[Suggestion]": ...
-
-    async def list_ids_by_analysis_job_and_status(
-        self, analysis_job_id: uuid.UUID, status: SuggestionStatus
-    ) -> list[uuid.UUID]: ...
 
     async def update_status(
         self,
@@ -49,6 +52,22 @@ class SuggestionPort(Protocol):
     async def bulk_update_status(
         self,
         suggestion_ids: list[uuid.UUID],
+        analysis_job_id: uuid.UUID,
         status: SuggestionStatus,
         decided_by: uuid.UUID,
-    ) -> "list[Suggestion]": ...
+    ) -> "list[Suggestion]":
+        """Обновляет конкретные id IN (...) с скоупом по analysis_job_id.
+
+        analysis_job_id обязателен — защищает от мутации правок
+        чужого документа при передаче произвольных UUID.
+        """
+        ...
+
+    async def bulk_update_all_pending(
+        self,
+        analysis_job_id: uuid.UUID,
+        status: SuggestionStatus,
+        decided_by: uuid.UUID,
+    ) -> "list[Suggestion]":
+        """Обновляет все pending-правки job одним UPDATE без промежуточного SELECT."""
+        ...
