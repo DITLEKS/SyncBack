@@ -14,7 +14,7 @@ GET /api/v1/documents — возвращает все документы тек�
 
 Ответ (DocumentListPage):
   items[]:
-    id, title, format, status, current_analysis_job_id,
+    id, name, format, size_bytes, status, current_analysis_job_id,
     created_at, updated_at,
     project: { id, name },
     suggestions: { total, pending, accepted, rejected }
@@ -65,8 +65,9 @@ async def list_my_documents(
     items = [
         DocumentListItem(
             id=row["document"].id,
-            title=row["document"].title,
+            name=row["document"].name,           # P0-#12: было .title
             format=row["document"].format,
+            size_bytes=row["document"].size_bytes,  # UI-fix: размер файла
             status=row["document"].status,
             current_analysis_job_id=row["document"].current_analysis_job_id,
             created_at=row["document"].created_at,

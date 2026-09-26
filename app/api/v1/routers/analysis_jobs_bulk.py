@@ -3,13 +3,16 @@
 
 POST /projects/{project_id}/documents/analysis-jobs/bulk
 
-#10: файл переписан с нуля. Старые несуществующие символы:
-  AnalysisJobRead, BulkAnalysisJobsResponse, AnalysisJobRepository, DocumentRepository
-— удалены. Файл компилируется и запускается без ImportError.
+#10: файл переписан с нуля. Старые несуществующие символы—удалены.
+
+UI-fix: добавлен опциональный document_ids в Body —
+  позволяет запустить анализ только для выбранных документов (если есть чекбоксы).
+  Если document_ids=null/опущено — запустить все analyzable документы проекта.
 """
 import uuid
+from typing import Optional
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Body, Depends, status
 from pydantic import BaseModel
 
 from app.api.deps import get_allowed_project
@@ -37,19 +40,36 @@ class BulkAnalysisJobsResponse(BaseModel):
     results: list[BulkJobResult]
 
 
+class BulkAnalysisRequest(BaseModel):
+    """UI-fix: если document_ids задан — анализ запускается только для них.
+    Если null или поле опущено — запустить все analyzable документы проекта.
+    """
+    document_ids: Optional[list[uuid.UUID]] = None
+
+
 @router.post(
     "/analysis-jobs/bulk",
     response_model=BulkAnalysisJobsResponse,
     status_code=status.HTTP_200_OK,
 )
 async def bulk_start_analysis_jobs(
+    payload: BulkAnalysisRequest = Body(default=BulkAnalysisRequest()),
     project: Project = Depends(get_allowed_project),
     service: AnalysisJobService = Depends(get_analysis_job_service),
 ) -> BulkAnalysisJobsResponse:
-    """Запускает analysis_job для каждого документа проекта в статусе draft.
+    """POST body (опционально):
+
+    ```json
+    { "document_ids": ["uuid1", "uuid2"] }
+    ```
+
+    Без body (или document_ids=null) — запускает анализ для всех analyzable документов проекта.
     Документы в in_progress / awaiting_approval / ready пропускаются без ошибки.
     """
-    raw_results = await service.bulk_create_jobs_for_project(project.id)
+    raw_results = await service.bulk_create_jobs_for_project(
+        project.id,
+        document_ids=payload.document_ids,
+    )
 
     results: list[BulkJobResult] = []
     started = 0

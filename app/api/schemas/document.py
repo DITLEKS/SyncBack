@@ -4,6 +4,7 @@ P0-6: добавлен UploadDocumentRequest — загрузка докумен
       (нужно для маршрута «Мои документы» → кнопка «Загрузить документ»).
 P0-#12: поле переименовано title→name в DocumentListItem, чтобы совпадало
         с DocumentResponse.name и ORM-атрибутом Document.name.
+UI-fix: добавлено поле size_bytes в DocumentListItem (карточка документа в UI).
 """
 import uuid
 from datetime import datetime
@@ -46,7 +47,7 @@ class AttachSourcesRequest(BaseModel):
     source_ids: list[uuid.UUID]
 
 
-# ── P0-6 ──────────────────────────────────────────────────────────────────────
+# ── P0-6 ──────────────────────────────────────────────────────────────────────────
 
 class DocumentListProject(BaseModel):
     id: uuid.UUID
@@ -62,10 +63,11 @@ class SuggestionCounters(BaseModel):
 
 class DocumentListItem(BaseModel):
     id: uuid.UUID
-    # P0-#12: было title — переименовано в name для единообразия с
-    # DocumentResponse.name и ORM-полем Document.name.
     name: str
     format: str
+    # UI-fix: размер файла — есть в Document ORM как size_bytes,
+    # только забыли добавить в схему.
+    size_bytes: int
     status: str
     current_analysis_job_id: uuid.UUID | None = None
     created_at: datetime
