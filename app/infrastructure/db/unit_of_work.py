@@ -7,9 +7,10 @@ SQLAlchemy-реализация Unit of Work.
 Правило:
   - Никогда не вызывайте session.commit() внутри репозиториев.
   - Никогда не вызывайте uow.commit() более одного раза за операцию
-    (исключение — Celery-задачи с промежуточными чекпоинтами: каждый чекпоинт
+    (исключение — Celery-задачи с промежуточными чекпойнтами: каждый чекпойнт
     создаёт новый `async with uow` блок).
   - H-4: refresh() доступен через IUnitOfWork.refresh() — не обращайся к uow._session напрямую.
+  - HIGH-A: self.users добавлен, чтобы избежать AttributeError при uow.users.
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from app.infrastructure.db.repositories.document_repository import DocumentRepos
 from app.infrastructure.db.repositories.project_repository import ProjectRepository
 from app.infrastructure.db.repositories.source_repository import SourceRepository
 from app.infrastructure.db.repositories.suggestion_repository import SuggestionRepository
+from app.infrastructure.db.repositories.user_repository import UserRepository
 
 
 class SqlAlchemyUnitOfWork(IUnitOfWork):
@@ -33,7 +35,7 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
 
     Создаётся per-request через FastAPI Depends (см. core/dependencies.py).
     Каждая HTTP-операция — одна транзакция. Celery-задачи создают свой экземпляр
-    через isolated_db_session() (см. infrastructure/db/session.py).
+    через isolated_uow() (см. infrastructure/db/session.py).
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -50,6 +52,9 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         self.sources     = SourceRepository(session)
         self.dashboard   = DashboardRepository(session)
 
+        # Auth repositories (HIGH-A: добавлен, чтобы uow.users не давал AttributeError)
+        self.users       = UserRepository(session)
+
     async def __aenter__(self) -> "SqlAlchemyUnitOfWork":
         return self
 
@@ -61,7 +66,7 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
     ) -> None:
         if exc_type is not None:
             await self.rollback()
-        # Сессия закрывается владельцем (FastAPI DI / isolated_db_session).
+        # Сессия закрывается владельцем (FastAPI DI / isolated_uow).
 
     async def commit(self) -> None:
         await self._session.commit()

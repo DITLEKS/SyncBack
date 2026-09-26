@@ -1,6 +1,12 @@
 """
 Репозиторий пользователей.
+
+ИЗМЕНЕНИЯ:
+- HIGH-A: удалён session.commit() из create() — нарушение UoW-правила.
+  Теперь только flush() + refresh() через параметрD obj для совместимости;
+  commit — ответственность вызывающего UoW.
 """
+from __future__ import annotations
 
 import uuid
 
@@ -22,7 +28,8 @@ class UserRepository:
         return await self._session.get(User, user_id)
 
     async def create(self, user: User) -> User:
+        """HIGH-A: commit удалён — фиксирует вызывающий UoW."""
         self._session.add(user)
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(user)
         return user
