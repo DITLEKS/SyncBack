@@ -2,13 +2,23 @@
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, NamedTuple, Protocol, runtime_checkable
 
 from app.domain.enums import SuggestionStatus
-from app.infrastructure.db.repositories.suggestion_repository import SuggestionCounts
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models.suggestion import Suggestion
+
+
+class SuggestionCounts(NamedTuple):
+    """Счётчики правок по статусам для одного analysis_job.
+
+    Чистый value object без ORM-зависимостей — принадлежит домену.
+    """
+
+    accepted: int
+    rejected: int
+    pending: int
 
 
 @runtime_checkable

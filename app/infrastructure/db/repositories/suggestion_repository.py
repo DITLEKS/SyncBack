@@ -2,21 +2,13 @@
 
 import uuid
 from datetime import UTC, datetime
-from typing import NamedTuple
 
 from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.infrastructure.db.models.enums import SuggestionStatus
+from app.domain.enums import SuggestionStatus
+from app.domain.ports.suggestion_port import SuggestionCounts
 from app.infrastructure.db.models.suggestion import Suggestion
-
-
-class SuggestionCounts(NamedTuple):
-    """Счётчики правок по статусам для одного analysis_job."""
-
-    accepted: int
-    rejected: int
-    pending: int
 
 
 class SuggestionRepository:
@@ -128,7 +120,6 @@ class SuggestionRepository:
         """Атомарный UPDATE WHERE status = 'pending' — защита от гонки при
         параллельных accept/reject одной правки.
 
-        Возвращает None, если правка уже была решена другим запросом.
         UPDATE...RETURNING уже содержит актуальное состояние — flush/refresh
         не нужны.
         """
