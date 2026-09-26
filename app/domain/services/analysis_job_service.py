@@ -10,13 +10,13 @@
     под новую сигнатуру репозитория: методы больше не принимают document напрямую,
     а возвращают (job, DocumentStatusVO | None). Сервис применяет изменение
     документа через uow.documents.update_status().
+  - CRIT-NEW-1: IntegrityError перехватывается в репозитории и транслируется
+    в AnalysisAlreadyRunningError — инфраструктурные исключения в domain недопустимы.
 """
 from __future__ import annotations
 
 import uuid
 from typing import TYPE_CHECKING
-
-from sqlalchemy.exc import IntegrityError
 
 from app.domain.exceptions import (
     AnalysisAlreadyRunningError,
@@ -100,6 +100,10 @@ class AnalysisJobService:
           3. Сброс документа в DRAFT (если не DRAFT)
           4. INSERT job + UPDATE document.current_analysis_job_id  (фабрика в репозитории)
           5. commit
+
+        CRIT-NEW-1: IntegrityError больше не перехватывается здесь.
+        Репозиторий обязан поймать sqlalchemy.exc.IntegrityError
+        и выбросить AnalysisAlreadyRunningError сам.
         """
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
@@ -133,18 +137,13 @@ class AnalysisJobService:
                 )
 
             # H-2: ORM-объект создаётся внутри репозитория — сервис не знает про AnalysisJob ORM.
-            try:
-                job = await self._uow.jobs.create_for_document(
-                    document,
-                    status=AnalysisJobStatusVO.PENDING,
-                    idempotency_key=idempotency_key,
-                )
-                await self._uow.commit()
-            except IntegrityError as exc:
-                await self._uow.rollback()
-                raise AnalysisAlreadyRunningError(
-                    "Для документа уже выполняется анализ"
-                ) from exc
+            # Репозиторий перехватывает IntegrityError и бросает AnalysisAlreadyRunningError.
+            job = await self._uow.jobs.create_for_document(
+                document,
+                status=AnalysisJobStatusVO.PENDING,
+                idempotency_key=idempotency_key,
+            )
+            await self._uow.commit()
         return job
 
     async def mark_dispatched(
@@ -161,7 +160,6 @@ class AnalysisJobService:
                 raise DocumentNotFoundError(
                     f"Документ {job.document_id} не найден"
                 )
-            # Новая сигнатура: mark_dispatched(job, task_id) → (job, new_doc_status | None)
             job, new_doc_status = await self._uow.jobs.mark_dispatched(job, task_id)
             if new_doc_status is not None and document.current_analysis_job_id == job.id:
                 await self._uow.documents.update_status(document, new_doc_status)
@@ -182,7 +180,6 @@ class AnalysisJobService:
                 raise DocumentNotFoundError(
                     f"Документ {job.document_id} не найден"
                 )
-            # Новая сигнатура: mark_failed_queue_unavailable(job, message) → (job, DocumentStatusVO)
             job, new_doc_status = await self._uow.jobs.mark_failed_queue_unavailable(
                 job, error_message
             )
@@ -215,7 +212,6 @@ class AnalysisJobService:
                 raise DocumentNotFoundError(
                     f"Документ {document_id} не найден"
                 )
-            # Новая сигнатура: cancel(job) → (job, DocumentStatusVO)
             job, new_doc_status = await self._uow.jobs.cancel(job)
             if document.current_analysis_job_id == job.id:
                 await self._uow.documents.update_status(document, new_doc_status)
