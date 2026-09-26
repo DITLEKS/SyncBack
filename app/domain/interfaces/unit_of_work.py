@@ -9,7 +9,7 @@
   - __aenter__ и __aexit__ объявлены @abstractmethod, чтобы тестовые фейки
     были обязаны реализовать их явно.
 
-Namespace-атрибуты (все объявлены здесь для type-checkerʼа):
+Namespace-атрибуты (все объявлены здесь для type-checkerа):
   documents   — IDocumentRepository
   suggestions — ISuggestionRepository
   jobs        — IAnalysisJobRepository
@@ -92,5 +92,5 @@ class IUnitOfWork(ABC):
         """H-4: Обновить ORM-объект из БД через интерфейс.
 
         Используется в воркере вместо прямого обращения к uow._session.
-        attribute_names: список ленивых атрибутов для загрузки (напр., ["соурцес"]).
+        attribute_names: список ленивых атрибутов для загрузки (напр., ["sources"]).
         """

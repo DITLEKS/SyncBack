@@ -3,29 +3,40 @@ DashboardService — оркестрирует агрегаты для GET /dashb
 GET /documents/attention и GET /documents/recent.
 
 Архитектурные правила:
-  - Зависит только от IUnitOfWork (порт).
+  - Зависит только от IDashboardQueryService (read-model порт) для агрегатов.
+  - track_open делегируется через тот же IDashboardQueryService (он содержит upsert_open).
   - Нет импортов из app.infrastructure.* при выполнении.
-  - PERF-1: все COUNT + activity — два запроса вместо четырёх (uow.dashboard).
+
+CRIT-D1 (этот раунд):
+  DashboardService переключён с IUnitOfWork на IDashboardQueryService.
+  Ранее сервис обращался к self._uow.dashboard — которого НЕТ в IUnitOfWork
+  (H-NEW-2 убрал dashboard из UoW), что давало AttributeError на каждый запрос
+  к /dashboard. Теперь сервис принимает IDashboardQueryService напрямую.
+
+  Пример инициализации (core/dependencies.py):
+    def get_dashboard_service(
+        dashboard_qs: IDashboardQueryService = Depends(get_dashboard_query_service),
+    ) -> DashboardService:
+        return DashboardService(dashboard_qs=dashboard_qs)
 """
 from __future__ import annotations
 
 import uuid
 
 from app.api.schemas.dashboard import DashboardResponse, DayActivity
-from app.domain.interfaces.unit_of_work import IUnitOfWork
+from app.domain.interfaces.dashboard_query_service import IDashboardQueryService
 
 
 class DashboardService:
-    def __init__(self, uow: IUnitOfWork) -> None:
-        self._uow = uow
+    def __init__(self, dashboard_qs: IDashboardQueryService) -> None:
+        self._qs = dashboard_qs
 
-    # ── Dashboard агрегаты ————————————————————————————————————————————
+    # ── Dashboard агрегаты ────────────────────────────────────────────
 
     async def get_dashboard(self, user_id: uuid.UUID) -> DashboardResponse:
-        """PERF-1: все COUNT-агрегаты + activity в двух запросах."""
-        async with self._uow:
-            stats = await self._uow.dashboard.get_stats(user_id)
-            activity_rows = await self._uow.dashboard.get_activity_last_7_days(user_id)
+        """CRIT-D1: используем IDashboardQueryService, не uow.dashboard."""
+        stats = await self._qs.get_stats(user_id)
+        activity_rows = await self._qs.get_activity_last_7_days(user_id)
 
         total = stats["total"]
         awaiting = stats["awaiting"]
@@ -42,31 +53,24 @@ class DashboardService:
             ],
         )
 
-    # ── Требуют внимания —————————————————————————————————————————————
+    # ── Требуют внимания ─────────────────────────────────────────────
 
     async def get_attention_documents(
         self, user_id: uuid.UUID, limit: int = 4
     ) -> list[dict]:
-        async with self._uow:
-            return await self._uow.dashboard.get_attention_documents(
-                user_id, limit=limit
-            )
+        return await self._qs.get_attention_documents(user_id, limit=limit)
 
-    # ── Недавние документы ———————————————————————————————————————————
+    # ── Недавние документы ───────────────────────────────────────────
 
     async def get_recent_documents(
         self, user_id: uuid.UUID, limit: int = 5
     ) -> list[dict]:
-        async with self._uow:
-            return await self._uow.dashboard.get_recent_documents(
-                user_id, limit=limit
-            )
+        return await self._qs.get_recent_documents(user_id, limit=limit)
 
-    # ── Трекинг открытия ————————————————————————————————————————————
+    # ── Трекинг открытия ─────────────────────────────────────────────
 
     async def track_open(
         self, user_id: uuid.UUID, document_id: uuid.UUID
     ) -> None:
-        async with self._uow:
-            await self._uow.dashboard.upsert_open(user_id, document_id)
-            await self._uow.commit()
+        """CRIT-D1: upsert_open живёт в IDashboardQueryService, не в UoW."""
+        await self._qs.upsert_open(user_id, document_id)

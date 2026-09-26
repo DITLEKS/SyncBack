@@ -10,6 +10,11 @@ CRIT-NEW-1:
   - Убраны прямые импорты ProjectRepository / UserRepository (инфраструктурные конкреции).
   - Тип аннотаций заменён на IProjectRepository / IUserRepository (порты).
   - get_project_repository добавлен в core/dependencies.py.
+
+CRIT-D2 (этот раунд):
+  - Убран прямой импорт UserRepository из инфраструктурного слоя.
+  - get_current_user теперь принимает IUserRepository через Depends(get_user_repository).
+  - Тип параметра — абстрактный порт, не конкретная реализация.
 """
 
 import uuid
@@ -19,11 +24,10 @@ from fastapi.security import OAuth2PasswordBearer
 
 from app.core.dependencies import get_project_repository, get_user_repository
 from app.domain.exceptions import InvalidTokenError
-from app.domain.interfaces.repositories import IProjectRepository
+from app.domain.interfaces.repositories import IProjectRepository, IUserRepository
 from app.infrastructure.db.models.enums import UserRole
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.user import User
-from app.infrastructure.db.repositories.user_repository import UserRepository
 from app.infrastructure.security.jwt_handler import JWTHandler
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -31,7 +35,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
 async def get_current_user(
     token: str = Depends(oauth2_scheme),
-    user_repository: UserRepository = Depends(get_user_repository),
+    user_repository: IUserRepository = Depends(get_user_repository),
 ) -> User:
     jwt_handler = JWTHandler()
     try:
