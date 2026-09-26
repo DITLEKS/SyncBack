@@ -15,6 +15,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
 
       - name: Prepare test environment
         run: cp .env.example .env
@@ -23,12 +24,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+          pip install anyio aiosqlite
 
       - name: Ruff lint
         run: ruff check .
 
-      - name: Run unit tests
-        run: pytest tests/unit -v
+      - name: Run unit tests (no integration marker)
+        run: pytest -m "not integration" tests/ -v
 
   integration-tests:
     runs-on: ubuntu-latest
@@ -37,9 +39,9 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_USER: syncscribe
+          POSTGRES_USER:     syncscribe
           POSTGRES_PASSWORD: syncscribe
-          POSTGRES_DB: syncscribe
+          POSTGRES_DB:       syncscribe
         ports:
           - 5432:5432
         options: >-
@@ -62,6 +64,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
 
       - name: Start MinIO
         run: |
@@ -93,12 +96,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+          pip install asyncpg "testcontainers[postgres]"
 
       - name: Apply migrations
         run: alembic upgrade head
 
       - name: Run integration tests
-        run: pytest tests/integration -v
+        run: pytest -m integration tests/integration -v
 
   build-images:
     runs-on: ubuntu-latest
