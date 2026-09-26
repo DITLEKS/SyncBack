@@ -7,8 +7,8 @@ get_dashboard_service мог передать его как dashboard_qs= в Das
 Запросы:
   - get_stats                 единый COUNT(*) FILTER вместо трёх отдельных (PERF-1)
   - activity_last_7_days      GROUP BY date за последние 7 дней (из document_opens)
-  - get_attention_documents   Топ-N AWAITING_APPROVAL по pending_suggestions DESC
-  - get_recent_documents      5 последних открытых документов
+  - get_attention_documents   Топ-N AWAITING_APPROVAL по pending_suggestions DESC + status
+  - get_recent_documents      5 последних открытых + счётчики правок (total/resolved)
   - upsert_open               ON CONFLICT DO UPDATE last_opened_at
 """
 from __future__ import annotations
@@ -24,8 +24,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.interfaces.dashboard_query_service import IDashboardQueryService
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.document_open import DocumentOpen
-from app.infrastructure.db.models.enums import DocumentStatus
+from app.infrastructure.db.models.enums import DocumentStatus, SuggestionStatus
 from app.infrastructure.db.models.project import Project
+from app.infrastructure.db.models.suggestion import Suggestion
 
 
 class DashboardRepository(IDashboardQueryService):
@@ -49,11 +50,7 @@ class DashboardRepository(IDashboardQueryService):
     # ------------------------------------------------------------------
 
     async def get_stats(self, owner_id: uuid.UUID) -> dict:
-        """Возвращает {total, awaiting, ready} за один SQL-запрос.
-
-        Использует COUNT(*) FILTER (аналог CASE WHEN) вместо 3 отдельных подзапросов,
-        что убирает 2 лишних RTT при каждой загрузке дашборда.
-        """
+        """Возвращает {total, awaiting, ready} за один SQL-запрос."""
         q = (
             select(
                 func.count().label("total"),
@@ -111,10 +108,10 @@ class DashboardRepository(IDashboardQueryService):
     async def get_attention_documents(
         self, owner_id: uuid.UUID, limit: int = 4
     ) -> list[dict]:
-        """Топ-N документов в AWAITING_APPROVAL, отсортированных по pending_suggestions DESC."""
-        from app.infrastructure.db.models.suggestion import Suggestion
-        from app.infrastructure.db.models.enums import SuggestionStatus
+        """Топ-N документов в AWAITING_APPROVAL, сортировка по pending_suggestions DESC.
 
+        UI-fix: теперь возвращает поле status для цветного бейджа на плашке.
+        """
         pending_count = (
             select(func.count(Suggestion.id))
             .where(
@@ -129,6 +126,7 @@ class DashboardRepository(IDashboardQueryService):
                 Document.id,
                 Document.name,
                 Document.project_id,
+                Document.status,
                 Project.name.label("project_name"),
                 pending_count.label("pending_suggestions"),
                 Document.uploaded_at,
@@ -148,6 +146,7 @@ class DashboardRepository(IDashboardQueryService):
                 "title": r.name,
                 "project_id": r.project_id,
                 "project_name": r.project_name,
+                "status": r.status.value if hasattr(r.status, "value") else r.status,
                 "pending_suggestions": r.pending_suggestions,
                 "updated_at": r.uploaded_at,
             }
@@ -161,7 +160,31 @@ class DashboardRepository(IDashboardQueryService):
     async def get_recent_documents(
         self, user_id: uuid.UUID, limit: int = 5
     ) -> list[dict]:
-        """N последних открытых документов пользователя."""
+        """N последних открытых документов пользователя.
+
+        UI-fix: добавлены suggestions_total и suggestions_resolved
+        для колонки «Изменений» (прогресс-бар) в блоке «Недавние документы».
+        Используем LEFT JOIN + COUNT FILTER по статусам в одном запросе.
+        """
+        total_suggestions = (
+            select(func.count(Suggestion.id))
+            .where(Suggestion.document_id == Document.id)
+            .correlate(Document)
+            .scalar_subquery()
+        )
+        resolved_suggestions = (
+            select(func.count(Suggestion.id))
+            .where(
+                Suggestion.document_id == Document.id,
+                Suggestion.status.in_([
+                    SuggestionStatus.ACCEPTED,
+                    SuggestionStatus.REJECTED,
+                ]),
+            )
+            .correlate(Document)
+            .scalar_subquery()
+        )
+
         q = (
             select(
                 Document.id,
@@ -170,6 +193,8 @@ class DashboardRepository(IDashboardQueryService):
                 Project.name.label("project_name"),
                 Document.status,
                 DocumentOpen.last_opened_at,
+                total_suggestions.label("suggestions_total"),
+                resolved_suggestions.label("suggestions_resolved"),
             )
             .join(DocumentOpen, DocumentOpen.document_id == Document.id)
             .join(Project, Document.project_id == Project.id)
@@ -186,6 +211,8 @@ class DashboardRepository(IDashboardQueryService):
                 "project_name": r.project_name,
                 "status": r.status.value if hasattr(r.status, "value") else r.status,
                 "last_opened_at": r.last_opened_at,
+                "suggestions_total": r.suggestions_total or 0,
+                "suggestions_resolved": r.suggestions_resolved or 0,
             }
             for r in rows
         ]

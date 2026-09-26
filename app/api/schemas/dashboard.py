@@ -15,8 +15,7 @@ from pydantic import BaseModel
 
 class DayActivity(BaseModel):
     date: str          # ISO 8601 date, e.g. "2026-09-14"
-    analyzed: int      # кол-во завершённых analysis_jobs за день
-    approved: int      # кол-во finalize за день
+    opens: int         # кол-во уникальных открытий документов за день
 
 
 class DashboardResponse(BaseModel):
@@ -37,6 +36,9 @@ class AttentionDocumentItem(BaseModel):
     title: str
     project_id: uuid.UUID
     project_name: str
+    # статус документа — всегда awaiting_approval, но фронт использует
+    # для отображения цветного бейджа статуса на плашке
+    status: str
     pending_suggestions: int
     updated_at: datetime
 
@@ -50,3 +52,6 @@ class RecentDocumentItem(BaseModel):
     project_name: str
     status: str
     last_opened_at: datetime
+    # счётчики для колонки «Изменений» (прогресс-бар resolved/total)
+    suggestions_total: int = 0
+    suggestions_resolved: int = 0   # accepted + rejected
