@@ -1,12 +1,7 @@
 """
 Бизнес-логика работы с правками: точечный accept/reject, bulk-accept,
-finalize_review, атомарное сохранение сессии ревью (P0-2) и сборка
+finalize_review, атомарное сохранение сессии ревью и сборка
 списка принятых изменений для экспорта.
-
-ИСПРАВЛЕНО:
-- PERF-2: apply_review принимает user_id; больше нет uuid(int=0) в audit_log.
-- CODE-3: дублированный export-блок вынесен в _run_export().
-- P0-#13: bulk_accept() возвращает BulkAcceptResult(правки, документ).
 """
 from __future__ import annotations
 
@@ -21,7 +16,6 @@ from app.domain.exceptions import (
     OptimisticLockError,
     ReviewNotCompleteError,
     ReviewVersionConflictError,
-    StaleReviewVersionError,
     SuggestionAlreadyDecidedError,
     SuggestionNotFoundError,
 )
@@ -51,7 +45,7 @@ class ReviewSaveResult:
 
 @dataclass
 class BulkAcceptResult:
-    """P0-#13: результат bulk-accept — список правок + актуальный документ."""
+    """Результат bulk-accept — список правок + актуальный документ."""
 
     suggestions: list[Suggestion]
     document: Document
@@ -100,7 +94,7 @@ class SuggestionService:
         document: Document,
         export_service: "DocumentExportService",
     ) -> None:
-        """CODE-3: единый экспорт-блок, ранее дублировавшийся в finalize_review
+        """Единый экспорт-блок, используемый в finalize_review
         и atomic_review_save. Бросает ReviewNotCompleteError при ошибке."""
         try:
             await export_service.export_and_save(document)
@@ -211,7 +205,7 @@ class SuggestionService:
         document_id: uuid.UUID,
         user_id: uuid.UUID,
     ) -> BulkAcceptResult:
-        """P0-#13: возвращает BulkAcceptResult(правки, документ)."""
+        """Принимает все pending-правки, возвращает BulkAcceptResult(правки, документ)."""
         document = await self._get_document_or_raise(project_id, document_id)
         if document.status != DocumentStatus.AWAITING_APPROVAL:
             raise InvalidDocumentStatusError(
@@ -232,7 +226,7 @@ class SuggestionService:
         )
 
     # ------------------------------------------------------------------
-    # P0-2 (rev-4): apply_review
+    # apply_review: применить решения и пробить версию
     # ------------------------------------------------------------------
 
     async def apply_review(
@@ -244,8 +238,9 @@ class SuggestionService:
         rejected_ids: list[uuid.UUID],
         current_review_version: int,
     ) -> int:
-        """PERF-2: user_id теперь обязателен — записывается реальный актор
-        вместо 00000000-0000-0000-0000-000000000000 в audit_log."""
+        """Применяет решения по правкам и атомарно увеличивает review_version.
+        Возвращает новую версию. user_id записывается в audit_log.
+        """
         document = await self._get_document_or_raise(project_id, document_id)
 
         if document.review_version != current_review_version:
@@ -264,7 +259,7 @@ class SuggestionService:
                 rejected_ids, SuggestionStatus.REJECTED, user_id
             )
 
-        updated_document = await self._documents.bump_review_version(document)
+        updated_document = await self._documents.increment_review_version(document)
         return updated_document.review_version
 
     # ------------------------------------------------------------------
@@ -277,7 +272,6 @@ class SuggestionService:
         document_id: uuid.UUID,
         export_service: "DocumentExportService | None" = None,
     ) -> Document:
-        """CODE-3: использует _run_export() вместо встроенного try/except."""
         document = await self._get_document_or_raise(project_id, document_id)
         if document.status != DocumentStatus.AWAITING_APPROVAL:
             raise InvalidDocumentStatusError(
@@ -299,7 +293,7 @@ class SuggestionService:
         return await self._documents.update_status(document, DocumentStatus.READY)
 
     # ------------------------------------------------------------------
-    # P0-2: атомарное сохранение сессии ревью
+    # Атомарное сохранение сессии ревью
     # ------------------------------------------------------------------
 
     async def atomic_review_save(
@@ -312,7 +306,6 @@ class SuggestionService:
         finalize: bool = True,
         export_service: "DocumentExportService | None" = None,
     ) -> ReviewSaveResult:
-        """CODE-3: использует _run_export() вместо встроенного try/except."""
         document = await self._get_document_or_raise(project_id, document_id)
 
         if document.status != DocumentStatus.AWAITING_APPROVAL:
