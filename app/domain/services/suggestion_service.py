@@ -3,15 +3,16 @@
 
 Архитектурные правила:
   - Сервис зависит только от IUnitOfWork (порт) и domain value-objects.
-  - Никаких импортов из app.infrastructure.* при выполнении.
+  - Никаких импортов из app.infrastructure.* — ни при выполнении, ни под TYPE_CHECKING.
   - Один uow.commit() на операцию — атомарность гарантируется УоУ.
+  - M-1: Document/Suggestion аннотируются через Protocol,
+    а не ORM-модель.
 """
 from __future__ import annotations
 
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from app.domain.exceptions import (
     DocumentNotFoundError,
@@ -22,6 +23,7 @@ from app.domain.exceptions import (
     SuggestionNotFoundError,
 )
 from app.domain.interfaces.document_exporter import AppliedChange
+from app.domain.interfaces.entities import DocumentProtocol, SuggestionProtocol
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.value_objects import (
     DocumentStatusVO,
@@ -31,10 +33,8 @@ from app.domain.value_objects import (
     SuggestionStatusVO,
 )
 
-if TYPE_CHECKING:
-    from app.domain.services.document_export_service import DocumentExportService
-    from app.infrastructure.db.models.document import Document
-    from app.infrastructure.db.models.suggestion import Suggestion
+if False:  # noqa: SIM210  — заглушаем TYPE_CHECKING чтобы не импортировать
+    from app.domain.services.document_export_service import DocumentExportService  # noqa: F401
 
 logger = logging.getLogger("syncscribe.services.suggestion")
 
@@ -42,7 +42,7 @@ logger = logging.getLogger("syncscribe.services.suggestion")
 @dataclass
 class ReviewSaveResult:
     """Результат атомарного сохранения сессии ревью."""
-    document: "Document"
+    document: DocumentProtocol
     accepted_count: int = 0
     rejected_count: int = 0
     pending_count: int = 0
@@ -52,8 +52,8 @@ class ReviewSaveResult:
 @dataclass
 class BulkAcceptResult:
     """Результат bulk-accept — список правок + актуальный документ."""
-    suggestions: "list[Suggestion]"
-    document: "Document"
+    suggestions: list[SuggestionProtocol]
+    document: DocumentProtocol
 
 
 class SuggestionService:
@@ -66,7 +66,7 @@ class SuggestionService:
 
     async def _get_document_or_raise(
         self, project_id: uuid.UUID, document_id: uuid.UUID
-    ) -> "Document":
+    ) -> DocumentProtocol:
         document = await self._uow.documents.get_by_id(document_id)
         if document is None or document.project_id != project_id:
             raise DocumentNotFoundError(
@@ -76,9 +76,9 @@ class SuggestionService:
 
     async def _get_suggestion_for_document(
         self,
-        document: "Document",
+        document: DocumentProtocol,
         suggestion_id: uuid.UUID,
-    ) -> "Suggestion":
+    ) -> SuggestionProtocol:
         suggestion = await self._uow.suggestions.get_by_id(suggestion_id)
         if (
             suggestion is None
@@ -91,7 +91,7 @@ class SuggestionService:
 
     async def _run_export(
         self,
-        document: "Document",
+        document: DocumentProtocol,
         export_service: "DocumentExportService",
     ) -> None:
         try:
@@ -105,13 +105,13 @@ class SuggestionService:
                 "Не удалось применить утверждённые правки к документу."
             ) from err
 
-    def _assert_awaiting_approval(self, document: "Document") -> None:
+    def _assert_awaiting_approval(self, document: DocumentProtocol) -> None:
         if document.status != DocumentStatusVO.AWAITING_APPROVAL:
             raise InvalidDocumentStatusError(
                 "Решения по правкам доступны только в статусе 'awaiting_approval'"
             )
 
-    def _assert_has_active_job(self, document: "Document") -> uuid.UUID:
+    def _assert_has_active_job(self, document: DocumentProtocol) -> uuid.UUID:
         if document.current_analysis_job_id is None:
             raise ReviewNotCompleteError(
                 "У документа отсутствует текущий результат анализа"
@@ -127,7 +127,7 @@ class SuggestionService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         pagination: PaginationParams,
-    ) -> "tuple[list[Suggestion], int]":
+    ) -> tuple[list[SuggestionProtocol], int]:
         """Один SELECT с COUNT(*) OVER() вместо двух запросов (H-3)."""
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
@@ -143,7 +143,7 @@ class SuggestionService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         suggestion_id: uuid.UUID,
-    ) -> "Suggestion":
+    ) -> SuggestionProtocol:
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             return await self._get_suggestion_for_document(document, suggestion_id)
@@ -174,10 +174,10 @@ class SuggestionService:
 
     async def _decide(
         self,
-        document: "Document",
-        suggestion: "Suggestion",
+        document: DocumentProtocol,
+        suggestion: SuggestionProtocol,
         decision: SuggestionDecision,
-    ) -> "Suggestion":
+    ) -> SuggestionProtocol:
         """CAS-обновление одной правки."""
         self._assert_awaiting_approval(document)
         updated = await self._uow.suggestions.update_status(suggestion, decision)
@@ -193,7 +193,7 @@ class SuggestionService:
         document_id: uuid.UUID,
         suggestion_id: uuid.UUID,
         user_id: uuid.UUID,
-    ) -> "Suggestion":
+    ) -> SuggestionProtocol:
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             suggestion = await self._get_suggestion_for_document(document, suggestion_id)
@@ -212,7 +212,7 @@ class SuggestionService:
         document_id: uuid.UUID,
         suggestion_id: uuid.UUID,
         user_id: uuid.UUID,
-    ) -> "Suggestion":
+    ) -> SuggestionProtocol:
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             suggestion = await self._get_suggestion_for_document(document, suggestion_id)
@@ -274,7 +274,7 @@ class SuggestionService:
         document_id: uuid.UUID,
         user_id: uuid.UUID,
         export_service: "DocumentExportService | None" = None,
-    ) -> "Document":
+    ) -> DocumentProtocol:
         """M-7: принимает user_id для аудита ъкто финализировал ревью."""
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)

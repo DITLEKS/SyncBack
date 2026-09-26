@@ -9,8 +9,9 @@ Infrastructure-слой предоставляет конкретные адап
   - <Name>Repository   — адаптер (в app/infrastructure/db/repositories/)
 
 Правило импортов:
-  - НИКАКИХ импортов из app.infrastructure.* при выполнении.
-  - ORM-модели под TYPE_CHECKING — временная мера до замены domain entities.
+  - Document и Suggestion — через DocumentProtocol/SuggestionProtocol (не ORM).
+  - Остальные ORM-типы (AnalysisJob, AuditLog, Project, Source) пока под
+    TYPE_CHECKING — постепенная миграция.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
+from app.domain.interfaces.entities import DocumentProtocol, SuggestionProtocol
 from app.domain.value_objects import (
     AnalysisJobStatusVO,
     DocumentStatusVO,
@@ -34,10 +36,8 @@ from app.domain.value_objects import (
 if TYPE_CHECKING:
     from app.infrastructure.db.models.analysis_job import AnalysisJob
     from app.infrastructure.db.models.audit_log import AuditLog
-    from app.infrastructure.db.models.document import Document
     from app.infrastructure.db.models.project import Project
     from app.infrastructure.db.models.source import Source
-    from app.infrastructure.db.models.suggestion import Suggestion
 
 
 # ---------------------------------------------------------------------------
@@ -46,12 +46,12 @@ if TYPE_CHECKING:
 
 class IDocumentRepository(ABC):
     @abstractmethod
-    async def get_by_id(self, document_id: uuid.UUID) -> "Document | None": ...
+    async def get_by_id(self, document_id: uuid.UUID) -> DocumentProtocol | None: ...
 
     @abstractmethod
     async def list_for_project(
         self, project_id: uuid.UUID, limit: int, offset: int
-    ) -> "list[Document]": ...
+    ) -> list[DocumentProtocol]: ...
 
     @abstractmethod
     async def count_for_project(self, project_id: uuid.UUID) -> int: ...
@@ -59,17 +59,17 @@ class IDocumentRepository(ABC):
     @abstractmethod
     async def list_analyzable_for_project(
         self, project_id: uuid.UUID
-    ) -> "list[Document]": ...
+    ) -> list[DocumentProtocol]: ...
 
     @abstractmethod
     async def update_status(
-        self, document: "Document", status: DocumentStatusVO
-    ) -> "Document": ...
+        self, document: DocumentProtocol, status: DocumentStatusVO
+    ) -> DocumentProtocol: ...
 
     @abstractmethod
     async def compare_and_increment_review_version(
         self, document_id: uuid.UUID, expected_version: int
-    ) -> "Document | None": ...
+    ) -> DocumentProtocol | None: ...
 
     @abstractmethod
     async def get_stats_for_project(
@@ -78,7 +78,7 @@ class IDocumentRepository(ABC):
 
     @abstractmethod
     async def update_exported_key(
-        self, document: "Document", export_key: str
+        self, document: DocumentProtocol, export_key: str
     ) -> None:
         """Сохранить storage_key экспортированного файла."""
 
@@ -90,27 +90,27 @@ class IDocumentRepository(ABC):
 class ISuggestionRepository(ABC):
     @abstractmethod
     async def bulk_create(
-        self, suggestions: "list[Suggestion]"
-    ) -> "list[Suggestion]": ...
+        self, suggestions: list[SuggestionProtocol]
+    ) -> list[SuggestionProtocol]: ...
 
     @abstractmethod
     async def get_by_id(
         self, suggestion_id: uuid.UUID
-    ) -> "Suggestion | None": ...
+    ) -> SuggestionProtocol | None: ...
 
     @abstractmethod
     async def list_by_analysis_job(
         self,
         analysis_job_id: uuid.UUID,
         pagination: KeysetPage | PaginationParams,
-    ) -> "list[Suggestion]": ...
+    ) -> list[SuggestionProtocol]: ...
 
     @abstractmethod
     async def list_with_total(
         self,
         analysis_job_id: uuid.UUID,
         pagination: PaginationParams,
-    ) -> "tuple[list[Suggestion], int]":
+    ) -> tuple[list[SuggestionProtocol], int]:
         """Один SELECT с COUNT(*) OVER() — список + общий счётчик за один round-trip."""
 
     @abstractmethod
@@ -126,10 +126,9 @@ class ISuggestionRepository(ABC):
         self,
         analysis_job_id: uuid.UUID,
         status: SuggestionStatusVO,
-    ) -> "list[Suggestion]":
+    ) -> list[SuggestionProtocol]:
         """
         Без LIMIT: источник для экспорта — возвращает все принятые правки.
-        Пагинация для экспорта реализована на уровне DocumentExportService.
         """
 
     @abstractmethod
@@ -140,16 +139,16 @@ class ISuggestionRepository(ABC):
     @abstractmethod
     async def update_status(
         self,
-        suggestion: "Suggestion",
+        suggestion: SuggestionProtocol,
         decision: SuggestionDecision,
-    ) -> "Suggestion | None":
+    ) -> SuggestionProtocol | None:
         """CAS-обновление статуса одной правки. None — уже обработана."""
 
     @abstractmethod
     async def bulk_update_status(
         self,
         decisions: ReviewDecisions,
-    ) -> "list[Suggestion]":
+    ) -> list[SuggestionProtocol]:
         """Единый UPDATE для accepted + rejected через ReviewDecisions VO."""
 
     @abstractmethod
@@ -157,7 +156,7 @@ class ISuggestionRepository(ABC):
         self,
         analysis_job_id: uuid.UUID,
         user_id: uuid.UUID,
-    ) -> "list[Suggestion]":
+    ) -> list[SuggestionProtocol]:
         """UPDATE WHERE job_id=X AND status='pending' RETURNING * без SELECT UUID в память."""
 
 
@@ -181,22 +180,22 @@ class IAnalysisJobRepository(ABC):
 
     @abstractmethod
     async def create_for_document(
-        self, job: "AnalysisJob", document: "Document"
+        self, job: "AnalysisJob", document: DocumentProtocol
     ) -> "AnalysisJob": ...
 
     @abstractmethod
     async def mark_dispatched(
-        self, job: "AnalysisJob", document: "Document", task_id: str
+        self, job: "AnalysisJob", document: DocumentProtocol, task_id: str
     ) -> "AnalysisJob": ...
 
     @abstractmethod
     async def mark_failed_queue_unavailable(
-        self, job: "AnalysisJob", document: "Document", message: str | None
+        self, job: "AnalysisJob", document: DocumentProtocol, message: str | None
     ) -> "AnalysisJob": ...
 
     @abstractmethod
     async def cancel(
-        self, job: "AnalysisJob", document: "Document"
+        self, job: "AnalysisJob", document: DocumentProtocol
     ) -> "AnalysisJob": ...
 
     @abstractmethod
@@ -207,8 +206,8 @@ class IAnalysisJobRepository(ABC):
         self,
         job: "AnalysisJob",
         status: AnalysisJobStatusVO,
-        error_code: str | None,
-        error_message: str | None,
+        error_code: str | None = None,
+        error_message: str | None = None,
     ) -> "AnalysisJob": ...
 
 
