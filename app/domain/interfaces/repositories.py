@@ -23,7 +23,6 @@ from app.domain.interfaces.entities import DocumentProtocol, SuggestionProtocol
 from app.domain.value_objects import (
     AnalysisJobStatusVO,
     DocumentStatusVO,
-    DocumentStats,
     KeysetPage,
     PaginationParams,
     ReviewDecisions,
@@ -36,6 +35,8 @@ from app.domain.value_objects import (
 if TYPE_CHECKING:
     from app.infrastructure.db.models.analysis_job import AnalysisJob
     from app.infrastructure.db.models.audit_log import AuditLog
+    from app.infrastructure.db.models.document import Document
+    from app.infrastructure.db.models.enums import DocumentFormat
     from app.infrastructure.db.models.project import Project
     from app.infrastructure.db.models.source import Source
 
@@ -45,12 +46,28 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 class IDocumentRepository(ABC):
+
+    # CRIT-2 (HIGH-1): factory — H-5, сервис передаёт параметры, репо строит ORM
+    @abstractmethod
+    async def create(
+        self,
+        *,
+        id: uuid.UUID,
+        project_id: uuid.UUID,
+        title: str,
+        format: "DocumentFormat",
+        storage_key: str,
+    ) -> "Document": ...
+
     @abstractmethod
     async def get_by_id(self, document_id: uuid.UUID) -> DocumentProtocol | None: ...
 
+    # CRIT-2: signature now matches DocumentRepository — accepts pagination object
     @abstractmethod
     async def list_for_project(
-        self, project_id: uuid.UUID, limit: int, offset: int
+        self,
+        project_id: uuid.UUID,
+        pagination: KeysetPage | PaginationParams,
     ) -> list[DocumentProtocol]: ...
 
     @abstractmethod
@@ -71,17 +88,26 @@ class IDocumentRepository(ABC):
         self, document_id: uuid.UUID, expected_version: int
     ) -> DocumentProtocol | None: ...
 
+    # CRIT-3: return type aligned with implementation — raw dict
     @abstractmethod
     async def get_stats_for_project(
         self, project_id: uuid.UUID
-    ) -> DocumentStats: ...
+    ) -> dict[str, int]:
+        """Один SQL-запрос: COUNT(*) FILTER per status.
 
+        Ключи ответа: draft, in_progress, awaiting_approval, approved,
+        rejected, total.
+        Для conversion в DocumentStats VO используйте DocumentStats(**result).
+        """
+
+    # HIGH-1: was missing from implementation
     @abstractmethod
     async def update_exported_key(
         self, document: DocumentProtocol, export_key: str
     ) -> None:
         """Сохранить storage_key экспортированного файла."""
 
+    # HIGH-2: was missing from implementation
     @abstractmethod
     async def list_all_for_user(
         self,
@@ -94,6 +120,9 @@ class IDocumentRepository(ABC):
         sort_dir: str = "desc",
     ) -> tuple[list[DocumentProtocol], int]:
         """Вернуть список + общий счётчик документов пользователя с фильтрацией/сортировкой."""
+
+    @abstractmethod
+    async def delete(self, document: DocumentProtocol) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -191,10 +220,22 @@ class IAnalysisJobRepository(ABC):
         self, document_id: uuid.UUID
     ) -> "AnalysisJob | None": ...
 
+    # CRIT-1: removed obsolete `job: AnalysisJob` arg; signature now matches
+    # AnalysisJobRepository.create_for_document (H-2 factory pattern)
     @abstractmethod
     async def create_for_document(
-        self, job: "AnalysisJob", document: DocumentProtocol
-    ) -> "AnalysisJob": ...
+        self,
+        document: DocumentProtocol,
+        *,
+        job_id: uuid.UUID | None = None,
+        status: AnalysisJobStatusVO = AnalysisJobStatusVO.PENDING,
+        idempotency_key: str | None = None,
+    ) -> "AnalysisJob":
+        """Фабричный метод: создаёт ORM-объект AnalysisJob внутри репозитория.
+
+        H-2: сервис передаёт только параметры — репозиторий сам строит ORM-инстанс.
+        Commit — ответственность вызывающего UoW.
+        """
 
     @abstractmethod
     async def mark_dispatched(

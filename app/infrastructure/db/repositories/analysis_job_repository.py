@@ -9,6 +9,9 @@ SQLAlchemy-адаптер для AnalysisJob.
 - Конвертация инкапсулирована в _status_to_orm / _status_from_orm.
 - Импорты ORM-моделей отложены (TYPE_CHECKING / локальные) — домен не зависит от инфры.
 - H-2: create_for_document принимает параметры, а не готовый ORM-инстанс.
+- HIGH-3: mark_dispatched, mark_failed_queue_unavailable, cancel — прямые мутации
+  document.status заменены на _set_doc_status() через _status_to_orm(DocumentStatusVO),
+  убран raw _doc_status(str) helper.
 """
 from __future__ import annotations
 
@@ -20,7 +23,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.repositories import IAnalysisJobRepository
-from app.domain.value_objects import AnalysisJobStatusVO
+from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models.analysis_job import AnalysisJob
@@ -32,10 +35,14 @@ def _status_to_orm(vo: AnalysisJobStatusVO):
     return AnalysisJobStatus(vo.value)
 
 
-def _doc_status(name: str):
-    """Хелпер: получает DocumentStatus ORM-enum по имени."""
+def _doc_status_to_orm(vo: DocumentStatusVO):
+    """HIGH-3: конвертация DocumentStatusVO → ORM DocumentStatus.
+
+    Используется внутри репозитория для обновления document.status без
+    прямого строкового лукапа DocumentStatus[name].
+    """
     from app.infrastructure.db.models.enums import DocumentStatus
-    return DocumentStatus[name]
+    return DocumentStatus(vo.value)
 
 
 class AnalysisJobRepository(IAnalysisJobRepository):
@@ -94,7 +101,8 @@ class AnalysisJobRepository(IAnalysisJobRepository):
     ) -> "AnalysisJob":
         """Фабричный метод: создаёт ORM-объект AnalysisJob внутри репозитория.
 
-        H-2: сервис передаёт только параметры — репозиторий сам строит ORM-инстанс.
+        CRIT-1/H-2: сигнатура синхронизирована с IAnalysisJobRepository.create_for_document.
+        Сервис передаёт только параметры — репозиторий сам строит ORM-инстанс.
         Commit — ответственность вызывающего UoW.
         """
         from app.infrastructure.db.models.analysis_job import AnalysisJob as M
@@ -123,7 +131,8 @@ class AnalysisJobRepository(IAnalysisJobRepository):
             job.status in (AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING)
             and document.current_analysis_job_id == job.id
         ):
-            document.status = _doc_status("IN_PROGRESS")
+            # HIGH-3: через _doc_status_to_orm(VO), не через raw DocumentStatus["IN_PROGRESS"]
+            document.status = _doc_status_to_orm(DocumentStatusVO.IN_PROGRESS)
         await self._session.flush()
         await self._session.refresh(job)
         return job
@@ -140,7 +149,8 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         job.error_message = message
         job.finished_at = datetime.now(UTC)
         if document.current_analysis_job_id == job.id:
-            document.status = _doc_status("DRAFT")
+            # HIGH-3: через VO
+            document.status = _doc_status_to_orm(DocumentStatusVO.DRAFT)
         await self._session.flush()
         await self._session.refresh(job)
         return job
@@ -156,7 +166,8 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         job.error_message = "Анализ отменён"
         job.finished_at = datetime.now(UTC)
         if document.current_analysis_job_id == job.id:
-            document.status = _doc_status("DRAFT")
+            # HIGH-3: через VO
+            document.status = _doc_status_to_orm(DocumentStatusVO.DRAFT)
         await self._session.flush()
         await self._session.refresh(job)
         return job
