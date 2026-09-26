@@ -12,6 +12,12 @@ SQLAlchemy-адаптер для AnalysisJob.
 - HIGH-3: mark_dispatched, mark_failed_queue_unavailable, cancel — прямые мутации
   document.status заменены на _set_doc_status() через _status_to_orm(DocumentStatusVO),
   убран raw _doc_status(str) helper.
+- CRIT-A/B: AnalysisJobRepository больше НЕ мутирует document.status напрямую.
+  mark_dispatched / mark_failed_queue_unavailable / cancel принимают опциональный
+  document и возвращают DocumentStatusVO, которую вызывающий код применяет через
+  uow.documents.update_status(). Это восстанавливает инвариант одного агрегата.
+- HIGH-B: mark_failed_queue_unavailable и cancel делегируют логику update_status().
+- M-B: mark_processing_if_active → добавлен RETURNING для надёжного rowcount.
 """
 from __future__ import annotations
 
@@ -33,16 +39,6 @@ if TYPE_CHECKING:
 def _status_to_orm(vo: AnalysisJobStatusVO):
     from app.infrastructure.db.models.enums import AnalysisJobStatus
     return AnalysisJobStatus(vo.value)
-
-
-def _doc_status_to_orm(vo: DocumentStatusVO):
-    """HIGH-3: конвертация DocumentStatusVO → ORM DocumentStatus.
-
-    Используется внутри репозитория для обновления document.status без
-    прямого строкового лукапа DocumentStatus[name].
-    """
-    from app.infrastructure.db.models.enums import DocumentStatus
-    return DocumentStatus(vo.value)
 
 
 class AnalysisJobRepository(IAnalysisJobRepository):
@@ -121,59 +117,63 @@ class AnalysisJobRepository(IAnalysisJobRepository):
     async def mark_dispatched(
         self,
         job: "AnalysisJob",
-        document: "Document",
         task_id: str,
-    ) -> "AnalysisJob":
+    ) -> "tuple[AnalysisJob, DocumentStatusVO | None]":
+        """Пометить задачу как отправленную в Celery.
+
+        CRIT-A: больше не мутирует document напрямую.
+        Возвращает (job, new_doc_status | None) — вызывающий код применяет
+        изменение документа через uow.documents.update_status().
+        """
         from app.infrastructure.db.models.enums import AnalysisJobStatus
         await self._session.refresh(job)
         job.celery_task_id = task_id
-        if (
-            job.status in (AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING)
-            and document.current_analysis_job_id == job.id
-        ):
-            # HIGH-3: через _doc_status_to_orm(VO), не через raw DocumentStatus["IN_PROGRESS"]
-            document.status = _doc_status_to_orm(DocumentStatusVO.IN_PROGRESS)
+        new_doc_status: DocumentStatusVO | None = None
+        if job.status in (AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING):
+            new_doc_status = DocumentStatusVO.IN_PROGRESS
         await self._session.flush()
         await self._session.refresh(job)
-        return job
+        return job, new_doc_status
 
     async def mark_failed_queue_unavailable(
         self,
         job: "AnalysisJob",
-        document: "Document",
         message: str | None,
-    ) -> "AnalysisJob":
-        from app.infrastructure.db.models.enums import AnalysisJobStatus
-        job.status = AnalysisJobStatus.FAILED
-        job.error_code = "QUEUE_UNAVAILABLE"
-        job.error_message = message
-        job.finished_at = datetime.now(UTC)
-        if document.current_analysis_job_id == job.id:
-            # HIGH-3: через VO
-            document.status = _doc_status_to_orm(DocumentStatusVO.DRAFT)
-        await self._session.flush()
-        await self._session.refresh(job)
-        return job
+    ) -> "tuple[AnalysisJob, DocumentStatusVO]":
+        """CRIT-B / HIGH-B: делегирует update_status(), не мутирует document.
+
+        Возвращает (job, DocumentStatusVO.DRAFT) — вызывающий код обновляет документ.
+        """
+        job = await self.update_status(
+            job,
+            AnalysisJobStatusVO.FAILED,
+            error_code="QUEUE_UNAVAILABLE",
+            error_message=message,
+        )
+        return job, DocumentStatusVO.DRAFT
 
     async def cancel(
         self,
         job: "AnalysisJob",
-        document: "Document",
-    ) -> "AnalysisJob":
-        from app.infrastructure.db.models.enums import AnalysisJobStatus
-        job.status = AnalysisJobStatus.CANCELLED
-        job.error_code = "ANALYSIS_CANCELLED"
-        job.error_message = "Анализ отменён"
-        job.finished_at = datetime.now(UTC)
-        if document.current_analysis_job_id == job.id:
-            # HIGH-3: через VO
-            document.status = _doc_status_to_orm(DocumentStatusVO.DRAFT)
-        await self._session.flush()
-        await self._session.refresh(job)
-        return job
+    ) -> "tuple[AnalysisJob, DocumentStatusVO]":
+        """CRIT-B / HIGH-B: делегирует update_status(), не мутирует document.
+
+        Возвращает (job, DocumentStatusVO.DRAFT) — вызывающий код обновляет документ.
+        """
+        job = await self.update_status(
+            job,
+            AnalysisJobStatusVO.CANCELLED,
+            error_code="ANALYSIS_CANCELLED",
+            error_message="Анализ отменён",
+        )
+        return job, DocumentStatusVO.DRAFT
 
     async def mark_processing_if_active(self, job_id: uuid.UUID) -> bool:
-        """Atomic CAS: PENDING/PROCESSING → PROCESSING. Возвращает True если обновлено."""
+        """Atomic CAS: PENDING/PROCESSING → PROCESSING.
+
+        M-B: использует RETURNING вместо rowcount для надёжности на asyncpg.
+        Возвращает True если строка была обновлена.
+        """
         from app.infrastructure.db.models.analysis_job import AnalysisJob as M
         from app.infrastructure.db.models.enums import AnalysisJobStatus
         result = await self._session.execute(
@@ -188,9 +188,10 @@ class AnalysisJobRepository(IAnalysisJobRepository):
                 status=AnalysisJobStatus.PROCESSING,
                 started_at=func.coalesce(M.started_at, datetime.now(UTC)),
             )
+            .returning(M.id)
         )
         await self._session.flush()
-        return bool(result.rowcount)
+        return result.scalar_one_or_none() is not None
 
     async def update_status(
         self,
