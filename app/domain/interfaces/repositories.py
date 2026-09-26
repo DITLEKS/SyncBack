@@ -10,7 +10,7 @@ Infrastructure-слой предоставляет конкретные адап
 
 Правило импортов:
   - Document и Suggestion — через DocumentProtocol/SuggestionProtocol (не ORM).
-  - Остальные ORM-типы (AnalysisJob, AuditLog, Project, Source) пока под
+  - Остальные ORM-типы (AnalysisJob, AuditLog, Project, Source) пока под
     TYPE_CHECKING — постепенная миграция.
 """
 from __future__ import annotations
@@ -81,6 +81,19 @@ class IDocumentRepository(ABC):
         self, document: DocumentProtocol, export_key: str
     ) -> None:
         """Сохранить storage_key экспортированного файла."""
+
+    @abstractmethod
+    async def list_all_for_user(
+        self,
+        user_id: uuid.UUID,
+        limit: int,
+        offset: int,
+        status: DocumentStatusVO | None = None,
+        search: str | None = None,
+        sort_by: str = "updated_at",
+        sort_dir: str = "desc",
+    ) -> tuple[list[DocumentProtocol], int]:
+        """Вернуть список + общий счётчик документов пользователя с фильтрацией/сортировкой."""
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +292,10 @@ class IProjectRepository(ABC):
 # ---------------------------------------------------------------------------
 
 class ISourceRepository(ABC):
+    @abstractmethod
+    async def get_by_id(self, source_id: uuid.UUID) -> "Source | None":
+        """Получить один источник по ID. Используется в воркере для обработки одного источника."""
+
     @abstractmethod
     async def create(
         self,
