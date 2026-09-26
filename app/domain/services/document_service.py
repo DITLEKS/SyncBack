@@ -8,9 +8,12 @@
   - Один uow.commit() на операцию.
 
 ДОБАВЛЕНО:
-- delete_document()       — удаляет MinIO-файл (best-effort), затем запись в БД.
+- delete_document()       — удаляет MinIO-файл (бест-еффорт), затем запись в БД.
 - get_original_content()  — читает снапшот текста до правок (#7).
 - H-5: ORM-объект Document создаётся внутри репозитория через фабричный метод.
+
+CRIT-NEW-2: list_documents передаёт PaginationParams-объект, а не limit/offset позиционно.
+CRIT-NEW-3: attach_sources удалён — метода нет в IDocumentRepository.
 """
 from __future__ import annotations
 
@@ -28,7 +31,7 @@ from app.domain.exceptions import (
 from app.domain.interfaces.document_parser import ParsedDocument
 from app.domain.interfaces.file_storage import FileStorage
 from app.domain.interfaces.unit_of_work import IUnitOfWork
-from app.domain.value_objects import DocumentStatusVO, PaginationParams
+from app.domain.value_objects import DocumentStatusVO, KeysetPage, PaginationParams
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 
 if TYPE_CHECKING:
@@ -115,13 +118,14 @@ class DocumentService:
     async def list_documents(
         self,
         project_id: uuid.UUID,
-        pagination: PaginationParams,
+        pagination: PaginationParams | KeysetPage,
     ) -> tuple[list["Document"], int]:
+        """CRIT-NEW-2: передаём pagination-объект целиком, не limit/offset позиционно."""
         async with self._uow:
-            items = await self._uow.documents.list_by_project(
-                project_id, pagination.limit, pagination.offset
+            items = await self._uow.documents.list_for_project(
+                project_id, pagination
             )
-            total = await self._uow.documents.count_by_project(project_id)
+            total = await self._uow.documents.count_for_project(project_id)
         return items, total
 
     async def get_document(
@@ -167,7 +171,7 @@ class DocumentService:
     async def delete_document(self, document: "Document") -> None:
         """
         Удаление документа:
-        1. Удаляем файл из MinIO (best-effort).
+        1. Удаляем файл из MinIO (бест-эффорт).
         2. Удаляем запись из БД — ON DELETE CASCADE уберёт
            suggestions, analysis_jobs, document_sources.
         """
@@ -212,11 +216,3 @@ class DocumentService:
         storage_key = original_key or document.storage_key
         raw_bytes = await self._storage.download(storage_key)
         return self._parser_registry.parse_by_filename(storage_key, raw_bytes)
-
-    async def attach_sources(
-        self, document: "Document", sources: list
-    ) -> "Document":
-        async with self._uow:
-            result = await self._uow.documents.attach_sources(document, sources)
-            await self._uow.commit()
-        return result
