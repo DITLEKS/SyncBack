@@ -2,11 +2,16 @@
 Бизнес-логика управления задачами анализа.
 
 H2.2: сервис принимает AnalysisJobPort / DocumentPort вместо конкретных репозиториев.
+      Все enum-импорты перенесены в app.domain.enums.
+      sqlalchemy.exc.IntegrityError перехватывается в infrastructure-слое;
+      сервис получает только доменные исключения.
 """
+from __future__ import annotations
+
 import uuid
+from typing import TYPE_CHECKING
 
-from sqlalchemy.exc import IntegrityError
-
+from app.domain.enums import AnalysisJobStatus, DocumentStatus
 from app.domain.exceptions import (
     AnalysisAlreadyRunningError,
     AnalysisJobNotCancellableError,
@@ -15,9 +20,10 @@ from app.domain.exceptions import (
 )
 from app.domain.ports.analysis_job_port import AnalysisJobPort
 from app.domain.ports.document_port import DocumentPort
-from app.infrastructure.db.models.analysis_job import AnalysisJob
-from app.infrastructure.db.models.document import Document
-from app.infrastructure.db.models.enums import AnalysisJobStatus, DocumentStatus
+
+if TYPE_CHECKING:
+    from app.infrastructure.db.models.analysis_job import AnalysisJob
+    from app.infrastructure.db.models.document import Document
 
 # Статусы документа, из которых разрешён запуск анализа:
 #   DRAFT              — первичный / повторный запуск (переходы №2, №7→2)
@@ -48,7 +54,7 @@ class AnalysisJobService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         idempotency_key: str,
-    ) -> AnalysisJob | None:
+    ) -> "AnalysisJob | None":
         """Найти существующий job по ключу идемпотентности.
 
         Проверяет принадлежность документа проекту перед поиском.
@@ -66,7 +72,7 @@ class AnalysisJobService:
 
     async def get_document_for_job(
         self, project_id: uuid.UUID, document_id: uuid.UUID
-    ) -> Document:
+    ) -> "Document":
         """Вернуть ORM-документ для проверки статуса (#9).
 
         Используется роутером до create_job, чтобы проверить READY-гард
@@ -88,7 +94,7 @@ class AnalysisJobService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         idempotency_key: str | None = None,
-    ) -> AnalysisJob:
+    ) -> "AnalysisJob":
         """Создать задачу анализа.
 
         Разрешённые исходные статусы документа (таблица переходов):
@@ -99,6 +105,11 @@ class AnalysisJobService:
 
         При повторном запуске из AWAITING_APPROVAL/READY документ сбрасывается
         в DRAFT (пайплайн всегда стартует из DRAFT → IN_PROGRESS).
+
+        Примечание: IntegrityError от SQLAlchemy теперь перехватывается
+        в AnalysisJobRepository.create_for_document и перебрасывается как
+        AnalysisAlreadyRunningError, поэтому здесь импортировать sqlalchemy
+        не нужно.
         """
         document = await self._documents.get_by_id(document_id)
         if document is None or document.project_id != project_id:
@@ -126,7 +137,8 @@ class AnalysisJobService:
         if document.status != DocumentStatus.DRAFT:
             document = await self._documents.update_status(document, DocumentStatus.DRAFT)
 
-        job = AnalysisJob(
+        from app.infrastructure.db.models.analysis_job import AnalysisJob as AnalysisJobModel
+        job = AnalysisJobModel(
             id=uuid.uuid4(),
             document_id=document.id,
             status=AnalysisJobStatus.PENDING,
@@ -134,24 +146,27 @@ class AnalysisJobService:
         )
         try:
             return await self._jobs.create_for_document(job, document)
-        except IntegrityError as exc:
+        except AnalysisAlreadyRunningError:
+            # Re-raised from repository after catching IntegrityError
             if previous_status != DocumentStatus.DRAFT:
                 await self._documents.update_status(document, previous_status)
-            raise AnalysisAlreadyRunningError("Для документа уже выполняется анализ") from exc
+            raise
         except Exception:
             if previous_status != DocumentStatus.DRAFT:
                 await self._documents.update_status(document, previous_status)
             raise
 
-    async def mark_dispatched(self, job: AnalysisJob, task_id: str) -> AnalysisJob:
+    async def mark_dispatched(
+        self, job: "AnalysisJob", task_id: str
+    ) -> "AnalysisJob":
         document = await self._documents.get_by_id(job.document_id)
         if document is None:
             raise DocumentNotFoundError(f"Документ {job.document_id} не найден")
         return await self._jobs.mark_dispatched(job, document, task_id)
 
     async def mark_job_queue_unavailable(
-        self, job: AnalysisJob, error_message: str | None = None
-    ) -> AnalysisJob:
+        self, job: "AnalysisJob", error_message: str | None = None
+    ) -> "AnalysisJob":
         """Очередь недоступна — задача не поставлена, документ остаётся в DRAFT (переход №3)."""
         document = await self._documents.get_by_id(job.document_id)
         if document is None:
@@ -160,7 +175,7 @@ class AnalysisJobService:
 
     async def cancel_job(
         self, project_id: uuid.UUID, document_id: uuid.UUID, job_id: uuid.UUID
-    ) -> AnalysisJob:
+    ) -> "AnalysisJob":
         """Отменить активную задачу анализа (переход №7 → документ возвращается в DRAFT)."""
         job = await self.get_job(project_id, document_id, job_id)
         if job.status == AnalysisJobStatus.CANCELLED:
@@ -174,7 +189,7 @@ class AnalysisJobService:
 
     async def get_job(
         self, project_id: uuid.UUID, document_id: uuid.UUID, job_id: uuid.UUID
-    ) -> AnalysisJob:
+    ) -> "AnalysisJob":
         job = await self._jobs.get_by_id(job_id)
         if job is None or job.document_id != document_id:
             raise DocumentNotFoundError(
@@ -202,8 +217,6 @@ class AnalysisJobService:
 
         Ошибка для одного документа не блокирует остальные.
         """
-        # Документы в статусах DRAFT и AWAITING_APPROVAL
-        # (без READY — bulk не перезапускает готовые документы без явного force)
         analyzable_documents = await self._documents.list_analyzable_for_project(project_id)
         results: list[dict] = []
         for document in analyzable_documents:

@@ -10,12 +10,18 @@ H2.2: сервис принимает ProjectPort вместо конкретн�
 Сonkrete SQLAlchemy-репозиторий по-прежнему передаётся из core/dependencies.py,
 но тип в сигнатуре — порт домена.
 """
+from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+from app.domain.enums import UserRole
 from app.domain.interfaces.file_storage import FileStorage
 from app.domain.ports.project_port import ProjectPort
-from app.infrastructure.db.models.enums import UserRole
-from app.infrastructure.db.models.project import Project
-from app.infrastructure.db.models.user import User
+
+if TYPE_CHECKING:
+    import uuid
+    from app.infrastructure.db.models.project import Project
+    from app.infrastructure.db.models.user import User
 
 
 class ProjectService:
@@ -23,11 +29,16 @@ class ProjectService:
         self._projects = project_repository
         self._storage = file_storage
 
-    async def create_project(self, owner: User, name: str, description: str | None = None) -> Project:
-        project = Project(owner_id=owner.id, name=name, description=description)
+    async def create_project(
+        self, owner: "User", name: str, description: str | None = None
+    ) -> "Project":
+        from app.infrastructure.db.models.project import Project as ProjectModel
+        project = ProjectModel(owner_id=owner.id, name=name, description=description)
         return await self._projects.create(project)
 
-    async def list_projects_for_user(self, user: User, limit: int, offset: int) -> tuple[list[Project], int]:
+    async def list_projects_for_user(
+        self, user: "User", limit: int, offset: int
+    ) -> "tuple[list[Project], int]":
         if user.role == UserRole.ADMIN:
             items = await self._projects.list_all(limit=limit, offset=offset)
             total = await self._projects.count_all()
@@ -38,14 +49,14 @@ class ProjectService:
 
     async def update_project(
         self,
-        project: Project,
+        project: "Project",
         name: str | None = None,
         description: str | None = None,
-    ) -> Project:
+    ) -> "Project":
         """Частичное обновление. Передаём только те поля, которые пришли в запросе."""
         return await self._projects.update(project, name=name, description=description)
 
-    async def delete_project(self, project: Project) -> None:
+    async def delete_project(self, project: "Project") -> None:
         """
         Каскадное удаление:
         1. Загружаем все storage_key документов и источников проекта.

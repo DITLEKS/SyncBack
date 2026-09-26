@@ -4,14 +4,16 @@ finalize_review, атомарное сохранение сессии ревью
 списка принятых изменений для экспорта.
 
 H2.2: сервис принимает SuggestionPort / DocumentPort вместо конкретных репозиториев.
+      Все enum-импорты перенесены в app.domain.enums.
 """
 from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from app.domain.enums import DocumentStatus, SuggestionStatus
 from app.domain.exceptions import (
     DocumentNotFoundError,
     InvalidDocumentStatusError,
@@ -24,12 +26,11 @@ from app.domain.exceptions import (
 from app.domain.interfaces.document_exporter import AppliedChange
 from app.domain.ports.document_port import DocumentPort
 from app.domain.ports.suggestion_port import SuggestionPort
-from app.infrastructure.db.models.enums import DocumentStatus, SuggestionStatus
-from app.infrastructure.db.models.document import Document
-from app.infrastructure.db.models.suggestion import Suggestion
 
 if TYPE_CHECKING:
     from app.domain.services.document_export_service import DocumentExportService
+    from app.infrastructure.db.models.document import Document
+    from app.infrastructure.db.models.suggestion import Suggestion
 
 logger = logging.getLogger("syncscribe.services.suggestion")
 
@@ -38,7 +39,7 @@ logger = logging.getLogger("syncscribe.services.suggestion")
 class ReviewSaveResult:
     """Result of atomic review save."""
 
-    document: Document
+    document: "Document"
     accepted_count: int = 0
     rejected_count: int = 0
     pending_count: int = 0
@@ -49,8 +50,8 @@ class ReviewSaveResult:
 class BulkAcceptResult:
     """Результат bulk-accept — список правок + актуальный документ."""
 
-    suggestions: list[Suggestion]
-    document: Document
+    suggestions: "list[Suggestion]"
+    document: "Document"
 
 
 class SuggestionService:
@@ -68,7 +69,7 @@ class SuggestionService:
 
     async def _get_document_or_raise(
         self, project_id: uuid.UUID, document_id: uuid.UUID
-    ) -> Document:
+    ) -> "Document":
         document = await self._documents.get_by_id(document_id)
         if document is None or document.project_id != project_id:
             raise DocumentNotFoundError(
@@ -78,9 +79,9 @@ class SuggestionService:
 
     async def _get_suggestion_for_document(
         self,
-        document: Document,
+        document: "Document",
         suggestion_id: uuid.UUID,
-    ) -> Suggestion:
+    ) -> "Suggestion":
         suggestion = await self._suggestions.get_by_id(suggestion_id)
         if (
             suggestion is None
@@ -93,7 +94,7 @@ class SuggestionService:
 
     async def _run_export(
         self,
-        document: Document,
+        document: "Document",
         export_service: "DocumentExportService",
     ) -> None:
         """Единый экспорт-блок, используемый в finalize_review
@@ -119,7 +120,7 @@ class SuggestionService:
         document_id: uuid.UUID,
         limit: int,
         offset: int,
-    ) -> tuple[list[Suggestion], int]:
+    ) -> "tuple[list[Suggestion], int]":
         document = await self._get_document_or_raise(project_id, document_id)
         if document.current_analysis_job_id is None:
             return [], 0
@@ -136,11 +137,13 @@ class SuggestionService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         suggestion_id: uuid.UUID,
-    ) -> Suggestion:
+    ) -> "Suggestion":
         document = await self._get_document_or_raise(project_id, document_id)
         return await self._get_suggestion_for_document(document, suggestion_id)
 
-    async def get_accepted_changes(self, document_id: uuid.UUID) -> list[AppliedChange]:
+    async def get_accepted_changes(
+        self, document_id: uuid.UUID
+    ) -> list[AppliedChange]:
         document = await self._documents.get_by_id(document_id)
         if document is None or document.current_analysis_job_id is None:
             return []
@@ -163,11 +166,11 @@ class SuggestionService:
 
     async def _decide(
         self,
-        document: Document,
-        suggestion: Suggestion,
+        document: "Document",
+        suggestion: "Suggestion",
         user_id: uuid.UUID,
         new_status: SuggestionStatus,
-    ) -> Suggestion:
+    ) -> "Suggestion":
         if document.status != DocumentStatus.AWAITING_APPROVAL:
             raise InvalidDocumentStatusError(
                 "Решения по правкам доступны только в статусе 'awaiting_approval'"
@@ -185,7 +188,7 @@ class SuggestionService:
         document_id: uuid.UUID,
         suggestion_id: uuid.UUID,
         user_id: uuid.UUID,
-    ) -> Suggestion:
+    ) -> "Suggestion":
         document = await self._get_document_or_raise(project_id, document_id)
         suggestion = await self._get_suggestion_for_document(document, suggestion_id)
         return await self._decide(document, suggestion, user_id, SuggestionStatus.ACCEPTED)
@@ -196,7 +199,7 @@ class SuggestionService:
         document_id: uuid.UUID,
         suggestion_id: uuid.UUID,
         user_id: uuid.UUID,
-    ) -> Suggestion:
+    ) -> "Suggestion":
         document = await self._get_document_or_raise(project_id, document_id)
         suggestion = await self._get_suggestion_for_document(document, suggestion_id)
         return await self._decide(document, suggestion, user_id, SuggestionStatus.REJECTED)
@@ -273,7 +276,7 @@ class SuggestionService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         export_service: "DocumentExportService | None" = None,
-    ) -> Document:
+    ) -> "Document":
         document = await self._get_document_or_raise(project_id, document_id)
         if document.status != DocumentStatus.AWAITING_APPROVAL:
             raise InvalidDocumentStatusError(
@@ -304,7 +307,7 @@ class SuggestionService:
         document_id: uuid.UUID,
         user_id: uuid.UUID,
         review_version: int,
-        decisions: list[tuple[uuid.UUID, SuggestionStatus]],
+        decisions: "list[tuple[uuid.UUID, SuggestionStatus]]",
         finalize: bool = True,
         export_service: "DocumentExportService | None" = None,
     ) -> ReviewSaveResult:
@@ -330,8 +333,8 @@ class SuggestionService:
         accepted_ids = [sid for sid, st in decisions if st == SuggestionStatus.ACCEPTED]
         rejected_ids = [sid for sid, st in decisions if st == SuggestionStatus.REJECTED]
 
-        accepted_suggestions: list[Suggestion] = []
-        rejected_suggestions: list[Suggestion] = []
+        accepted_suggestions: list = []
+        rejected_suggestions: list = []
 
         if accepted_ids:
             accepted_suggestions = await self._suggestions.bulk_update_status(
