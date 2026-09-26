@@ -1,11 +1,9 @@
 """
 DI-фабрики FastAPI.
 
-После введения UoW:
-  - Сервисы получают IUnitOfWork вместо набора репозиториев.
-  - SqlAlchemyUnitOfWork создаётся per-request через get_db_session().
-  - Конкретные репозитории больше не инстанцируются в этом файле напрямую
-    (они создаются внутри SqlAlchemyUnitOfWork).
+Все сервисы получают UoW (или отдельные репозитории для AuthService, у которого
+nет собственного UoW-метода). Конкретные репозитории НЕ инстансируются в этом
+файле напрямую — их создаёт SqlAlchemyUnitOfWork или фабрика сервиса.
 """
 
 from functools import lru_cache
@@ -24,11 +22,6 @@ from app.domain.services.project_service import ProjectService
 from app.domain.services.source_service import SourceService
 from app.domain.services.suggestion_service import SuggestionService
 from app.infrastructure.cache.redis_client import get_redis_client
-from app.infrastructure.db.repositories.dashboard_repository import DashboardRepository
-from app.infrastructure.db.repositories.document_repository import DocumentRepository
-from app.infrastructure.db.repositories.project_repository import ProjectRepository
-from app.infrastructure.db.repositories.source_repository import SourceRepository
-from app.infrastructure.db.repositories.suggestion_repository import SuggestionRepository
 from app.infrastructure.db.repositories.user_repository import UserRepository
 from app.infrastructure.db.session import get_db_session
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -40,6 +33,10 @@ from app.infrastructure.security.login_rate_limiter import LoginRateLimiter
 from app.infrastructure.security.password_hasher import PasswordHasher
 from app.infrastructure.storage.minio_storage import MinioStorage
 
+
+# ---------------------------------------------------------------------------
+# Singleton-like infrastructure (one instance per process)
+# ---------------------------------------------------------------------------
 
 @lru_cache
 def _get_minio_storage() -> MinioStorage:
@@ -72,7 +69,7 @@ def get_uow(
 
 
 # ---------------------------------------------------------------------------
-# Services that use UoW
+# Services — все используют UoW
 # ---------------------------------------------------------------------------
 
 def get_suggestion_service(
@@ -93,58 +90,58 @@ def get_audit_log_service(
     return AuditLogService(uow)
 
 
-# ---------------------------------------------------------------------------
-# Services that still use individual repos (next iteration)
-# ---------------------------------------------------------------------------
-
-async def get_project_service(
-    session: AsyncSession = Depends(get_db_session),
+def get_project_service(
+    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
 ) -> ProjectService:
     return ProjectService(
-        project_repository=ProjectRepository(session),
+        uow=uow,
         file_storage=_get_minio_storage(),
     )
 
 
-async def get_document_service(
-    session: AsyncSession = Depends(get_db_session),
+def get_document_service(
+    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
     settings: Settings = Depends(get_settings),
 ) -> DocumentService:
     return DocumentService(
-        document_repository=DocumentRepository(session),
+        uow=uow,
         file_storage=_get_minio_storage(),
         parser_registry=_get_parser_registry(),
         settings=settings,
     )
 
 
-async def get_source_service(
-    session: AsyncSession = Depends(get_db_session),
+def get_source_service(
+    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
     settings: Settings = Depends(get_settings),
 ) -> SourceService:
     return SourceService(
-        source_repository=SourceRepository(session),
+        uow=uow,
         file_storage=_get_minio_storage(),
         settings=settings,
     )
 
 
-async def get_document_export_service(
-    session: AsyncSession = Depends(get_db_session),
+def get_document_export_service(
+    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
 ) -> DocumentExportService:
     return DocumentExportService(
-        suggestion_repository=SuggestionRepository(session),
+        uow=uow,
         file_storage=_get_minio_storage(),
         exporter_registry=_get_exporter_registry(),
         parser_registry=_get_parser_registry(),
     )
 
 
-async def get_dashboard_service(
-    session: AsyncSession = Depends(get_db_session),
+def get_dashboard_service(
+    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
 ) -> DashboardService:
-    return DashboardService(dashboard_repository=DashboardRepository(session))
+    return DashboardService(uow=uow)
 
+
+# ---------------------------------------------------------------------------
+# Auth (UserRepository живёт вне UoW — отдельная сессия по дизайну)
+# ---------------------------------------------------------------------------
 
 async def get_login_rate_limiter() -> LoginRateLimiter:
     redis = await get_redis_client()
@@ -173,12 +170,6 @@ def get_user_repository(
     session: AsyncSession = Depends(get_db_session),
 ) -> UserRepository:
     return UserRepository(session)
-
-
-def get_project_repository(
-    session: AsyncSession = Depends(get_db_session),
-) -> ProjectRepository:
-    return ProjectRepository(session)
 
 
 def get_llm_client_instance(

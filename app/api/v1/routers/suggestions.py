@@ -23,7 +23,7 @@ from app.domain.exceptions import (
 )
 from app.domain.services.audit_log_service import AuditLogService
 from app.domain.services.suggestion_service import SuggestionService
-from app.infrastructure.db.models.enums import AuditAction, SuggestionStatus
+from app.domain.value_objects import AuditActionVO, PaginationParams, ReviewDecisions, SuggestionDecision
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.user import User
 
@@ -39,7 +39,7 @@ router = APIRouter(
 async def _safe_bulk_log(
     audit_log_service: AuditLogService,
     user_id: uuid.UUID,
-    decisions: list[tuple[uuid.UUID, AuditAction]],
+    decisions: list[tuple[uuid.UUID, AuditActionVO]],
 ) -> None:
     try:
         await audit_log_service.bulk_log_suggestion_decisions(user_id, decisions)
@@ -54,7 +54,7 @@ async def _safe_single_log(
     audit_log_service: AuditLogService,
     user_id: uuid.UUID,
     suggestion_id: uuid.UUID,
-    action: AuditAction,
+    action: AuditActionVO,
 ) -> None:
     try:
         await audit_log_service.log_suggestion_decision(user_id, suggestion_id, action)
@@ -96,7 +96,7 @@ async def _decide_suggestion(
     except (InvalidDocumentStatusError, SuggestionAlreadyDecidedError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    audit_action = AuditAction.ACCEPT if action == "accept" else AuditAction.REJECT
+    audit_action = AuditActionVO.ACCEPT if action == "accept" else AuditActionVO.REJECT
     await _safe_single_log(audit_log_service, current_user.id, suggestion.id, audit_action)
     return SuggestionResponse.model_validate(suggestion)
 
@@ -109,9 +109,10 @@ async def list_suggestions(
     project: Project = Depends(get_allowed_project),
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
 ) -> Page[SuggestionResponse]:
+    pagination = PaginationParams(limit=limit, offset=offset)
     try:
         suggestions, total = await suggestion_service.list_suggestions_for_document(
-            project.id, document_id, limit=limit, offset=offset
+            project.id, document_id, pagination
         )
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -134,13 +135,26 @@ async def review_save(
     if_match: str | None = Header(default=None, alias="If-Match"),
 ) -> ReviewSaveResponse:
     client_version = _parse_if_match(if_match)
-    decisions = [
-        (
-            d.suggestion_id,
-            SuggestionStatus.ACCEPTED if d.decision == "accepted" else SuggestionStatus.REJECTED,
+
+    # Строим VO-список и audit-список за один проход
+    decision_vos: list[SuggestionDecision] = []
+    audit_decisions: list[tuple[uuid.UUID, AuditActionVO]] = []
+    for d in payload.decisions:
+        accepted = d.decision == "accepted"
+        decision_vos.append(
+            SuggestionDecision(
+                suggestion_id=d.suggestion_id,
+                accepted=accepted,
+            )
         )
-        for d in payload.decisions
-    ]
+        audit_decisions.append(
+            (d.suggestion_id, AuditActionVO.ACCEPT if accepted else AuditActionVO.REJECT)
+        )
+
+    review_decisions = ReviewDecisions(
+        document_id=document_id,
+        decisions=decision_vos,
+    )
 
     try:
         result = await suggestion_service.atomic_review_save(
@@ -148,7 +162,7 @@ async def review_save(
             document_id=document_id,
             user_id=current_user.id,
             review_version=(client_version if client_version is not None else payload.review_version),
-            decisions=decisions,
+            decisions=review_decisions,
             finalize=payload.finalize,
         )
     except DocumentNotFoundError as exc:
@@ -163,13 +177,6 @@ async def review_save(
     except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    audit_decisions = [
-        (
-            d.suggestion_id,
-            AuditAction.ACCEPT if d.decision == "accepted" else AuditAction.REJECT,
-        )
-        for d in payload.decisions
-    ]
     await _safe_bulk_log(audit_log_service, current_user.id, audit_decisions)
 
     doc = result.document
@@ -228,7 +235,7 @@ async def bulk_accept_suggestions(
     except InvalidDocumentStatusError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    audit_decisions = [(s.id, AuditAction.ACCEPT) for s in result.suggestions]
+    audit_decisions = [(s.id, AuditActionVO.ACCEPT) for s in result.suggestions]
     await _safe_bulk_log(audit_log_service, current_user.id, audit_decisions)
 
     doc = result.document

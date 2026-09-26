@@ -23,7 +23,7 @@ from app.core.dependencies import get_document_service, get_suggestion_service
 from app.domain.exceptions import DocumentNotFoundError
 from app.domain.services.document_service import DocumentService
 from app.domain.services.suggestion_service import SuggestionService
-from app.infrastructure.db.models.enums import DocumentStatus
+from app.domain.value_objects import DocumentStatusVO, PaginationParams
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.user import User
 
@@ -34,14 +34,20 @@ router = APIRouter(
     tags=["editor"],
 )
 
-# --- Маппинг статуса → view_mode (#7) ---
-_STATUS_VIEW_MODE: dict[DocumentStatus, str] = {
-    DocumentStatus.DRAFT: "original",
-    DocumentStatus.IN_PROGRESS: "original",
-    DocumentStatus.AWAITING_APPROVAL: "suggested",
-    DocumentStatus.READY: "clean",
-    DocumentStatus.ERROR: "original",
-    DocumentStatus.CANCELLED: "original",
+# Статусы, при которых контент документа уже содержит применённые правки
+_STATUSES_WITH_APPLIED_CHANGES = frozenset({
+    DocumentStatusVO.AWAITING_APPROVAL,
+    DocumentStatusVO.READY,
+})
+
+# Маппинг статуса → view_mode (#7)
+_STATUS_VIEW_MODE: dict[DocumentStatusVO, str] = {
+    DocumentStatusVO.DRAFT: "original",
+    DocumentStatusVO.IN_PROGRESS: "original",
+    DocumentStatusVO.AWAITING_APPROVAL: "suggested",
+    DocumentStatusVO.READY: "clean",
+    DocumentStatusVO.ERROR: "original",
+    DocumentStatusVO.CANCELLED: "original",
 }
 
 
@@ -72,7 +78,7 @@ async def get_editor_aggregate(
         created_at=document.uploaded_at,
         updated_at=document.uploaded_at,
         review_version=review_version,
-        view_mode=view_mode,  # #7
+        view_mode=view_mode,
     )
 
     # --- 2. Контент (graceful degradation) ---
@@ -97,15 +103,8 @@ async def get_editor_aggregate(
         )
 
     # --- 2b. original_content (#7) ---
-    # original_content == editor_content на статусах draft/in_progress/error/cancelled.
-    # Для awaiting_approval и ready — текущий content уже содержит правки,
-    # поэтому original_content сохраняем как original_snapshot из DocumentService
-    # (если метод доступен, иначе None).
     original_content: EditorContent | None = None
-    if document.status in (
-        DocumentStatus.AWAITING_APPROVAL,
-        DocumentStatus.READY,
-    ):
+    if document.status in _STATUSES_WITH_APPLIED_CHANGES:
         try:
             orig_parsed = await document_service.get_original_content(document)
             original_content = EditorContent(
@@ -120,7 +119,6 @@ async def get_editor_aggregate(
                 ],
             )
         except (AttributeError, NotImplementedError):
-            # get_original_content ещё не реализован — подразумеваем stub (None).
             pass
         except Exception:  # noqa: BLE001
             logger.warning(
@@ -128,19 +126,23 @@ async def get_editor_aggregate(
                 extra={"document_id": str(document_id)},
             )
     else:
-        # На draft/in_progress: original_content и content — одно и то же
         original_content = editor_content
 
     # --- 3. Правки ---
     suggestions_raw, total = await suggestion_service.list_suggestions_for_document(
-        project.id, document_id, limit=200, offset=0
+        project.id, document_id, PaginationParams(limit=200, offset=0)
     )
     suggestions = [SuggestionResponse.model_validate(s) for s in suggestions_raw]
 
-    # --- 4. Счётчики ---
-    pending = sum(1 for s in suggestions if s.status == "pending")
-    accepted = sum(1 for s in suggestions if s.status == "accepted")
-    rejected = sum(1 for s in suggestions if s.status == "rejected")
+    # --- 4. Счётчики (один проход O(n) вместо трёх O(3n)) ---
+    pending = accepted = rejected = 0
+    for s in suggestions:
+        if s.status == "pending":
+            pending += 1
+        elif s.status == "accepted":
+            accepted += 1
+        elif s.status == "rejected":
+            rejected += 1
     counters = SuggestionCounters(
         total=total,
         pending=pending,
@@ -149,24 +151,23 @@ async def get_editor_aggregate(
     )
 
     # --- 5. Права ---
-    locked = document.status in (DocumentStatus.IN_PROGRESS,)
-    # #8: sources_is_editable=False при активном job или ожидании утверждения
+    locked = document.status in (DocumentStatusVO.IN_PROGRESS,)
     sources_is_editable = document.status not in (
-        DocumentStatus.IN_PROGRESS,
-        DocumentStatus.AWAITING_APPROVAL,
+        DocumentStatusVO.IN_PROGRESS,
+        DocumentStatusVO.AWAITING_APPROVAL,
     )
     permissions = EditorPermissions(
-        can_analyze=document.status in (DocumentStatus.DRAFT, DocumentStatus.READY),
-        can_review=document.status == DocumentStatus.AWAITING_APPROVAL,
-        can_export=document.status == DocumentStatus.READY,
+        can_analyze=document.status in (DocumentStatusVO.DRAFT, DocumentStatusVO.READY),
+        can_review=document.status == DocumentStatusVO.AWAITING_APPROVAL,
+        can_export=document.status == DocumentStatusVO.READY,
         can_delete=not locked,
-        sources_is_editable=sources_is_editable,  # #8
+        sources_is_editable=sources_is_editable,
     )
 
     return EditorAggregateResponse(
         document=meta,
         content=editor_content,
-        original_content=original_content,  # #7
+        original_content=original_content,
         suggestions=suggestions,
         counters=counters,
         permissions=permissions,

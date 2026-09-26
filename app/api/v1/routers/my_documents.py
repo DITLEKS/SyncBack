@@ -20,7 +20,6 @@ GET /api/v1/documents — возвращает все документы тек�
     suggestions: { total, pending, accepted, rejected }
   total, limit, offset
 """
-import uuid
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
@@ -34,7 +33,7 @@ from app.api.schemas.document import (
 )
 from app.core.dependencies import get_document_service
 from app.domain.services.document_service import DocumentService
-from app.infrastructure.db.models.enums import DocumentStatus
+from app.domain.value_objects import DocumentStatusVO, PaginationParams
 from app.infrastructure.db.models.user import User
 
 router = APIRouter(prefix="/documents", tags=["my-documents"])
@@ -42,7 +41,7 @@ router = APIRouter(prefix="/documents", tags=["my-documents"])
 
 @router.get("", response_model=DocumentListPage)
 async def list_my_documents(
-    status: DocumentStatus | None = Query(None, description="Фильтр по статусу документа"),
+    status: DocumentStatusVO | None = Query(None, description="Фильтр по статусу документа"),
     search: str | None = Query(None, max_length=200, description="Поиск по названию (подстрока)"),
     sort_by: Literal["created_at", "updated_at", "title"] = Query(
         "updated_at", description="Поле сортировки"
@@ -53,14 +52,14 @@ async def list_my_documents(
     current_user: User = Depends(get_current_user),
     document_service: DocumentService = Depends(get_document_service),
 ) -> DocumentListPage:
+    pagination = PaginationParams(limit=limit, offset=offset)
     rows, total = await document_service.list_all_for_user(
         current_user.id,
         status=status,
         search=search,
         sort_by=sort_by,
         sort_dir=sort_dir,
-        limit=limit,
-        offset=offset,
+        pagination=pagination,
     )
 
     items = [
