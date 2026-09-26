@@ -12,6 +12,8 @@ SQLAlchemy-адаптер для Suggestion.
 - bulk_update_status / update_status принимают ReviewDecisions или SuggestionDecision.
 - list_with_total: один SELECT с COUNT(*) OVER() вместо двух запросов (H-3).
 - bulk_accept_all: один UPDATE без предварительной загрузки UUID в память (H-4).
+- list_by_analysis_job_and_status_page: постраничный вариант для стримингового
+  экспорта; покрывается индексом ix_suggestions_job_status (0015).
 """
 from __future__ import annotations
 
@@ -160,6 +162,34 @@ class SuggestionRepository(ISuggestionRepository):
                 SuggestionModel.status == _status_to_orm(status),
             )
             .order_by(SuggestionModel.created_at)
+        )
+        return list(result.scalars().all())
+
+    async def list_by_analysis_job_and_status_page(
+        self,
+        analysis_job_id: uuid.UUID,
+        status: SuggestionStatusVO,
+        limit: int,
+        offset: int,
+    ) -> list[Suggestion]:
+        """Постраничная выборка правок по job + статус для стримингового экспорта.
+
+        WHERE analysis_job_id = ? AND status = ?
+        ORDER BY created_at, id
+        LIMIT limit OFFSET offset
+
+        Покрывается индексом ix_suggestions_job_status (миграция 0015).
+        """
+        from app.infrastructure.db.models.suggestion import Suggestion as SuggestionModel
+        result = await self._session.execute(
+            select(SuggestionModel)
+            .where(
+                SuggestionModel.analysis_job_id == analysis_job_id,
+                SuggestionModel.status == _status_to_orm(status),
+            )
+            .order_by(SuggestionModel.created_at, SuggestionModel.id)
+            .limit(limit)
+            .offset(offset)
         )
         return list(result.scalars().all())
 
