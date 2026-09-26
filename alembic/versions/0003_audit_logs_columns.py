@@ -1,7 +1,7 @@
 """add audit_logs document_id column and constraint
 
 Revision ID: 0003_audit_logs_columns
-Revises: 0002_add_download_enum_value
+Revises: 0002_p0_3
 Create Date: 2026-08-12
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision = "0003_audit_logs_columns"
-down_revision = "0002_add_download_enum_value"
+down_revision = "0002_p0_3"
 branch_labels = None
 depends_on = None
 

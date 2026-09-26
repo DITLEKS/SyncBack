@@ -1,45 +1,52 @@
+<<<<<<< HEAD
 """Доменные исключения SyncBack.
 
 Каждое исключение соответствует одной бизнес-ситуации и конвертируется
 в HTTP-ответ на уровне роутера или глобального exception handler.
-
-fix/review-critical-p0:
-- Добавлены все исключения, которые импортируются сервисами, но отсутствовали.
-- StaleReviewVersionError = алиас ReviewVersionConflictError (обратная совместимость).
 """
+=======
+"""Expected application and domain errors."""
+>>>>>>> origin/fix/high-priority-review-findings
 
 
 class SyncBackError(Exception):
-    """Базовый класс для всех доменных исключений."""
+    """Base class for expected failures handled by the API layer."""
 
 
+<<<<<<< HEAD
 # ---------------------------------------------------------------------------
 # Document / Project / Source
 # ---------------------------------------------------------------------------
 
+
 class DocumentNotFoundError(SyncBackError):
     """Документ не найден или не принадлежит проекту."""
+=======
+DomainError = SyncBackError
+>>>>>>> origin/fix/high-priority-review-findings
 
 
-class ProjectNotFoundError(SyncBackError):
-    """Проект не найден или недоступен текущему пользователю."""
+class DocumentNotFoundError(DomainError):
+    pass
 
 
-class SourceNotFoundError(SyncBackError):
-    """Источник не найден или не принадлежит проекту."""
+class ProjectNotFoundError(DomainError):
+    pass
 
 
-class FileTooLargeError(SyncBackError):
-    """Загружаемый файл превышает допустимый размер."""
+class SourceNotFoundError(DomainError):
+    pass
 
 
-class UnsupportedFormatError(SyncBackError):
-    """Формат файла не поддерживается парсером (например, .doc)."""
+class FileTooLargeError(DomainError):
+    pass
 
 
+<<<<<<< HEAD
 # ---------------------------------------------------------------------------
 # Document status transitions
 # ---------------------------------------------------------------------------
+
 
 class InvalidDocumentStatusError(SyncBackError):
     """Операция недопустима для текущего статуса документа.
@@ -51,6 +58,7 @@ class InvalidDocumentStatusError(SyncBackError):
 # ---------------------------------------------------------------------------
 # Analysis jobs
 # ---------------------------------------------------------------------------
+
 
 class AnalysisJobNotFoundError(SyncBackError):
     """Задание анализа не найдено."""
@@ -74,6 +82,7 @@ class AnalysisJobNotCancellableError(SyncBackError):
 # Suggestions / Review
 # ---------------------------------------------------------------------------
 
+
 class SuggestionNotFoundError(SyncBackError):
     """Правка не найдена или не принадлежит текущему документу."""
 
@@ -93,13 +102,32 @@ class ReviewNotCompleteError(SyncBackError):
 
 
 class ReviewVersionConflictError(SyncBackError):
-    """P0-2: review_version в БД изменилась пока клиент редактировал документ.
+    """review_version в БД изменилась, пока клиент редактировал документ.
 
     Сигнализирует роутеру вернуть HTTP 409 Conflict.
     """
+=======
+class UnsupportedFormatError(DomainError):
+    pass
 
 
-class InvalidDocumentStatusError(DomainError):
+UnsupportedFileFormatError = UnsupportedFormatError
+>>>>>>> origin/fix/high-priority-review-findings
+
+
+# Алиас для обратной совместимости — suggestions router импортирует это имя.
+StaleReviewVersionError = ReviewVersionConflictError
+
+
+<<<<<<< HEAD
+class OptimisticLockError(SyncBackError):
+    """Версия ревью на клиенте устарела — документ был изменён параллельным запросом.
+=======
+class AnalysisJobNotFoundError(DomainError):
+    pass
+
+
+class AnalysisAlreadyRunningError(DomainError):
     pass
 
 
@@ -107,18 +135,61 @@ class AnalysisJobNotCancellableError(DomainError):
     pass
 
 
+class SuggestionNotFoundError(DomainError):
+    pass
+
+
+class SuggestionAlreadyDecidedError(DomainError):
+    pass
+
+
 class ReviewNotCompleteError(DomainError):
     pass
 
 
-class OptimisticLockError(DomainError):
-    """P0-2: версия ревью на клиенте устарела — документ был изменён параллельным запросом.
-
-    Клиент должен перезагрузить состояние (GET /editor) и повторить сохранение.
-    """
+class ReviewVersionConflictError(DomainError):
+    pass
+>>>>>>> origin/fix/high-priority-review-findings
 
 
-class SourceLockError(DomainError):
-    """P0-6: изменение источников запрещено, пока документ находится
+StaleReviewVersionError = ReviewVersionConflictError
+OptimisticLockError = ReviewVersionConflictError
+
+
+<<<<<<< HEAD
+class SourceLockError(SyncBackError):
+    """Изменение источников запрещено, пока документ находится
     в статусе IN_PROGRESS или AWAITING_APPROVAL.
     """
+=======
+class SourceLockError(DomainError):
+    pass
+
+
+class InvalidCredentialsError(DomainError):
+    pass
+
+
+class InvalidTokenError(DomainError):
+    pass
+
+
+class EmailAlreadyRegisteredError(DomainError):
+    pass
+
+
+class AccountTemporarilyLockedError(DomainError):
+    pass
+
+
+class DocumentParseError(DomainError):
+    pass
+
+
+class LLMTimeoutError(DomainError):
+    pass
+
+
+class LLMInvalidResponseError(DomainError):
+    pass
+>>>>>>> origin/fix/high-priority-review-findings

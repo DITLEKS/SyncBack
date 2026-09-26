@@ -1,31 +1,37 @@
 """
-Репозиторий журнала действий (accept/reject/download).
+SQLAlchemy-адаптер для AuditLog.
 
-Путь в репозитории: app/infrastructure/db/repositories/audit_log_repository.py
+Правило: НИКАКИХ session.commit() здесь.
 """
+import uuid
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.interfaces.repositories import IAuditLogRepository
 from app.infrastructure.db.models.audit_log import AuditLog
 
 
-class AuditLogRepository:
-    def __init__(self, session: AsyncSession):
+class AuditLogRepository(IAuditLogRepository):
+    def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
     async def create(self, entry: AuditLog) -> AuditLog:
         self._session.add(entry)
-        await self._session.commit()
-        await self._session.refresh(entry)
+        await self._session.flush()
         return entry
 
-    async def bulk_create(self, entries: list[AuditLog]) -> None:
-        """#3 Один commit вместо N последовательных автофайлов.
-
-        Не возвращает записи с id — audit_log не читается обратно в эндпоинтах.
-        """
-        if not entries:
-            return
-        for entry in entries:
-            self._session.add(entry)
-        await self._session.commit()
+    async def list_for_document(
+        self,
+        document_id: uuid.UUID,
+        limit: int,
+        offset: int,
+    ) -> list[AuditLog]:
+        result = await self._session.execute(
+            select(AuditLog)
+            .where(AuditLog.document_id == document_id)
+            .order_by(AuditLog.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result.scalars().all())

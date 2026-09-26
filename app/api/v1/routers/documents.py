@@ -39,6 +39,7 @@ from app.domain.services.audit_log_service import AuditLogService
 from app.domain.services.document_export_service import DocumentExportService
 from app.domain.services.document_service import DocumentService
 from app.domain.services.source_service import SourceService
+from app.domain.value_objects import PaginationParams
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.user import User
 
@@ -106,10 +107,8 @@ async def list_documents(
     project: Project = Depends(get_allowed_project),
     document_service: DocumentService = Depends(get_document_service),
 ) -> Page[DocumentResponse]:
-    documents, total = await document_service.list_documents(
-        project.id, limit=limit, offset=offset
-    )
-    # PERF-4: единый проход через список
+    pagination = PaginationParams(limit=limit, offset=offset)
+    documents, total = await document_service.list_documents(project.id, pagination)
     return Page[DocumentResponse](
         items=_document_list_adapter.validate_python(documents, from_attributes=True),
         total=total,

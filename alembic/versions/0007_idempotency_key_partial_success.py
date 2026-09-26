@@ -7,17 +7,17 @@ Revises: 0006
 Create Date: 2026-09-20
 """
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
+
 revision = "0007"
-down_revision = "0006"
+down_revision = "0006_document_status_lifecycle"
 branch_labels = None
 depends_on = None
 
 
 def upgrade() -> None:
-    # --- analysis_jobs: idempotency_key ---
     op.add_column(
         "analysis_jobs",
         sa.Column("idempotency_key", sa.String(128), nullable=True),
@@ -33,8 +33,6 @@ def upgrade() -> None:
         "analysis_jobs",
         ["document_id", "idempotency_key"],
     )
-
-    # --- analysis_jobs: partial_success ---
     op.add_column(
         "analysis_jobs",
         sa.Column(

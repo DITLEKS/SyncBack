@@ -1,43 +1,48 @@
 """
-Фиксация действий пользователя для журнала аудита: accept/reject правки и download документа.
-Отдельный маленький сервис, а не метод внутри DocumentService/SuggestionService — это
-cross-cutting concern, который не должен размывать ответственность основных сервисов.
+Сервис аудит-лога.
 
-Путь в репозитории: app/domain/services/audit_log_service.py
+Архитектурное правило: зависит только от IUnitOfWork.
 """
+from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
+from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.infrastructure.db.models.audit_log import AuditLog
-from app.infrastructure.db.models.enums import AuditAction
-from app.infrastructure.db.repositories.audit_log_repository import AuditLogRepository
 
 
 class AuditLogService:
-    def __init__(self, audit_log_repository: AuditLogRepository):
-        self._audit_logs = audit_log_repository
+    def __init__(self, uow: IUnitOfWork) -> None:
+        self._uow = uow
 
-    async def log_download(self, user_id: uuid.UUID, document_id: uuid.UUID) -> AuditLog:
-        entry = AuditLog(user_id=user_id, document_id=document_id, action=AuditAction.DOWNLOAD)
-        return await self._audit_logs.create(entry)
-
-    async def log_suggestion_decision(
-        self, user_id: uuid.UUID, suggestion_id: uuid.UUID, action: AuditAction
-    ) -> AuditLog:
-        entry = AuditLog(user_id=user_id, suggestion_id=suggestion_id, action=action)
-        return await self._audit_logs.create(entry)
-
-    async def bulk_log_suggestion_decisions(
+    async def log(
         self,
-        user_id: uuid.UUID,
-        decisions: list[tuple[uuid.UUID, AuditAction]],
-    ) -> None:
-        """#3 Записывает все решения одним коммитом вместо N отдельных await.
+        document_id: uuid.UUID,
+        action: str,
+        performed_by: uuid.UUID,
+        details: dict | None = None,
+    ) -> AuditLog:
+        entry = AuditLog(
+            id=uuid.uuid4(),
+            document_id=document_id,
+            action=action,
+            performed_by=performed_by,
+            details=details or {},
+            created_at=datetime.now(UTC),
+        )
+        async with self._uow:
+            result = await self._uow.audit.create(entry)
+            await self._uow.commit()
+        return result
 
-        decisions: [(suggestion_id, AuditAction), ...]
-        """
-        entries = [
-            AuditLog(user_id=user_id, suggestion_id=suggestion_id, action=action)
-            for suggestion_id, action in decisions
-        ]
-        await self._audit_logs.bulk_create(entries)
+    async def list_for_document(
+        self,
+        document_id: uuid.UUID,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[AuditLog]:
+        async with self._uow:
+            return await self._uow.audit.list_for_document(
+                document_id, limit=limit, offset=offset
+            )

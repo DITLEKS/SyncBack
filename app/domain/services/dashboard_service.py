@@ -2,35 +2,36 @@
 DashboardService — оркестрирует агрегаты для GET /dashboard,
 GET /documents/attention и GET /documents/recent.
 
-Сервис не выполняет прямых SQL-запросов: делегирует DashboardRepository.
-
-PERF-1: вместо 3 отдельных COUNT-запросов используется один агрегатный запрос
-с FILTER (в DashboardRepository.get_stats), сокращая 3 RTT до 1.
+Архитектурные правила:
+  - Зависит только от IUnitOfWork (порт).
+  - Нет импортов из app.infrastructure.* при выполнении.
+  - PERF-1: все COUNT + activity — два запроса вместо четырёх (uow.dashboard).
 """
 from __future__ import annotations
 
 import uuid
 
 from app.api.schemas.dashboard import DashboardResponse, DayActivity
-from app.infrastructure.db.repositories.dashboard_repository import DashboardRepository
+from app.domain.interfaces.unit_of_work import IUnitOfWork
 
 
 class DashboardService:
-    """Dashboard service. Инжектируется через get_dashboard_service()."""
+    def __init__(self, uow: IUnitOfWork) -> None:
+        self._uow = uow
 
-    def __init__(self, dashboard_repository: DashboardRepository) -> None:
-        self._repo = dashboard_repository
-
-    # ── #1 Dashboard агрегаты ——————————————————————————————————————————
+    # ── Dashboard агрегаты ————————————————————————————————————————————
 
     async def get_dashboard(self, user_id: uuid.UUID) -> DashboardResponse:
-        """PERF-1: все COUNT-агрегаты + activity в двух запросах вместо четырёх."""
-        stats = await self._repo.get_stats(user_id)
+        """PERF-1: все COUNT-агрегаты + activity в двух запросах."""
+        async with self._uow:
+            stats = await self._uow.dashboard.get_stats(user_id)
+            activity_rows = await self._uow.dashboard.get_activity_last_7_days(user_id)
+
         total = stats["total"]
         awaiting = stats["awaiting"]
         ready = stats["ready"]
         relevance_percent = round(ready / total * 100) if total else 0
-        activity_rows = await self._repo.get_activity_last_7_days(user_id)
+
         return DashboardResponse(
             total_documents=total,
             awaiting_approval_count=awaiting,
@@ -41,22 +42,31 @@ class DashboardService:
             ],
         )
 
-    # ── #2 Требуют внимания ———————————————————————————————————————————
+    # ── Требуют внимания —————————————————————————————————————————————
 
     async def get_attention_documents(
         self, user_id: uuid.UUID, limit: int = 4
     ) -> list[dict]:
-        return await self._repo.get_attention_documents(user_id, limit=limit)
+        async with self._uow:
+            return await self._uow.dashboard.get_attention_documents(
+                user_id, limit=limit
+            )
 
-    # ── #3 Недавние документы ————————————————————————————————————————
+    # ── Недавние документы ———————————————————————————————————————————
 
     async def get_recent_documents(
         self, user_id: uuid.UUID, limit: int = 5
     ) -> list[dict]:
-        return await self._repo.get_recent_documents(user_id, limit=limit)
+        async with self._uow:
+            return await self._uow.dashboard.get_recent_documents(
+                user_id, limit=limit
+            )
 
-    # ── Трекинг открытия ——————————————————————————————————————————————
+    # ── Трекинг открытия ————————————————————————————————————————————
 
-    async def track_open(self, user_id: uuid.UUID, document_id: uuid.UUID) -> None:
-        """UPSERT last_opened_at через DashboardRepository."""
-        await self._repo.upsert_open(user_id, document_id)
+    async def track_open(
+        self, user_id: uuid.UUID, document_id: uuid.UUID
+    ) -> None:
+        async with self._uow:
+            await self._uow.dashboard.upsert_open(user_id, document_id)
+            await self._uow.commit()
