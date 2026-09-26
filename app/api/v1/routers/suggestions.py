@@ -26,7 +26,6 @@ from app.domain.services.suggestion_service import SuggestionService
 from app.domain.value_objects import (
     AuditActionVO,
     PaginationParams,
-    ReviewDecisions,
     SuggestionStatusVO,
 )
 from app.infrastructure.db.models.project import Project
@@ -149,9 +148,9 @@ async def review_save(
     if_match: str | None = Header(default=None, alias="If-Match"),
 ) -> ReviewSaveResponse:
     client_version = _parse_if_match(if_match)
+    review_version = client_version if client_version is not None else payload.review_version
 
-    # Разбиваем решения на два множества за один проход.
-    # O(1) lookup при построении audit_decisions вместо повторного итерирования.
+    # Разбиваем решения за один проход: O(N), O(1) поиск в accepted_set.
     accepted_ids: list[uuid.UUID] = []
     rejected_ids: list[uuid.UUID] = []
     accepted_set: set[uuid.UUID] = set()
@@ -163,31 +162,22 @@ async def review_save(
         else:
             rejected_ids.append(d.suggestion_id)
 
-    review_decisions = ReviewDecisions(
-        document_id=document_id,
-        accepted_ids=tuple(accepted_ids),
-        rejected_ids=tuple(rejected_ids),
-        decided_by=current_user.id,
-    )
-
     # Audit-список строится в O(N) без повторного обхода
     audit_decisions: list[tuple[uuid.UUID, AuditActionVO]] = [
-        (
-            sid,
-            AuditActionVO.ACCEPT if sid in accepted_set else AuditActionVO.REJECT,
-        )
+        (sid, AuditActionVO.ACCEPT if sid in accepted_set else AuditActionVO.REJECT)
         for sid in (*accepted_ids, *rejected_ids)
     ]
 
     try:
+        # Роутер передаёт плоские параметры —
+        # сервис сам создаёт ReviewDecisions после разрешения job_id (M-6).
         result = await suggestion_service.atomic_review_save(
             project_id=project.id,
             document_id=document_id,
             user_id=current_user.id,
-            review_version=(
-                client_version if client_version is not None else payload.review_version
-            ),
-            decisions=review_decisions,
+            review_version=review_version,
+            accepted_ids=tuple(accepted_ids),
+            rejected_ids=tuple(rejected_ids),
             finalize=payload.finalize,
         )
     except DocumentNotFoundError as exc:
@@ -207,11 +197,11 @@ async def review_save(
     await _safe_bulk_log(audit_log_service, current_user.id, audit_decisions)
 
     doc = result.document
-    review_version = getattr(doc, "review_version", 0) or 0
+    review_version_out = getattr(doc, "review_version", 0) or 0
     return ReviewSaveResponse(
         document_id=doc.id,
         document_status=doc.status.value,
-        review_version=review_version,
+        review_version=review_version_out,
         accepted_count=result.accepted_count,
         rejected_count=result.rejected_count,
         pending_count=result.pending_count,
@@ -257,47 +247,3 @@ async def reject_suggestion(
         suggestion_service,
         audit_log_service,
     )
-
-
-@router.post("/bulk-accept", response_model=BulkAcceptResponse)
-async def bulk_accept_suggestions(
-    document_id: uuid.UUID,
-    project: Project = Depends(get_allowed_project),
-    current_user: User = Depends(get_current_user),
-    suggestion_service: SuggestionService = Depends(get_suggestion_service),
-    audit_log_service: AuditLogService = Depends(get_audit_log_service),
-) -> BulkAcceptResponse:
-    try:
-        result = await suggestion_service.bulk_accept(project.id, document_id, current_user.id)
-    except DocumentNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except InvalidDocumentStatusError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-
-    audit_decisions = [(s.id, AuditActionVO.ACCEPT) for s in result.suggestions]
-    await _safe_bulk_log(audit_log_service, current_user.id, audit_decisions)
-
-    doc = result.document
-    return BulkAcceptResponse(
-        accepted_count=len(result.suggestions),
-        document_status=doc.status.value if doc else None,
-        review_version=getattr(doc, "review_version", None),
-    )
-
-
-@router.post("/finalize", response_model=DocumentResponse)
-async def finalize_review(
-    document_id: uuid.UUID,
-    project: Project = Depends(get_allowed_project),
-    # FIX: finalize изменяет статус документа — требует аутентифицированного пользователя.
-    # До исправления эндпоинт был открыт без авторизации.
-    current_user: User = Depends(get_current_user),  # noqa: ARG001
-    suggestion_service: SuggestionService = Depends(get_suggestion_service),
-) -> DocumentResponse:
-    try:
-        document = await suggestion_service.finalize_review(project.id, document_id)
-    except DocumentNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    return DocumentResponse.model_validate(document)
