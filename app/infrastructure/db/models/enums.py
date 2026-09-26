@@ -1,71 +1,28 @@
-"""
-Все перечисления схемы БД в одном месте.
+"""Реэкспорт доменных enum-ов для обратной совместимости инфраструктуры.
 
-ИСПРАВЛЕНО (UP042): классы переведены с `class X(str, enum.Enum)` на `enum.StrEnum`
-(доступен с Python 3.11, requires-python = ">=3.12" в pyproject.toml). Проверено, что
-это не меняет видимое поведение: везде, где эти enum сериализуются наружу
-(SQLAlchemy через values_callable=... .value, Pydantic-схемы с полями типа str,
-json.dumps в logging_setup.py), используется либо .value, либо тот факт, что сам
-объект — уже валидный str (его "символьное" содержимое не меняется). Единственное
-отличие — str(member)/f-string без .value теперь возвращает "admin" вместо
-"UserRole.ADMIN"; в кодовой базе таких мест не найдено.
+DDD: перечисления являются доменными понятиями и определяются в
+app.domain.enums. Этот модуль оставлен как thin wrapper, чтобы не ломать
+существующие импорты в ORM/миграциях/адаптерах.
 """
 
-import enum
+from app.domain.enums import (
+    AnalysisJobStatus,
+    AuditAction,
+    ChangeType,
+    DocumentFormat,
+    DocumentStatus,
+    SourceType,
+    SuggestionStatus,
+    UserRole,
+)
 
-
-class UserRole(enum.StrEnum):
-    ADMIN = "admin"
-    USER = "user"
-
-
-class DocumentFormat(enum.StrEnum):
-    # .doc (OLE2 / Word 97-2003) исключён из допустимых форматов загрузки:
-    # python-docx поддерживает только .docx (OpenXML). Значение оставлено
-    # в enum для обратной совместимости с уже сохранёнными записями в БД,
-    # но DocumentParserRegistry выбрасывает UnsupportedFormatError при попытке
-    # распарсить такой файл.
-    DOC = "doc"  # не поддерживается парсером — только для legacy-совместимости
-    DOCX = "docx"
-    TXT = "txt"
-    MARKDOWN = "markdown"
-
-
-class DocumentStatus(enum.StrEnum):
-    DRAFT = "draft"
-    IN_PROGRESS = "in_progress"
-    AWAITING_APPROVAL = "awaiting_approval"
-    READY = "ready"
-
-
-class SourceType(enum.StrEnum):
-    FILE = "file"
-    NOTE = "note"
-    LINK = "link"
-
-
-class AnalysisJobStatus(enum.StrEnum):
-    PENDING = "pending"
-    PROCESSING = "processing"
-    SUCCESS = "success"
-    PARTIAL_SUCCESS = "partial_success"  # P0-7: финализация с частичным результатом
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-
-
-class ChangeType(enum.StrEnum):
-    ADD = "add"
-    MODIFY = "modify"
-    DELETE = "delete"
-
-
-class SuggestionStatus(enum.StrEnum):
-    PENDING = "pending"
-    ACCEPTED = "accepted"
-    REJECTED = "rejected"
-
-
-class AuditAction(enum.StrEnum):
-    ACCEPT = "accept"
-    REJECT = "reject"
-    DOWNLOAD = "download"
+__all__ = [
+    "UserRole",
+    "DocumentFormat",
+    "DocumentStatus",
+    "SourceType",
+    "AnalysisJobStatus",
+    "ChangeType",
+    "SuggestionStatus",
+    "AuditAction",
+]

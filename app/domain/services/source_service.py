@@ -1,26 +1,19 @@
 """
-Бизнес-логика источников истины: файл, текстовая заметка или ссылка.
-
-ИСПРАВЛЕНО:
-- list_sources принимает limit/offset и возвращает (items, total).
-- P0-6: create_text_source / create_file_source принимают scope: SourceScope.
-- P0-6: _assert_sources_mutable — гвард: запрещает изменение источников
-  документа в статусах IN_PROGRESS и AWAITING_APPROVAL.
+Бизнес-логика источников истины.
 """
 
 import uuid
 
 from app.core.config import Settings, get_settings
+from app.domain.enums import DocumentStatus, SourceType
 from app.domain.exceptions import FileTooLargeError, SourceLockError, SourceNotFoundError
 from app.domain.interfaces.file_storage import FileStorage
 from app.infrastructure.db.models.document import Document
-from app.infrastructure.db.models.enums import DocumentStatus, SourceType
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.source import Source
 from app.infrastructure.db.models.source_scope import SourceScope
 from app.infrastructure.db.repositories.source_repository import SourceRepository
 
-# Статусы, при которых изменение набора источников документа заблокировано.
 _LOCKED_STATUSES = frozenset({
     DocumentStatus.IN_PROGRESS,
     DocumentStatus.AWAITING_APPROVAL,
@@ -38,27 +31,13 @@ class SourceService:
         self._storage = file_storage
         self._settings = settings or get_settings()
 
-    # ------------------------------------------------------------------
-    # Guard
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _assert_sources_mutable(document: Document) -> None:
-        """P0-6: Выбросить SourceLockError, если источники менять нельзя.
-
-        Изменение набора источников документа запрещено в статусах
-        IN_PROGRESS и AWAITING_APPROVAL — это гарантирует, что активный
-        или уже завершённый анализ не теряет ссылки на исходные источники.
-        """
         if document.status in _LOCKED_STATUSES:
             raise SourceLockError(
                 f"Нельзя изменить источники документа в статусе '{document.status.value}'. "
                 "Дождитесь завершения анализа или переведите документ обратно в черновик."
             )
-
-    # ------------------------------------------------------------------
-    # Create project-level sources (документ не передаётся)
-    # ------------------------------------------------------------------
 
     async def create_text_source(
         self,
@@ -109,10 +88,6 @@ class SourceService:
             await self._storage.delete(storage_key)
             raise
 
-    # ------------------------------------------------------------------
-    # Read
-    # ------------------------------------------------------------------
-
     async def list_sources(
         self, project_id: uuid.UUID, limit: int, offset: int
     ) -> tuple[list[Source], int]:
@@ -135,21 +110,11 @@ class SourceService:
 
         return sources
 
-    # ------------------------------------------------------------------
-    # Attach / detach document-specific sources (P0-6 lock guard)
-    # ------------------------------------------------------------------
-
     async def replace_document_sources(
         self,
         document: Document,
         source_ids: list[uuid.UUID],
     ) -> list[Source]:
-        """Атомарная замена набора источников документа.
-
-        Заблокировано в статусах IN_PROGRESS и AWAITING_APPROVAL (P0-6).
-        Операция атомарна: старые document-specific источники удаляются,
-        новые добавляются в одной транзакции.
-        """
         self._assert_sources_mutable(document)
         sources = await self.get_sources_for_project(document.project_id, source_ids)
         return await self._sources.replace_document_sources(document.id, sources)

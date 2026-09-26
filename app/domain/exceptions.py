@@ -9,6 +9,10 @@ class SyncBackError(Exception):
     """Базовый класс для всех доменных исключений."""
 
 
+class ConcurrencyError(SyncBackError):
+    """Конкурентная модификация нарушила ожидаемую бизнес-инварианту."""
+
+
 # ---------------------------------------------------------------------------
 # Document / Project / Source
 # ---------------------------------------------------------------------------
@@ -55,7 +59,7 @@ class AnalysisJobNotFoundError(SyncBackError):
     """Задание анализа не найдено."""
 
 
-class AnalysisAlreadyRunningError(SyncBackError):
+class AnalysisAlreadyRunningError(ConcurrencyError):
     """Для документа уже выполняется анализ — нельзя запустить повторно.
 
     Сигнализирует роутеру вернуть HTTP 409 Conflict.
@@ -78,7 +82,7 @@ class SuggestionNotFoundError(SyncBackError):
     """Правка не найдена или не принадлежит текущему документу."""
 
 
-class SuggestionAlreadyDecidedError(SyncBackError):
+class SuggestionAlreadyDecidedError(ConcurrencyError):
     """Правка уже была принята/отклонена другим запросом (race condition).
 
     Сигнализирует роутеру вернуть HTTP 409 Conflict.
@@ -92,7 +96,7 @@ class ReviewNotCompleteError(SyncBackError):
     """
 
 
-class ReviewVersionConflictError(SyncBackError):
+class ReviewVersionConflictError(ConcurrencyError):
     """review_version в БД изменилась, пока клиент редактировал документ.
 
     Сигнализирует роутеру вернуть HTTP 409 Conflict.
@@ -103,7 +107,7 @@ class ReviewVersionConflictError(SyncBackError):
 StaleReviewVersionError = ReviewVersionConflictError
 
 
-class OptimisticLockError(SyncBackError):
+class OptimisticLockError(ConcurrencyError):
     """Версия ревью на клиенте устарела — документ был изменён параллельным запросом.
 
     Клиент должен перезагрузить состояние (GET /editor) и повторить сохранение.

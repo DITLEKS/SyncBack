@@ -1,12 +1,5 @@
 """
 Бизнес-логика документов.
-
-ДОБАВЛЕНО:
-- delete_document()       — удаляет MinIO-файл (best-effort), затем запись в БД.
-- get_original_content()  — читает снапшот текста до правок (#7).
-                            Использует document.original_storage_key, если
-                            он есть (выставляется пайплайном анализа), иначе
-                            отдаёт текущий storage_key (снапшот совпадает с текущим).
 """
 
 import logging
@@ -15,11 +8,11 @@ from pathlib import Path
 from typing import Literal
 
 from app.core.config import Settings, get_settings
+from app.domain.enums import DocumentFormat, DocumentStatus
 from app.domain.exceptions import DocumentNotFoundError, FileTooLargeError, UnsupportedFileFormatError
 from app.domain.interfaces.document_parser import ParsedDocument
 from app.domain.interfaces.file_storage import FileStorage
 from app.infrastructure.db.models.document import Document
-from app.infrastructure.db.models.enums import DocumentFormat, DocumentStatus
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.repositories.document_repository import DocumentRepository
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
@@ -96,12 +89,6 @@ class DocumentService:
         return document
 
     async def delete_document(self, document: Document) -> None:
-        """
-        Удаление документа:
-        1. Удаляем файл из MinIO (best-effort).
-        2. Удаляем запись из БД — ON DELETE CASCADE уберёт
-           suggestions, analysis_jobs, document_sources.
-        """
         keys_to_delete = [
             k
             for k in [
@@ -113,7 +100,7 @@ class DocumentService:
         for key in set(keys_to_delete):
             try:
                 await self._storage.delete(key)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.warning(
                     "Не удалось удалить файл из MinIO при удалении документа",
                     extra={"storage_key": key, "document_id": str(document.id)},
@@ -130,13 +117,6 @@ class DocumentService:
         return self._parser_registry.parse_by_filename(document.storage_key, raw_bytes)
 
     async def get_original_content(self, document: Document) -> ParsedDocument:
-        """Pежим «Оригинал» (#7): вернуть текст до правок.
-
-        Пайплайн анализа записывает снапшот исходного файла в MinIO под
-        ключом original_storage_key перед сохранением правок. Если
-        original_storage_key не выставлен (документ не проходил анализ),
-        отдаём текущий контент (оригинал == текущий).
-        """
         original_key: str | None = getattr(document, "original_storage_key", None)
         storage_key = original_key or document.storage_key
         raw_bytes = await self._storage.download(storage_key)
@@ -144,10 +124,6 @@ class DocumentService:
 
     async def attach_sources(self, document: Document, sources: list) -> Document:
         return await self._documents.attach_sources(document, sources)
-
-    # -------------------------------------------------------------------------
-    # P0-4: глобальный список документов пользователя
-    # -------------------------------------------------------------------------
 
     async def list_all_for_user(
         self,
@@ -160,7 +136,6 @@ class DocumentService:
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[dict], int]:
-        """Список всех документов пользователя с агрегированными счётчиками правок."""
         return await self._documents.list_all_for_user(
             owner_id,
             status=status,

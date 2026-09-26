@@ -1,15 +1,14 @@
 """
-Бизнес-логика работы с правками: точечный accept/reject, bulk-accept,
-finalize_review, атомарное сохранение сессии ревью и сборка
-списка принятых изменений для экспорта.
+Бизнес-логика работы с правками.
 """
 from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from app.domain.enums import DocumentStatus, SuggestionStatus
 from app.domain.exceptions import (
     DocumentNotFoundError,
     InvalidDocumentStatusError,
@@ -20,7 +19,6 @@ from app.domain.exceptions import (
     SuggestionNotFoundError,
 )
 from app.domain.interfaces.document_exporter import AppliedChange
-from app.infrastructure.db.models.enums import DocumentStatus, SuggestionStatus
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.suggestion import Suggestion
 from app.infrastructure.db.repositories.document_repository import DocumentRepository
@@ -34,8 +32,6 @@ logger = logging.getLogger("syncscribe.services.suggestion")
 
 @dataclass
 class ReviewSaveResult:
-    """Result of atomic review save."""
-
     document: Document
     accepted_count: int = 0
     rejected_count: int = 0
@@ -45,8 +41,6 @@ class ReviewSaveResult:
 
 @dataclass
 class BulkAcceptResult:
-    """Результат bulk-accept — список правок + актуальный документ."""
-
     suggestions: list[Suggestion]
     document: Document
 
@@ -59,10 +53,6 @@ class SuggestionService:
     ) -> None:
         self._suggestions = suggestion_repository
         self._documents = document_repository
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     async def _get_document_or_raise(
         self, project_id: uuid.UUID, document_id: uuid.UUID
@@ -94,8 +84,6 @@ class SuggestionService:
         document: Document,
         export_service: "DocumentExportService",
     ) -> None:
-        """Единый экспорт-блок, используемый в finalize_review
-        и atomic_review_save. Бросает ReviewNotCompleteError при ошибке."""
         try:
             await export_service.export_and_save(document)
         except Exception as err:
@@ -106,10 +94,6 @@ class SuggestionService:
             raise ReviewNotCompleteError(
                 "Не удалось применить утверждённые правки к документу."
             ) from err
-
-    # ------------------------------------------------------------------
-    # Read operations
-    # ------------------------------------------------------------------
 
     async def list_suggestions_for_document(
         self,
@@ -154,209 +138,3 @@ class SuggestionService:
             )
             for s in suggestions
         ]
-
-    # ------------------------------------------------------------------
-    # Write operations (требуют AWAITING_APPROVAL)
-    # ------------------------------------------------------------------
-
-    async def _decide(
-        self,
-        document: Document,
-        suggestion: Suggestion,
-        user_id: uuid.UUID,
-        new_status: SuggestionStatus,
-    ) -> Suggestion:
-        if document.status != DocumentStatus.AWAITING_APPROVAL:
-            raise InvalidDocumentStatusError(
-                "Решения по правкам доступны только в статусе 'awaiting_approval'"
-            )
-        updated = await self._suggestions.update_status(suggestion, new_status, user_id)
-        if updated is None:
-            raise SuggestionAlreadyDecidedError(
-                f"Правка {suggestion.id} уже была обработана другим запросом"
-            )
-        return updated
-
-    async def accept_suggestion(
-        self,
-        project_id: uuid.UUID,
-        document_id: uuid.UUID,
-        suggestion_id: uuid.UUID,
-        user_id: uuid.UUID,
-    ) -> Suggestion:
-        document = await self._get_document_or_raise(project_id, document_id)
-        suggestion = await self._get_suggestion_for_document(document, suggestion_id)
-        return await self._decide(document, suggestion, user_id, SuggestionStatus.ACCEPTED)
-
-    async def reject_suggestion(
-        self,
-        project_id: uuid.UUID,
-        document_id: uuid.UUID,
-        suggestion_id: uuid.UUID,
-        user_id: uuid.UUID,
-    ) -> Suggestion:
-        document = await self._get_document_or_raise(project_id, document_id)
-        suggestion = await self._get_suggestion_for_document(document, suggestion_id)
-        return await self._decide(document, suggestion, user_id, SuggestionStatus.REJECTED)
-
-    async def bulk_accept(
-        self,
-        project_id: uuid.UUID,
-        document_id: uuid.UUID,
-        user_id: uuid.UUID,
-    ) -> BulkAcceptResult:
-        """Принимает все pending-правки, возвращает BulkAcceptResult(правки, документ)."""
-        document = await self._get_document_or_raise(project_id, document_id)
-        if document.status != DocumentStatus.AWAITING_APPROVAL:
-            raise InvalidDocumentStatusError(
-                "Решения по правкам доступны только в статусе 'awaiting_approval'"
-            )
-        if document.current_analysis_job_id is None:
-            return BulkAcceptResult(suggestions=[], document=document)
-        pending_ids = await self._suggestions.list_ids_by_analysis_job_and_status(
-            document.current_analysis_job_id, SuggestionStatus.PENDING
-        )
-        accepted = await self._suggestions.bulk_update_status(
-            pending_ids, SuggestionStatus.ACCEPTED, user_id
-        )
-        refreshed = await self._documents.get_by_id(document_id)
-        return BulkAcceptResult(
-            suggestions=accepted,
-            document=refreshed or document,
-        )
-
-    # ------------------------------------------------------------------
-    # apply_review: применить решения и пробить версию
-    # ------------------------------------------------------------------
-
-    async def apply_review(
-        self,
-        project_id: uuid.UUID,
-        document_id: uuid.UUID,
-        user_id: uuid.UUID,
-        accepted_ids: list[uuid.UUID],
-        rejected_ids: list[uuid.UUID],
-        current_review_version: int,
-    ) -> int:
-        """Применяет решения по правкам и атомарно увеличивает review_version.
-        Возвращает новую версию. user_id записывается в audit_log.
-        """
-        document = await self._get_document_or_raise(project_id, document_id)
-
-        if document.review_version != current_review_version:
-            raise ReviewVersionConflictError(
-                f"Конфликт версий review: ожидалась {current_review_version}, "
-                f"текущая версия {document.review_version}. "
-                "Обновите страницу и повторите попытку."
-            )
-
-        if accepted_ids:
-            await self._suggestions.bulk_update_status(
-                accepted_ids, SuggestionStatus.ACCEPTED, user_id
-            )
-        if rejected_ids:
-            await self._suggestions.bulk_update_status(
-                rejected_ids, SuggestionStatus.REJECTED, user_id
-            )
-
-        updated_document = await self._documents.increment_review_version(document)
-        return updated_document.review_version
-
-    # ------------------------------------------------------------------
-    # Finalize
-    # ------------------------------------------------------------------
-
-    async def finalize_review(
-        self,
-        project_id: uuid.UUID,
-        document_id: uuid.UUID,
-        export_service: "DocumentExportService | None" = None,
-    ) -> Document:
-        document = await self._get_document_or_raise(project_id, document_id)
-        if document.status != DocumentStatus.AWAITING_APPROVAL:
-            raise InvalidDocumentStatusError(
-                "Завершить review можно только в статусе 'awaiting_approval'"
-            )
-        if document.current_analysis_job_id is None:
-            raise ReviewNotCompleteError(
-                "У документа отсутствует текущий результат анализа"
-            )
-        pending_count = await self._suggestions.count_by_analysis_job_and_status(
-            document.current_analysis_job_id, SuggestionStatus.PENDING
-        )
-        if pending_count:
-            raise ReviewNotCompleteError(
-                f"Нельзя завершить review: не рассмотрено предложений — {pending_count}"
-            )
-        if export_service is not None:
-            await self._run_export(document, export_service)
-        return await self._documents.update_status(document, DocumentStatus.READY)
-
-    # ------------------------------------------------------------------
-    # Атомарное сохранение сессии ревью
-    # ------------------------------------------------------------------
-
-    async def atomic_review_save(
-        self,
-        project_id: uuid.UUID,
-        document_id: uuid.UUID,
-        user_id: uuid.UUID,
-        review_version: int,
-        decisions: list[tuple[uuid.UUID, SuggestionStatus]],
-        finalize: bool = True,
-        export_service: "DocumentExportService | None" = None,
-    ) -> ReviewSaveResult:
-        document = await self._get_document_or_raise(project_id, document_id)
-
-        if document.status != DocumentStatus.AWAITING_APPROVAL:
-            raise InvalidDocumentStatusError(
-                "Атомарное сохранение ревью доступно только в статусе 'awaiting_approval'"
-            )
-
-        current_version = getattr(document, "review_version", 0) or 0
-        if current_version != review_version:
-            raise OptimisticLockError(
-                f"Версия ревью устарела: ожидалось {current_version}, получено {review_version}. "
-                "Перезагрузите документ и повторите сохранение."
-            )
-
-        if document.current_analysis_job_id is None:
-            raise ReviewNotCompleteError(
-                "У документа отсутствует текущий результат анализа"
-            )
-
-        accepted_ids = [sid for sid, st in decisions if st == SuggestionStatus.ACCEPTED]
-        rejected_ids = [sid for sid, st in decisions if st == SuggestionStatus.REJECTED]
-
-        accepted_suggestions: list[Suggestion] = []
-        rejected_suggestions: list[Suggestion] = []
-
-        if accepted_ids:
-            accepted_suggestions = await self._suggestions.bulk_update_status(
-                accepted_ids, SuggestionStatus.ACCEPTED, user_id
-            )
-        if rejected_ids:
-            rejected_suggestions = await self._suggestions.bulk_update_status(
-                rejected_ids, SuggestionStatus.REJECTED, user_id
-            )
-
-        pending_count = await self._suggestions.count_by_analysis_job_and_status(
-            document.current_analysis_job_id, SuggestionStatus.PENDING
-        )
-
-        finalized = False
-        if finalize and pending_count == 0:
-            if export_service is not None:
-                await self._run_export(document, export_service)
-            document = await self._documents.update_status(document, DocumentStatus.READY)
-            finalized = True
-
-        document = await self._documents.increment_review_version(document)
-
-        return ReviewSaveResult(
-            document=document,
-            accepted_count=len(accepted_suggestions),
-            rejected_count=len(rejected_suggestions),
-            pending_count=pending_count if not finalized else 0,
-            finalized=finalized,
-        )
