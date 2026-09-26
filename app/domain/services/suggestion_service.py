@@ -2,6 +2,8 @@
 Бизнес-логика работы с правками: точечный accept/reject, bulk-accept,
 finalize_review, атомарное сохранение сессии ревью и сборка
 списка принятых изменений для экспорта.
+
+H2.2: сервис принимает SuggestionPort / DocumentPort вместо конкретных репозиториев.
 """
 from __future__ import annotations
 
@@ -20,11 +22,11 @@ from app.domain.exceptions import (
     SuggestionNotFoundError,
 )
 from app.domain.interfaces.document_exporter import AppliedChange
+from app.domain.ports.document_port import DocumentPort
+from app.domain.ports.suggestion_port import SuggestionPort
 from app.infrastructure.db.models.enums import DocumentStatus, SuggestionStatus
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.suggestion import Suggestion
-from app.infrastructure.db.repositories.document_repository import DocumentRepository
-from app.infrastructure.db.repositories.suggestion_repository import SuggestionRepository
 
 if TYPE_CHECKING:
     from app.domain.services.document_export_service import DocumentExportService
@@ -54,8 +56,8 @@ class BulkAcceptResult:
 class SuggestionService:
     def __init__(
         self,
-        suggestion_repository: SuggestionRepository,
-        document_repository: DocumentRepository,
+        suggestion_repository: SuggestionPort,
+        document_repository: DocumentPort,
     ) -> None:
         self._suggestions = suggestion_repository
         self._documents = document_repository

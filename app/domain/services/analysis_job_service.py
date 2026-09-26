@@ -1,3 +1,8 @@
+"""
+Бизнес-логика управления задачами анализа.
+
+H2.2: сервис принимает AnalysisJobPort / DocumentPort вместо конкретных репозиториев.
+"""
 import uuid
 
 from sqlalchemy.exc import IntegrityError
@@ -8,11 +13,11 @@ from app.domain.exceptions import (
     DocumentNotFoundError,
     InvalidDocumentStatusError,
 )
+from app.domain.ports.analysis_job_port import AnalysisJobPort
+from app.domain.ports.document_port import DocumentPort
 from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.enums import AnalysisJobStatus, DocumentStatus
-from app.infrastructure.db.repositories.analysis_job_repository import AnalysisJobRepository
-from app.infrastructure.db.repositories.document_repository import DocumentRepository
 
 # Статусы документа, из которых разрешён запуск анализа:
 #   DRAFT              — первичный / повторный запуск (переходы №2, №7→2)
@@ -28,8 +33,8 @@ _ANALYSIS_ALLOWED_STATUSES = (
 class AnalysisJobService:
     def __init__(
         self,
-        analysis_job_repository: AnalysisJobRepository,
-        document_repository: DocumentRepository,
+        analysis_job_repository: AnalysisJobPort,
+        document_repository: DocumentPort,
     ):
         self._jobs = analysis_job_repository
         self._documents = document_repository
@@ -44,7 +49,7 @@ class AnalysisJobService:
         document_id: uuid.UUID,
         idempotency_key: str,
     ) -> AnalysisJob | None:
-        """Nайти существующий job по ключу идемпотентности.
+        """Найти существующий job по ключу идемпотентности.
 
         Проверяет принадлежность документа проекту перед поиском.
         Возвращает None, если документ не найден или job с таким ключом
@@ -62,10 +67,10 @@ class AnalysisJobService:
     async def get_document_for_job(
         self, project_id: uuid.UUID, document_id: uuid.UUID
     ) -> Document:
-        """Vернуть ORM-документ для проверки статуса (#9).
+        """Вернуть ORM-документ для проверки статуса (#9).
 
         Используется роутером до create_job, чтобы проверить READY-гард
-        без force=True до чего-либо изменения в БД.
+        без force=True до каких-либо изменений в БД.
         """
         document = await self._documents.get_by_id(document_id)
         if document is None or document.project_id != project_id:
@@ -84,7 +89,7 @@ class AnalysisJobService:
         document_id: uuid.UUID,
         idempotency_key: str | None = None,
     ) -> AnalysisJob:
-        """Cоздать задачу анализа.
+        """Создать задачу анализа.
 
         Разрешённые исходные статусы документа (таблица переходов):
           • DRAFT             → переход №2 (первичный/ручной запуск)
@@ -189,7 +194,7 @@ class AnalysisJobService:
     async def bulk_create_jobs_for_project(
         self, project_id: uuid.UUID
     ) -> list[dict]:
-        """Zапустить анализ для всех документов проекта в статусе draft/awaiting_approval.
+        """Запустить анализ для всех документов проекта в статусе draft/awaiting_approval.
 
         Возвращает list[dict] вида:
           {"document_id": UUID, "job": AnalysisJob}           — успешный запуск

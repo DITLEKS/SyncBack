@@ -5,17 +5,21 @@
 ДОБАВЛЕНО:
 - update_project() — частичное обновление (переименование / изменение описания).
 - delete_project() — каскадное удаление всех дочерних объектов и MinIO-файлов.
+
+H2.2: сервис принимает ProjectPort вместо конкретного ProjectRepository.
+Сonkrete SQLAlchemy-репозиторий по-прежнему передаётся из core/dependencies.py,
+но тип в сигнатуре — порт домена.
 """
 
 from app.domain.interfaces.file_storage import FileStorage
+from app.domain.ports.project_port import ProjectPort
 from app.infrastructure.db.models.enums import UserRole
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.user import User
-from app.infrastructure.db.repositories.project_repository import ProjectRepository
 
 
 class ProjectService:
-    def __init__(self, project_repository: ProjectRepository, file_storage: FileStorage):
+    def __init__(self, project_repository: ProjectPort, file_storage: FileStorage):
         self._projects = project_repository
         self._storage = file_storage
 

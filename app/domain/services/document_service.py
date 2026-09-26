@@ -7,6 +7,8 @@
                             Использует document.original_storage_key, если
                             он есть (выставляется пайплайном анализа), иначе
                             отдаёт текущий storage_key (снапшот совпадает с текущим).
+
+H2.2: сервис принимает DocumentPort вместо конкретного DocumentRepository.
 """
 
 import logging
@@ -18,10 +20,10 @@ from app.core.config import Settings, get_settings
 from app.domain.exceptions import DocumentNotFoundError, FileTooLargeError, UnsupportedFileFormatError
 from app.domain.interfaces.document_parser import ParsedDocument
 from app.domain.interfaces.file_storage import FileStorage
+from app.domain.ports.document_port import DocumentPort
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.enums import DocumentFormat, DocumentStatus
 from app.infrastructure.db.models.project import Project
-from app.infrastructure.db.repositories.document_repository import DocumentRepository
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 
 logger = logging.getLogger("syncscribe.services.document")
@@ -37,7 +39,7 @@ _EXTENSION_TO_FORMAT: dict[str, DocumentFormat] = {
 class DocumentService:
     def __init__(
         self,
-        document_repository: DocumentRepository,
+        document_repository: DocumentPort,
         file_storage: FileStorage,
         parser_registry: DocumentParserRegistry | None = None,
         settings: Settings | None = None,
@@ -130,7 +132,7 @@ class DocumentService:
         return self._parser_registry.parse_by_filename(document.storage_key, raw_bytes)
 
     async def get_original_content(self, document: Document) -> ParsedDocument:
-        """Pежим «Оригинал» (#7): вернуть текст до правок.
+        """Режим «Оригинал» (#7): вернуть текст до правок.
 
         Пайплайн анализа записывает снапшот исходного файла в MinIO под
         ключом original_storage_key перед сохранением правок. Если

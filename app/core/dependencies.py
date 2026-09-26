@@ -3,6 +3,12 @@ DI-фабрики зависимостей FastAPI.
 
 ProjectService принимает file_storage — нужен для delete_project().
 DashboardService подключён с реальным DashboardRepository (CR-2).
+
+H2.2: фабрики по-прежнему создают concrete SQLAlchemy-репозитории,
+но передают их сервисам как значения, удовлетворяющие доменным портам.
+Типы аннотаций в фабриках оставлены конкретными — FastAPI DI не понимает
+Protocol для Depends, зато mypy/pyright проверят, что concrete-репозитории
+действительно реализуют порты через @runtime_checkable.
 """
 
 from functools import lru_cache
@@ -33,6 +39,7 @@ from app.infrastructure.llm.factory import create_llm_client
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 from app.infrastructure.security.login_rate_limiter import LoginRateLimiter
 from app.infrastructure.storage.minio_storage import MinioStorage
+from app.infrastructure.db.repositories.user_repository import UserRepository
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +64,18 @@ def _get_exporter_registry() -> DocumentExporterRegistry:
 # ---------------------------------------------------------------------------
 # Per-request services
 # ---------------------------------------------------------------------------
+
+async def get_project_repository(
+    session: AsyncSession = Depends(get_db),
+) -> ProjectRepository:
+    return ProjectRepository(session)
+
+
+async def get_user_repository(
+    session: AsyncSession = Depends(get_db),
+) -> UserRepository:
+    return UserRepository(session)
+
 
 async def get_project_service(
     session: AsyncSession = Depends(get_db),
