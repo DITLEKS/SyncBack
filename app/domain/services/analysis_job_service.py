@@ -3,25 +3,22 @@
 
 Архитектурные правила:
   - Сервис зависит только от IUnitOfWork — не от конкретных репозиториев.
-  - Один uow.commit() на операцию (кроме компенсирующих транзакций при ошибках).
+  - Один uow.commit() на операцию.
   - H-2: ORM-объект AnalysisJob создаётся внутри репозитория через фабричный метод.
   - Никаких импортов из app.infrastructure.* при выполнении (НЕ TYPE_CHECKING).
   - CRIT-A/B: mark_dispatched / mark_job_queue_unavailable / cancel_job адаптированы
-    под новую сигнатуру репозитория: методы больше не принимают document напрямую,
-    а возвращают (job, DocumentStatusVO | None). Сервис применяет изменение
-    документа через uow.documents.update_status().
+    под новую сигнатуру репозитория.
   - CRIT-NEW-1: IntegrityError перехватывается в репозитории и транслируется
-    в AnalysisAlreadyRunningError — инфраструктурные исключения в domain недопустимы.
+    в AnalysisAlreadyRunningError.
 
 ИСПРАВЛЕНИЯ:
-  - CRIT-1: bulk_create_jobs_for_project загружает только document.id (list[UUID]),
-    не ORM-объекты. Объекты из первого UoW были бы detached при повторном входе в uow.
-  - CRIT-2: _get_job бросает AnalysisJobNotFoundError при ненайденном job,
-    а не DocumentNotFoundError — правильная семантика для API 404.
-  - HIGH-1: mark_dispatched явно проверяет job.status == PENDING перед делегированием
-    в репозиторий; диспатч завершённой или обработанной задачи — логическая ошибка.
-  - M-1: find_job_by_idempotency_key возвращает job.id (UUID), не ORM-объект,
-    чтобы избежать DetachedInstanceError после выхода из async with self._uow.
+  - CRIT-1: bulk_create_jobs_for_project загружает только document.id (list[UUID]).
+  - CRIT-2: _get_job бросает AnalysisJobNotFoundError при ненайденном job.
+  - HIGH-1: mark_dispatched явно проверяет job.status == PENDING.
+  - M-1: find_job_by_idempotency_key возвращает job.id (UUID), не ORM-объект.
+  - H-NEW-3: get_document_for_job возвращает UUID (не детачед ORM-объект)
+    — вызывающий код должен перезагрузить документ сам через document_service,
+    если нужен полный объект.
 """
 from __future__ import annotations
 
@@ -75,13 +72,7 @@ class AnalysisJobService:
         document_id: uuid.UUID,
         idempotency_key: str,
     ) -> uuid.UUID | None:
-        """Найти job по ключу идемпотентности.
-
-        M-1: возвращает job.id (UUID), а не ORM-объект — после выхода из
-        async with self._uow сессия закрыта и ORM-объект стал бы detached.
-        Вызывающий код должен перезагрузить job через get_job() если нужен
-        полный объект.
-        """
+        """M-1: возвращает job.id (UUID), не ORM-объект."""
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
             if document is None or document.project_id != project_id:
@@ -97,14 +88,21 @@ class AnalysisJobService:
 
     async def get_document_for_job(
         self, project_id: uuid.UUID, document_id: uuid.UUID
-    ) -> "Document":
+    ) -> uuid.UUID:
+        """Проверить, что документ существует в проекте, вернуть его UUID.
+
+        H-NEW-3: раньше метод возвращал detached ORM-объект после закрытия сессии —
+        обращение к любому ленивому атрибуту вызывало DetachedInstanceError.
+        Теперь возвращает document_id (UUID).
+        Если вызывающему коду нужен полный объект — загрузить через document_service.get_document().
+        """
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
             if document is None or document.project_id != project_id:
                 raise DocumentNotFoundError(
                     f"Документ {document_id} не найден в проекте {project_id}"
                 )
-        return document
+            return document_id
 
     # ------------------------------------------------------------------
     # Core job lifecycle
@@ -116,19 +114,7 @@ class AnalysisJobService:
         document_id: uuid.UUID,
         idempotency_key: str | None = None,
     ) -> "AnalysisJob":
-        """Создать задачу анализа.
-
-        Одна транзакция:
-          1. Проверка статуса документа
-          2. Idempotency-check (если ключ передан)
-          3. Сброс документа в DRAFT (если не DRAFT)
-          4. INSERT job + UPDATE document.current_analysis_job_id  (фабрика в репозитории)
-          5. commit
-
-        CRIT-NEW-1: IntegrityError больше не перехватывается здесь.
-        Репозиторий обязан поймать sqlalchemy.exc.IntegrityError
-        и выбросить AnalysisAlreadyRunningError сам.
-        """
+        """Создать задачу анализа."""
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
             if document is None or document.project_id != project_id:
@@ -160,8 +146,6 @@ class AnalysisJobService:
                     document, DocumentStatusVO.DRAFT
                 )
 
-            # H-2: ORM-объект создаётся внутри репозитория — сервис не знает про AnalysisJob ORM.
-            # Репозиторий перехватывает IntegrityError и бросает AnalysisAlreadyRunningError.
             job = await self._uow.jobs.create_for_document(
                 document,
                 status=AnalysisJobStatusVO.PENDING,
@@ -173,15 +157,7 @@ class AnalysisJobService:
     async def mark_dispatched(
         self, job: "AnalysisJob", task_id: str
     ) -> "AnalysisJob":
-        """Отметить job как отправленный в Celery.
-
-        HIGH-1: явная проверка job.status == PENDING перед делегированием.
-        Диспатч завершённой/обработанной задачи — логическая ошибка и должен
-        быть отклонён на уровне сервиса, не репозитория.
-
-        CRIT-A: репозиторий больше не принимает document. Сервис загружает
-        document самостоятельно и применяет new_doc_status через uow.documents.update_status().
-        """
+        """HIGH-1: явная проверка job.status == PENDING перед делегированием."""
         if job.status not in _DISPATCHABLE_JOB_STATUSES:
             raise InvalidDocumentStatusError(
                 f"Диспатч недопустим для задачи в статусе {job.status!r}. "
@@ -202,11 +178,6 @@ class AnalysisJobService:
     async def mark_job_queue_unavailable(
         self, job: "AnalysisJob", error_message: str | None = None
     ) -> "AnalysisJob":
-        """Отметить job как недоступный из-за недоступности очереди.
-
-        CRIT-B: репозиторий больше не принимает document. Сервис загружает document
-        самостоятельно и применяет new_doc_status через uow.documents.update_status().
-        """
         async with self._uow:
             document = await self._uow.documents.get_by_id(job.document_id)
             if document is None:
@@ -227,11 +198,6 @@ class AnalysisJobService:
         document_id: uuid.UUID,
         job_id: uuid.UUID,
     ) -> "AnalysisJob":
-        """Отменить задачу анализа.
-
-        CRIT-B: репозиторий больше не принимает document. Сервис загружает document
-        самостоятельно и применяет new_doc_status через uow.documents.update_status().
-        """
         async with self._uow:
             job = await self._get_job(project_id, document_id, job_id)
             if job.status == AnalysisJobStatusVO.CANCELLED:
@@ -263,16 +229,7 @@ class AnalysisJobService:
     async def bulk_create_jobs_for_project(
         self, project_id: uuid.UUID
     ) -> list[dict]:
-        """Запустить анализ для всех документов проекта в статусе draft/awaiting_approval.
-
-        CRIT-1: загружаем только document.id (UUID), не ORM-объекты.
-        После выхода из первого async with self._uow сессия закрыта — любые
-        ORM-объекты стали бы detached и обращение к их атрибутам в цикле
-        вызвало бы DetachedInstanceError.
-
-        Каждый документ — отдельный UoW, чтобы ошибка одного
-        не откатывала остальных.
-        """
+        """CRIT-1: загружаем только document.id (UUID), не ORM-объекты."""
         async with self._uow:
             analyzable_ids: list[uuid.UUID] = [
                 doc.id
@@ -310,12 +267,7 @@ class AnalysisJobService:
         document_id: uuid.UUID,
         job_id: uuid.UUID,
     ) -> "AnalysisJob":
-        """Проверить принадлежность job → document → project.
-
-        CRIT-2: бросает AnalysisJobNotFoundError если job не найден или не
-        принадлежит document_id — не DocumentNotFoundError, который семантически
-        означает «документ не найден» и маппится в другой HTTP-ответ.
-        """
+        """CRIT-2: бросает AnalysisJobNotFoundError, если job не найден."""
         job = await self._uow.jobs.get_by_id(job_id)
         if job is None or job.document_id != document_id:
             raise AnalysisJobNotFoundError(
