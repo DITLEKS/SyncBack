@@ -60,6 +60,10 @@ class SuggestionRepository:
     async def list_by_analysis_job_and_status(
         self, analysis_job_id: uuid.UUID, status: SuggestionStatus
     ) -> list[Suggestion]:
+        # Намеренно без LIMIT: этот метод является источником курсорной
+        # итерации для экспорта и обязан возвращать все принятые правки
+        # по заданному analysis_job. Пагинация реализована на уровне
+        # DocumentExportService._iter_accepted_changes_pages, а не здесь.
         result = await self._session.execute(
             select(Suggestion)
             .where(
@@ -67,6 +71,28 @@ class SuggestionRepository:
                 Suggestion.status == status,
             )
             .order_by(Suggestion.created_at)
+        )
+        return list(result.scalars().all())
+
+    async def list_by_analysis_job_and_status_page(
+        self,
+        analysis_job_id: uuid.UUID,
+        status: SuggestionStatus,
+        limit: int,
+        offset: int,
+    ) -> list[Suggestion]:
+        """Постраничный вариант для курсорного обхода при экспорте.
+        Используется исключительно из DocumentExportService.
+        """
+        result = await self._session.execute(
+            select(Suggestion)
+            .where(
+                Suggestion.analysis_job_id == analysis_job_id,
+                Suggestion.status == status,
+            )
+            .order_by(Suggestion.created_at)
+            .limit(limit)
+            .offset(offset)
         )
         return list(result.scalars().all())
 

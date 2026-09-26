@@ -141,6 +141,17 @@ class SuggestionService:
         return await self._get_suggestion_for_document(document, suggestion_id)
 
     async def get_accepted_changes(self, document_id: uuid.UUID) -> list[AppliedChange]:
+        """Возвращает полный список принятых изменений для экспорта документа.
+
+        Пагинация намеренно не применяется: метод является источником данных
+        для export-пути и обязан возвращать все принятые правки как единый
+        упорядоченный набор. Контролируемая постраничная загрузка реализована
+        на уровне DocumentExportService._iter_accepted_changes_pages —
+        именно там ограничивается объём памяти при обходе больших документов.
+
+        Для нестриминговых потребителей (тесты, небольшие документы) данный
+        метод остаётся предпочтительным публичным API.
+        """
         document = await self._documents.get_by_id(document_id)
         if document is None or document.current_analysis_job_id is None:
             return []

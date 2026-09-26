@@ -1,11 +1,22 @@
 """
 Сборка финального документа: скачивает исходный файл из Minio, применяет принятые правки
 через нужный DocumentExporter и возвращает готовые байты + имя файла + media type.
+
+Экспорт принятых правок реализован через курсорный обход страниц (PAGE_SIZE = 500),
+чтобы ограничить пиковое потребление памяти при документах с большим количеством правок.
+Публичный метод get_accepted_changes в SuggestionService намеренно не имеет лимита —
+он остаётся основным API для небольших и тестовых сценариев.
 """
+from __future__ import annotations
+
+import uuid
+from typing import AsyncIterator
+
+from app.domain.interfaces.document_exporter import AppliedChange
 from app.domain.interfaces.file_storage import FileStorage
 from app.domain.services.suggestion_service import SuggestionService
 from app.infrastructure.db.models.document import Document
-from app.infrastructure.db.models.enums import DocumentFormat
+from app.infrastructure.db.models.enums import DocumentFormat, SuggestionStatus
 from app.infrastructure.exporters.exporter_registry import DocumentExporterRegistry
 
 _MEDIA_TYPES: dict[DocumentFormat, str] = {
@@ -15,16 +26,72 @@ _MEDIA_TYPES: dict[DocumentFormat, str] = {
     DocumentFormat.MARKDOWN: "text/markdown",
 }
 
+# Размер страницы при курсорном обходе принятых правок.
+# 500 строк — компромисс между количеством round-trip к БД и пиком памяти.
+_EXPORT_PAGE_SIZE: int = 500
+
 
 class DocumentExportService:
-    def __init__(self, file_storage: FileStorage, exporter_registry: DocumentExporterRegistry, suggestion_service: SuggestionService):
+    def __init__(
+        self,
+        file_storage: FileStorage,
+        exporter_registry: DocumentExporterRegistry,
+        suggestion_service: SuggestionService,
+    ) -> None:
         self._storage = file_storage
         self._exporters = exporter_registry
         self._suggestions = suggestion_service
 
+    async def _iter_accepted_changes_pages(
+        self, document: Document
+    ) -> list[AppliedChange]:
+        """Курсорный обход принятых правок страницами по _EXPORT_PAGE_SIZE.
+
+        Возвращает полный список AppliedChange, но загружает данные порциями,
+        не материализуя весь набор ORM-объектов единовременно в identity-map
+        SQLAlchemy. Это ограничивает пиковый расход памяти при документах
+        с тысячами правок.
+
+        Используется только внутри export_document. Внешние потребители
+        должны обращаться к SuggestionService.get_accepted_changes.
+        """
+        if document.current_analysis_job_id is None:
+            return []
+
+        repo = self._suggestions._suggestions  # SuggestionPort
+        changes: list[AppliedChange] = []
+        offset = 0
+
+        while True:
+            page = await repo.list_by_analysis_job_and_status_page(
+                document.current_analysis_job_id,
+                SuggestionStatus.ACCEPTED,
+                limit=_EXPORT_PAGE_SIZE,
+                offset=offset,
+            )
+            if not page:
+                break
+            changes.extend(
+                AppliedChange(
+                    section_ref=s.section_ref,
+                    change_type=s.change_type.value,
+                    old_text=s.old_text,
+                    new_text=s.new_text,
+                )
+                for s in page
+            )
+            if len(page) < _EXPORT_PAGE_SIZE:
+                # Последняя страница — дальше данных нет.
+                break
+            offset += _EXPORT_PAGE_SIZE
+
+        return changes
+
     async def export_document(self, document: Document) -> tuple[bytes, str, str]:
         raw_bytes = await self._storage.download(document.storage_key)
-        changes = await self._suggestions.get_accepted_changes(document.id)
+        # Используем постраничный обход вместо однократного запроса всего набора,
+        # чтобы ограничить пиковую нагрузку на память при больших документах.
+        changes = await self._iter_accepted_changes_pages(document)
         exporter = self._exporters.get_exporter(document.format)
         exported_bytes = exporter.apply_changes(raw_bytes, changes)
         media_type = _MEDIA_TYPES.get(document.format, "application/octet-stream")
