@@ -2,13 +2,13 @@
 DI-фабрики FastAPI.
 
 Все сервисы получают UoW (или отдельные репозитории для AuthService, у которого
-nет собственного UoW-метода). Конкретные репозитории НЕ инстансируются в этом
+нет собственного UoW-метода). Конкретные репозитории НЕ инстансируются в этом
 файле напрямую — их создаёт SqlAlchemyUnitOfWork или фабрика сервиса.
 
 H2.2: фабрики по-прежнему создают concrete SQLAlchemy-репозитории,
 но передают их сервисам как значения, удовлетворяющие доменным портам.
 Типы аннотаций в фабриках оставлены конкретными — FastAPI DI не понимает
-Protocol для Depends, зато mypy/pyright проверят, что concrete-репозитории
+Protocol для Depends, зато мысль/pyright проверят, что concrete-репозитории
 действительно реализуют порты через @runtime_checkable.
 """
 
@@ -38,7 +38,6 @@ from app.infrastructure.security.jwt_handler import JWTHandler
 from app.infrastructure.security.login_rate_limiter import LoginRateLimiter
 from app.infrastructure.security.password_hasher import PasswordHasher
 from app.infrastructure.storage.minio_storage import MinioStorage
-from app.infrastructure.db.repositories.user_repository import UserRepository
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +66,7 @@ def _get_exporter_registry() -> DocumentExporterRegistry:
 def get_uow(
     session: AsyncSession = Depends(get_db_session),
 ) -> SqlAlchemyUnitOfWork:
-    """Per-request Unit of Work.
+    """Пер-request Unit of Work.
 
     Один экземпляр на HTTP-запрос — все операции одного запроса
     видят одно и то же состояние сессии и фиксируются одним commit().
@@ -78,18 +77,6 @@ def get_uow(
 # ---------------------------------------------------------------------------
 # Services — все используют UoW
 # ---------------------------------------------------------------------------
-
-async def get_project_repository(
-    session: AsyncSession = Depends(get_db),
-) -> ProjectRepository:
-    return ProjectRepository(session)
-
-
-async def get_user_repository(
-    session: AsyncSession = Depends(get_db),
-) -> UserRepository:
-    return UserRepository(session)
-
 
 def get_suggestion_service(
     uow: SqlAlchemyUnitOfWork = Depends(get_uow),
