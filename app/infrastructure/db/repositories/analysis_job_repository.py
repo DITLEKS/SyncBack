@@ -20,6 +20,9 @@ SQLAlchemy-адаптер для AnalysisJob.
   Вызывающий сервис обязан явно выполнить uow.documents.set_current_job(document, job.id).
 - M-2: mark_dispatched сравнивает статус через VO-значения (.value), а не ORM-enum
   напрямую — устраняет течь абстракции при потенциальном переименовании ORM-enum.
+- FIX-DISPATCH: mark_dispatched теперь явно переводит job.status → PROCESSING через
+  update_status(), а не оставляет job в PENDING до момента когда воркер вызовет
+  mark_processing_if_active(). Это закрывает окно в несколько секунд когда status врал.
 """
 from __future__ import annotations
 
@@ -85,6 +88,33 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         )
         return result.scalar_one_or_none()
 
+    async def list_by_document(
+        self,
+        document_id: uuid.UUID,
+        pagination,
+    ) -> "list[AnalysisJob]":
+        from app.infrastructure.db.models.analysis_job import AnalysisJob as M
+        from app.domain.value_objects import PaginationParams, KeysetPage
+        stmt = (
+            select(M)
+            .where(M.document_id == document_id)
+            .order_by(M.created_at.desc())
+        )
+        if isinstance(pagination, KeysetPage):
+            if pagination.has_cursor:
+                stmt = stmt.where(
+                    (M.created_at < pagination.before_created_at)
+                    | (
+                        (M.created_at == pagination.before_created_at)
+                        & (M.id < pagination.before_id)
+                    )
+                )
+            stmt = stmt.limit(pagination.limit)
+        else:
+            stmt = stmt.limit(pagination.limit).offset(pagination.offset)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     # ------------------------------------------------------------------
     # Write
     # ------------------------------------------------------------------
@@ -124,24 +154,34 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         job: "AnalysisJob",
         task_id: str,
     ) -> "tuple[AnalysisJob, DocumentStatusVO | None]":
-        """Пометить задачу как отправленную в Celery.
+        """Пометить задачу как отправленную в Celery и перевести в PROCESSING.
+
+        FIX-DISPATCH: теперь явно вызывает update_status(PROCESSING), а не только
+        пишет celery_task_id. Это закрывает окно в несколько секунд когда job
+        оставался в PENDING после диспатча до момента когда воркер вызывал
+        mark_processing_if_active() самостоятельно.
 
         CRIT-A: не мутирует document напрямую.
         M-2: сравнение статуса через .value (VO-семантика), а не ORM-enum напрямую —
         устраняет течь абстракции при переименовании ORM-enum.
-        H-NEW-1: удалены session.refresh(job) до и после флаша.
+        H-NEW-1: flush() делается внутри update_status() — отдельный flush не нужен.
         Возвращает (job, new_doc_status | None) — вызывающий код применяет
         изменение документа через uow.documents.update_status().
         """
-        _dispatched_values = {
+        _dispatchable_values = {
             AnalysisJobStatusVO.PENDING.value,
             AnalysisJobStatusVO.PROCESSING.value,
         }
         job.celery_task_id = task_id
         new_doc_status: DocumentStatusVO | None = None
-        if job.status.value in _dispatched_values:
+        if job.status.value in _dispatchable_values:
+            # FIX-DISPATCH: явный переход → PROCESSING через update_status().
+            # update_status() ставит started_at (если ещё не установлен) и делает flush().
+            job = await self.update_status(job, AnalysisJobStatusVO.PROCESSING)
             new_doc_status = DocumentStatusVO.IN_PROGRESS
-        await self._session.flush()
+        else:
+            # Нет изменения статуса — только flush для celery_task_id.
+            await self._session.flush()
         return job, new_doc_status
 
     async def mark_failed_queue_unavailable(
