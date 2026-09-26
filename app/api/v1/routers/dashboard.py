@@ -7,9 +7,8 @@ P0-#3  GET  /documents/recent     — 5 последних открытых те
 P0-#3  POST /documents/{id}/open  — трекинг открытия документа (обновляет last_opened_at)
 """
 import uuid
-from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 
 from app.api.deps import get_current_user
 from app.api.schemas.dashboard import (
@@ -31,7 +30,16 @@ async def get_dashboard(
     svc: DashboardService = Depends(get_dashboard_service),
 ) -> DashboardResponse:
     """Агрегаты рабочего пространства текущего пользователя."""
-    return await svc.get_dashboard(current_user.id)
+    stats = await svc.get_dashboard(current_user.id)
+    return DashboardResponse(
+        total_documents=stats.total_documents,
+        awaiting_approval_count=stats.awaiting_approval_count,
+        ready_count=stats.ready_count,
+        relevance_percent=stats.relevance_percent,
+        activity_last_7_days=[
+            DayActivity(**row) for row in stats.activity_last_7_days
+        ],
+    )
 
 
 @router.get("/documents/attention", response_model=list[AttentionDocumentItem])
@@ -41,7 +49,8 @@ async def get_attention_documents(
 ) -> list[AttentionDocumentItem]:
     """Топ-4 документа со статусом awaiting_approval, отсортированные по кол-ву
     pending-правок (DESC). Отображаются в блоке «Требуют внимания»."""
-    return await svc.get_attention_documents(current_user.id, limit=4)
+    rows = await svc.get_attention_documents(current_user.id, limit=4)
+    return [AttentionDocumentItem.model_validate(row) for row in rows]
 
 
 @router.get("/documents/recent", response_model=list[RecentDocumentItem])
@@ -50,7 +59,8 @@ async def get_recent_documents(
     svc: DashboardService = Depends(get_dashboard_service),
 ) -> list[RecentDocumentItem]:
     """5 последних документов, открытых текущим пользователем (по last_opened_at DESC)."""
-    return await svc.get_recent_documents(current_user.id, limit=5)
+    rows = await svc.get_recent_documents(current_user.id, limit=5)
+    return [RecentDocumentItem.model_validate(row) for row in rows]
 
 
 @router.post(

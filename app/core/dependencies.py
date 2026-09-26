@@ -5,10 +5,10 @@ ProjectService принимает file_storage — нужен для delete_proj
 DashboardService подключён с реальным DashboardRepository (CR-2).
 
 H2.2: фабрики по-прежнему создают concrete SQLAlchemy-репозитории,
-но передают их сервисам как значения, удовлетворяющие доменным портам.
-Типы аннотаций в фабриках оставлены конкретными — FastAPI DI не понимает
-Protocol для Depends, зато mypy/pyright проверят, что concrete-репозитории
-действительно реализуют порты через @runtime_checkable.
+      но передают их сервисам как значения, удовлетворяющие доменным портам.
+      Типы аннотаций в фабриках оставлены конкретными — FastAPI DI не понимает
+      Protocol для Depends, зато mypy/pyright проверят, что concrete-репозитории
+      действительно реализуют порты через @runtime_checkable.
 """
 
 from functools import lru_cache
@@ -138,11 +138,15 @@ async def get_audit_log_service(
 async def get_document_export_service(
     session: AsyncSession = Depends(get_db),
 ) -> DocumentExportService:
-    return DocumentExportService(
+    """DocumentExportService принимает SuggestionService, а не репозиторий."""
+    suggestion_service = SuggestionService(
         suggestion_repository=SuggestionRepository(session),
+        document_repository=DocumentRepository(session),
+    )
+    return DocumentExportService(
         file_storage=_get_minio_storage(),
         exporter_registry=_get_exporter_registry(),
-        parser_registry=_get_parser_registry(),
+        suggestion_service=suggestion_service,
     )
 
 
