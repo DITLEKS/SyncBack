@@ -1,7 +1,6 @@
 """
 Бизнес-логика документов.
 
-<<<<<<< HEAD
 ДОБАВЛЕНО:
 - delete_document()       — удаляет MinIO-файл (best-effort), затем запись в БД.
 - get_original_content()  — читает снапшот текста до правок (#7).
@@ -10,20 +9,6 @@
                             отдаёт текущий storage_key (снапшот совпадает с текущим).
 
 H2.2: сервис принимает DocumentPort вместо конкретного DocumentRepository.
-=======
-Архитектурные правила (DDD):
-  - Сервис зависит только от абстракций (IDocumentRepository, FileStorage,
-    DocumentParserRegistry), Settings и domain VO.
-  - ORM-модели (кроме Document как возвращаемого результата) под TYPE_CHECKING.
-  - ORM-enum DocumentStatus/DocumentFormat импортируются локально там, где нужны.
-  - Непосредственная зависимость от DocumentRepository (конкретный класс) удалена.
-
-ИЗМЕНЕНИЯ:
-  - __init__ работает через IDocumentRepository (порт), не DocumentRepository.
-  - list_documents / list_all_for_user принимают PaginationParams.
-  - DocumentStatus/DocumentFormat ORM-enum импортируются отложенно.
-  - Project импортируется под TYPE_CHECKING.
->>>>>>> origin/fix/high-priority-review-findings
 """
 from __future__ import annotations
 
@@ -40,15 +25,8 @@ from app.domain.exceptions import (
 )
 from app.domain.interfaces.document_parser import ParsedDocument
 from app.domain.interfaces.file_storage import FileStorage
-<<<<<<< HEAD
 from app.domain.ports.document_port import DocumentPort
-from app.infrastructure.db.models.document import Document
-from app.infrastructure.db.models.enums import DocumentFormat, DocumentStatus
-from app.infrastructure.db.models.project import Project
-=======
-from app.domain.interfaces.repositories import IDocumentRepository
 from app.domain.value_objects import DocumentStatusVO, PaginationParams
->>>>>>> origin/fix/high-priority-review-findings
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 
 if TYPE_CHECKING:
@@ -79,11 +57,7 @@ def _extension_to_format(suffix: str):
 class DocumentService:
     def __init__(
         self,
-<<<<<<< HEAD
         document_repository: DocumentPort,
-=======
-        document_repository: IDocumentRepository,   # порт, не конкретный класс
->>>>>>> origin/fix/high-priority-review-findings
         file_storage: FileStorage,
         parser_registry: DocumentParserRegistry | None = None,
         settings: Settings | None = None,
@@ -138,9 +112,11 @@ class DocumentService:
         self,
         project_id: uuid.UUID,
         pagination: PaginationParams,
-    ) -> tuple[list[Document], int]:
-        items = await self._documents.list_for_project(project_id, pagination)
-        total = await self._documents.count_for_project(project_id)
+    ) -> tuple[list["Document"], int]:
+        items = await self._documents.list_by_project(
+            project_id, pagination.limit, pagination.offset
+        )
+        total = await self._documents.count_by_project(project_id)
         return items, total
 
     async def get_document(
@@ -155,8 +131,33 @@ class DocumentService:
             )
         return document
 
-<<<<<<< HEAD
-    async def delete_document(self, document: Document) -> None:
+    async def list_all_for_user(
+        self,
+        owner_id: uuid.UUID,
+        *,
+        status: DocumentStatusVO | None = None,
+        search: str | None = None,
+        sort_by: Literal["created_at", "updated_at", "title"] = "updated_at",
+        sort_dir: Literal["asc", "desc"] = "desc",
+        pagination: PaginationParams | None = None,
+    ) -> tuple[list[dict], int]:
+        """Список всех документов пользователя с агрегированными счётчиками правок."""
+        _pagination = pagination or PaginationParams(limit=50, offset=0)
+        return await self._documents.list_all_for_user(
+            owner_id,
+            status=status,
+            search=search,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+            limit=_pagination.limit,
+            offset=_pagination.offset,
+        )
+
+    # ------------------------------------------------------------------
+    # File operations
+    # ------------------------------------------------------------------
+
+    async def delete_document(self, document: "Document") -> None:
         """
         Удаление документа:
         1. Удаляем файл из MinIO (best-effort).
@@ -181,106 +182,22 @@ class DocumentService:
                 )
         await self._documents.delete(document)
 
-    async def get_download_url(self, document: Document) -> tuple[str, int]:
+    async def get_download_url(self, document: "Document") -> tuple[str, int]:
         expires_in = self._settings.minio_presigned_url_expire_seconds
         url = await self._storage.get_presigned_url(document.storage_key, expires_in)
         return url, expires_in
 
-    async def get_document_content(self, document: Document) -> ParsedDocument:
+    async def get_document_content(self, document: "Document") -> ParsedDocument:
         raw_bytes = await self._storage.download(document.storage_key)
         return self._parser_registry.parse_by_filename(document.storage_key, raw_bytes)
 
-    async def get_original_content(self, document: Document) -> ParsedDocument:
+    async def get_original_content(self, document: "Document") -> ParsedDocument:
         """Режим «Оригинал» (#7): вернуть текст до правок.
 
         Пайплайн анализа записывает снапшот исходного файла в MinIO под
         ключом original_storage_key перед сохранением правок. Если
         original_storage_key не выставлен (документ не проходил анализ),
         отдаём текущий контент (оригинал == текущий).
-        """
-        original_key: str | None = getattr(document, "original_storage_key", None)
-        storage_key = original_key or document.storage_key
-        raw_bytes = await self._storage.download(storage_key)
-        return self._parser_registry.parse_by_filename(storage_key, raw_bytes)
-
-    async def attach_sources(self, document: Document, sources: list) -> Document:
-        return await self._documents.attach_sources(document, sources)
-
-    # -------------------------------------------------------------------------
-    # P0-4: глобальный список документов пользователя
-    # -------------------------------------------------------------------------
-
-=======
->>>>>>> origin/fix/high-priority-review-findings
-    async def list_all_for_user(
-        self,
-        owner_id: uuid.UUID,
-        *,
-        status: DocumentStatusVO | None = None,
-        search: str | None = None,
-        sort_by: Literal["created_at", "updated_at", "title"] = "updated_at",
-        sort_dir: Literal["asc", "desc"] = "desc",
-        pagination: PaginationParams | None = None,
-    ) -> tuple[list[dict], int]:
-        """Список всех документов пользователя с агрегированными счётчиками правок."""
-        _pagination = pagination or PaginationParams(limit=50, offset=0)
-        # Перевод VO → ORM-enum выполняется на стороне репозитория
-        return await self._documents.list_all_for_user(
-            owner_id,
-            status=status,
-            search=search,
-            sort_by=sort_by,
-            sort_dir=sort_dir,
-            pagination=_pagination,
-        )
-
-    # ------------------------------------------------------------------
-    # File operations
-    # ------------------------------------------------------------------
-
-    async def delete_document(self, document: "Document") -> None:
-        """
-        1. Удаляем файлы из MinIO (best-effort).
-        2. Удаляем запись из БД — ON DELETE CASCADE уберёт связанные сущности.
-        """
-        keys = {
-            k
-            for k in [
-                document.storage_key,
-                getattr(document, "original_storage_key", None),
-            ]
-            if k
-        }
-        for key in keys:
-            try:
-                await self._storage.delete(key)
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "Не удалось удалить файл из MinIO",
-                    extra={"storage_key": key, "document_id": str(document.id)},
-                )
-        await self._documents.delete(document)
-
-    async def get_download_url(
-        self, document: "Document"
-    ) -> tuple[str, int]:
-        expires_in = self._settings.minio_presigned_url_expire_seconds
-        url = await self._storage.get_presigned_url(document.storage_key, expires_in)
-        return url, expires_in
-
-    async def get_document_content(
-        self, document: "Document"
-    ) -> ParsedDocument:
-        raw_bytes = await self._storage.download(document.storage_key)
-        return self._parser_registry.parse_by_filename(document.storage_key, raw_bytes)
-
-    async def get_original_content(
-        self, document: "Document"
-    ) -> ParsedDocument:
-        """Pежим «Оригинал»: вернуть текст до правок.
-
-        Пайплайн анализа записывает снапшот исходного файла в MinIO под
-        ключом original_storage_key. Если ключ отсутствует — отдаём текущий файл.
         """
         original_key: str | None = getattr(document, "original_storage_key", None)
         storage_key = original_key or document.storage_key
