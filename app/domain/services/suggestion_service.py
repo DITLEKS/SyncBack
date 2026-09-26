@@ -240,8 +240,6 @@ class SuggestionService:
             document = await self._get_document_or_raise(project_id, document_id)
             self._assert_awaiting_approval(document)
             job_id = self._assert_has_active_job(document)
-
-            # H-4: один UPDATE ... WHERE job_id=X AND status='pending' RETURNING *
             accepted = await self._uow.suggestions.bulk_accept_all(job_id, user_id)
             refreshed = await self._uow.documents.get_by_id(document_id)
             await self._uow.commit()
@@ -252,7 +250,9 @@ class SuggestionService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         user_id: uuid.UUID,
-        review_decisions: ReviewDecisions,
+        review_version: int,
+        accepted_ids: tuple[uuid.UUID, ...],
+        rejected_ids: tuple[uuid.UUID, ...],
     ) -> int:
         """Применить решения ревью без финализации.
         Возвращает новую review_version документа.
@@ -261,7 +261,9 @@ class SuggestionService:
             project_id=project_id,
             document_id=document_id,
             user_id=user_id,
-            review_decisions=review_decisions,
+            review_version=review_version,
+            accepted_ids=accepted_ids,
+            rejected_ids=rejected_ids,
             finalize=False,
         )
         return result.document.review_version
@@ -297,15 +299,17 @@ class SuggestionService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         user_id: uuid.UUID,
-        review_decisions: ReviewDecisions,
+        review_version: int,
+        accepted_ids: tuple[uuid.UUID, ...] = (),
+        rejected_ids: tuple[uuid.UUID, ...] = (),
         finalize: bool = True,
         export_service: "DocumentExportService | None" = None,
     ) -> ReviewSaveResult:
         """Сохранить решения под одним оптимистичным локом.
 
-        Весь use-case — один uow.commit():
+        ReviewDecisions создаётся здесь после разрешения job_id (M-6):
           1. CAS review_version (OptimisticLock при конфликте)
-          2. Один UPDATE для accepted + rejected (через ReviewDecisions)
+          2. Один UPDATE для accepted + rejected
           3. (опц.) export + статус READY
           4. commit()
         """
@@ -314,12 +318,13 @@ class SuggestionService:
             self._assert_awaiting_approval(document)
             job_id = self._assert_has_active_job(document)
 
+            # ReviewDecisions создаётся здесь — только теперь известен job_id.
             decisions_vo = ReviewDecisions(
                 analysis_job_id=job_id,
                 decided_by=user_id,
-                review_version=review_decisions.review_version,
-                accepted_ids=review_decisions.accepted_ids,
-                rejected_ids=review_decisions.rejected_ids,
+                review_version=review_version,
+                accepted_ids=accepted_ids,
+                rejected_ids=rejected_ids,
             )
 
             locked_doc = await self._uow.documents.compare_and_increment_review_version(
