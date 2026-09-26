@@ -411,33 +411,3 @@ class SuggestionService:
             )
 
         return await self._documents.update_status(document, DocumentStatus.REVIEWED)
-
-    # ------------------------------------------------------------------
-    # finalize_review (устаревший путь, используется Celery worker)
-    # ------------------------------------------------------------------
-
-    async def finalize_review(
-        self,
-        project_id: uuid.UUID,
-        document_id: uuid.UUID,
-        export_service: "DocumentExportService | None" = None,
-    ) -> "Document":
-        document = await self._get_document_or_raise(project_id, document_id)
-        if document.status != DocumentStatus.AWAITING_APPROVAL:
-            raise InvalidDocumentStatusError(
-                "Завершить review можно только в статусе 'awaiting_approval'"
-            )
-        if document.current_analysis_job_id is None:
-            raise ReviewNotCompleteError(
-                "У документа отсутствует текущий результат анализа"
-            )
-        pending_count = await self._suggestions.count_by_analysis_job_and_status(
-            document.current_analysis_job_id, SuggestionStatus.PENDING
-        )
-        if pending_count:
-            raise ReviewNotCompleteError(
-                f"Нельзя завершить review: не рассмотрено предложений — {pending_count}"
-            )
-        if export_service is not None:
-            await self._run_export(document, export_service)
-        return await self._documents.update_status(document, DocumentStatus.REVIEWED)
