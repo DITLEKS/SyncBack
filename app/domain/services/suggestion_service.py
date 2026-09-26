@@ -7,6 +7,12 @@
   - Один uow.commit() на операцию — атомарность гарантируется УоУ.
   - M-1: Document/Suggestion аннотируются через Protocol,
     а не ORM-модель.
+
+HIGH-2-FIX: atomic_review_save — публичный метод с единственным `async with self._uow`.
+  Вложенный `async with self._uow` удалён: если IUnitOfWork не реализует
+  reentrant-семантику (а SQLAlchemy UoW её не реализует), повторный вход
+  открывает новую сессию/транзакцию, и все flush() первого уровня пропадают.
+  Метод помечен комментарием — НЕ вызывать внутри уже открытого uow-блока.
 """
 from __future__ import annotations
 
@@ -313,6 +319,14 @@ class SuggestionService:
         export_service: "DocumentExportService | None" = None,
     ) -> ReviewSaveResult:
         """Сохранить решения под одним оптимистичным локом.
+
+        HIGH-2-FIX: единственный `async with self._uow` — вложенный блок удалён.
+        IUnitOfWork (SQLAlchemy) не реализует reentrant-семантику: повторный
+        вход в `async with uow` открывал бы новую сессию/транзакцию, теряя
+        все flush() внешнего уровня и нарушая атомарность.
+
+        ВАЖНО: метод сам открывает uow-блок — НЕ вызывать внутри
+        уже открытого `async with self._uow`.
 
         ReviewDecisions создаётся здесь после разрешения job_id (M-6):
           1. CAS review_version (OptimisticLock при конфликте)

@@ -11,6 +11,10 @@
 - delete_document()       — удаляет MinIO-файл (бест-еффорт), затем запись в БД.
 - get_original_content()  — читает снапшот текста до правок (#7).
 - H-5: ORM-объект Document создаётся внутри репозитория через фабричный метод.
+- L-1: _MAP вынесен на уровень модуля как _FORMAT_MAP — инициализируется один
+  раз при первом вызове _extension_to_format(), не пересоздаётся на каждый вызов.
+  Альтернатива @functools.cache не подходит — DocumentFormat — Enum,
+  и сама функция содержит отложенный import; модульная переменная чище.
 
 CRIT-NEW-2: list_documents передаёт PaginationParams-объект, а не limit/offset позиционно.
 CRIT-NEW-3: attach_sources удалён — метода нет в IDocumentRepository.
@@ -40,17 +44,29 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("syncscribe.services.document")
 
+# L-1: словарь инициализируется один раз при первом вызове _extension_to_format().
+# Хранится как модульная переменная, а не пересоздаётся на каждый вызов функции.
+# Отложенный import сохранён — DocumentFormat живёт в infrastructure, domain не
+# должен импортировать его на уровне модуля.
+_FORMAT_MAP: dict[str, object] | None = None
+
 
 def _extension_to_format(suffix: str):
-    """Отложенный лукап: расширение → ORM DocumentFormat enum."""
-    from app.infrastructure.db.models.enums import DocumentFormat
-    _MAP = {
-        ".docx": DocumentFormat.DOCX,
-        ".txt": DocumentFormat.TXT,
-        ".md": DocumentFormat.MARKDOWN,
-        ".markdown": DocumentFormat.MARKDOWN,
-    }
-    fmt = _MAP.get(suffix)
+    """Отложенный лукап: расширение → ORM DocumentFormat enum.
+
+    L-1: использует модульную переменную _FORMAT_MAP (lazy init) вместо
+    пересоздания dict при каждом вызове.
+    """
+    global _FORMAT_MAP
+    if _FORMAT_MAP is None:
+        from app.infrastructure.db.models.enums import DocumentFormat
+        _FORMAT_MAP = {
+            ".docx": DocumentFormat.DOCX,
+            ".txt": DocumentFormat.TXT,
+            ".md": DocumentFormat.MARKDOWN,
+            ".markdown": DocumentFormat.MARKDOWN,
+        }
+    fmt = _FORMAT_MAP.get(suffix)
     if fmt is None:
         raise UnsupportedFileFormatError(
             f"Формат '{suffix or 'без расширения'}' не поддерживается. "
