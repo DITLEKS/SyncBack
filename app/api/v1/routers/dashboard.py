@@ -5,17 +5,17 @@ P0-#1  GET  /dashboard            — агрегаты: кол-во докуме
 P0-#2  GET  /documents/attention  — топ-4 документа в awaiting_approval по убыванию pending-правок
 P0-#3  GET  /documents/recent     — 5 последних открытых текущим пользователем
 P0-#3  POST /documents/{id}/open  — трекинг открытия документа (обновляет last_opened_at)
+NEW    GET  /dashboard/stats      — расширенная статистика для виджетов главной
 """
 import uuid
-from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 
 from app.api.deps import get_current_user
 from app.api.schemas.dashboard import (
     AttentionDocumentItem,
     DashboardResponse,
-    DayActivity,
+    DashboardStatsResponse,
     RecentDocumentItem,
 )
 from app.core.dependencies import get_dashboard_service
@@ -32,6 +32,22 @@ async def get_dashboard(
 ) -> DashboardResponse:
     """Агрегаты рабочего пространства текущего пользователя."""
     return await svc.get_dashboard(current_user.id)
+
+
+@router.get("/dashboard/stats", response_model=DashboardStatsResponse)
+async def get_dashboard_stats(
+    current_user: User = Depends(get_current_user),
+    svc: DashboardService = Depends(get_dashboard_service),
+) -> DashboardStatsResponse:
+    """Расширенная статистика для виджетов главной страницы.
+
+    Возвращает:
+      - saved_hours         — оценка сэкономленного времени
+      - approved_percent    — % принятых правок от решённых
+      - documents_by_status — разбивка по статусам (для pie-чарта)
+      - total/accepted/rejected suggestions count
+    """
+    return await svc.get_extended_stats(current_user.id)
 
 
 @router.get("/documents/attention", response_model=list[AttentionDocumentItem])

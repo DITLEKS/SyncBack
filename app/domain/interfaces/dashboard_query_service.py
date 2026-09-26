@@ -28,6 +28,16 @@ class IDashboardQueryService(ABC):
         """Агрегатная статистика документов пользователя: {total, awaiting, ready}."""
 
     @abstractmethod
+    async def get_extended_stats(self, owner_id: uuid.UUID) -> dict:
+        """Расширенная статистика для виджетов.
+
+        Возвращает dict с ключами:
+          draft, in_progress, awaiting_approval, ready, failed,
+          total_suggestions, accepted_count, rejected_count.
+        Оценка saved_hours вычисляется в DashboardService.
+        """
+
+    @abstractmethod
     async def get_activity_last_7_days(self, owner_id: uuid.UUID) -> list[dict]:
         """Активность за 7 дней: [{date: str, opens: int}]."""
 

@@ -1,6 +1,6 @@
 """
 DashboardService — оркестрирует агрегаты для GET /dashboard,
-GET /documents/attention и GET /documents/recent.
+GET /documents/attention, GET /documents/recent и GET /dashboard/stats.
 
 Архитектурные правила:
   - Зависит только от IDashboardQueryService (read-model порт) для агрегатов.
@@ -9,22 +9,27 @@ GET /documents/attention и GET /documents/recent.
 
 CRIT-D1 (этот раунд):
   DashboardService переключён с IUnitOfWork на IDashboardQueryService.
-  Ранее сервис обращался к self._uow.dashboard — которого НЕТ в IUnitOfWork
-  (H-NEW-2 убрал dashboard из UoW), что давало AttributeError на каждый запрос
-  к /dashboard. Теперь сервис принимает IDashboardQueryService напрямую.
 
-  Пример инициализации (core/dependencies.py):
-    def get_dashboard_service(
-        dashboard_qs: IDashboardQueryService = Depends(get_dashboard_query_service),
-    ) -> DashboardService:
-        return DashboardService(dashboard_qs=dashboard_qs)
+STATS: get_extended_stats добавлен для GET /dashboard/stats.
+  Оценка saved_hours: каждая принятая правка экономит AVG_MINUTES_PER_SUGGESTION минут;
+  константа намеренно вынесена в сервис — продакт может скорректировать без
+  изменения репозитория.
 """
 from __future__ import annotations
 
 import uuid
 
-from app.api.schemas.dashboard import DashboardResponse, DayActivity
+from app.api.schemas.dashboard import (
+    DashboardResponse,
+    DashboardStatsResponse,
+    DayActivity,
+    DocumentsByStatus,
+)
 from app.domain.interfaces.dashboard_query_service import IDashboardQueryService
+
+# Среднее время (в минутах) на ручное применение одной правки.
+# Используется для оценки «сэкономленных часов» на дашборде.
+_AVG_MINUTES_PER_SUGGESTION: float = 3.0
 
 
 class DashboardService:
@@ -51,6 +56,37 @@ class DashboardService:
             activity_last_7_days=[
                 DayActivity(date=r["date"], opens=r["opens"]) for r in activity_rows
             ],
+        )
+
+    # ── Расширенная статистика (виджеты) ─────────────────────────────
+
+    async def get_extended_stats(self, user_id: uuid.UUID) -> DashboardStatsResponse:
+        """GET /dashboard/stats — данные для виджетов главной страницы.
+
+        saved_hours рассчитывается по формуле:
+          accepted_count * _AVG_MINUTES_PER_SUGGESTION / 60
+        """
+        raw = await self._qs.get_extended_stats(user_id)
+
+        accepted: int = raw.get("accepted_count", 0)
+        rejected: int = raw.get("rejected_count", 0)
+        decided = accepted + rejected
+        approved_percent = round(accepted / decided * 100, 1) if decided else 0.0
+        saved_hours = round(accepted * _AVG_MINUTES_PER_SUGGESTION / 60, 1)
+
+        return DashboardStatsResponse(
+            saved_hours=saved_hours,
+            approved_percent=approved_percent,
+            documents_by_status=DocumentsByStatus(
+                draft=raw.get("draft", 0),
+                in_progress=raw.get("in_progress", 0),
+                awaiting_approval=raw.get("awaiting_approval", 0),
+                ready=raw.get("ready", 0),
+                failed=raw.get("failed", 0),
+            ),
+            total_suggestions=raw.get("total_suggestions", 0),
+            accepted_count=accepted,
+            rejected_count=rejected,
         )
 
     # ── Требуют внимания ─────────────────────────────────────────────

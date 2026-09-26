@@ -3,11 +3,13 @@
 
 ДОБАВЛЕНО:
 - DELETE /{document_id} — удаление документа + MinIO-файл + каскад suggestions/jobs.
+- GET /{document_id}/export?format=md|docx|txt — экспорт в конкретный формат (макет).
 ОПТИМИЗИРОВАНО (PERF-4):
 - list_documents: TypeAdapter для пакетной сериализации вместо N model_validate.
 """
 import logging
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from pydantic import TypeAdapter
@@ -39,7 +41,7 @@ from app.domain.services.audit_log_service import AuditLogService
 from app.domain.services.document_export_service import DocumentExportService
 from app.domain.services.document_service import DocumentService
 from app.domain.services.source_service import SourceService
-from app.domain.value_objects import PaginationParams
+from app.domain.value_objects import DocumentFormatVO, PaginationParams
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.user import User
 
@@ -50,6 +52,15 @@ logger = logging.getLogger("syncscribe.api.documents")
 _document_list_adapter: TypeAdapter[list[DocumentResponse]] = TypeAdapter(
     list[DocumentResponse]
 )
+
+# Маппинг query-параметра ?format= → DocumentFormatVO.
+# Только форматы, поддерживаемые экспортёром; doc намеренно исключён —
+# legacy .doc нельзя сгенерировать (только читать).
+_EXPORT_FORMAT_MAP: dict[str, DocumentFormatVO] = {
+    "md":   DocumentFormatVO.MARKDOWN,
+    "docx": DocumentFormatVO.DOCX,
+    "txt":  DocumentFormatVO.TXT,
+}
 
 router = APIRouter(prefix="/projects/{project_id}/documents", tags=["documents"])
 
@@ -197,12 +208,38 @@ async def export_document(
     document_service: DocumentService = Depends(get_document_service),
     export_service: DocumentExportService = Depends(get_document_export_service),
     audit_log_service: AuditLogService = Depends(get_audit_log_service),
+    format: str | None = Query(
+        default=None,
+        description="Целевой формат экспорта: md, docx, txt. "
+                    "По умолчанию используется исходный формат документа.",
+    ),
 ) -> Response:
+    """Экспорт документа с применёнными правками.
+
+    ?format=md|docx|txt — переопределяет формат вывода.
+    Если format не указан, экспорт возвращается в исходном формате документа.
+    Неизвестный format → 400 Bad Request.
+    """
+    target_format: DocumentFormatVO | None = None
+    if format is not None:
+        target_format = _EXPORT_FORMAT_MAP.get(format.lower())
+        if target_format is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Неподдерживаемый формат экспорта: {format!r}. "
+                    f"Допустимые значения: {', '.join(_EXPORT_FORMAT_MAP)}"
+                ),
+            )
+
     try:
         document = await document_service.get_document(project.id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    content, filename, media_type = await export_service.export_document(document)
+
+    content, filename, media_type = await export_service.export_document(
+        document, target_format=target_format
+    )
     await _log_download(audit_log_service, current_user.id, document.id)
     return Response(
         content=content,

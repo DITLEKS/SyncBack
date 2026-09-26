@@ -4,6 +4,7 @@
 #1 — GET /dashboard
 #2 — GET /documents/attention
 #3 — GET /documents/recent
+#4 — GET /dashboard/stats  (расширенная статистика для виджетов)
 """
 import uuid
 from datetime import datetime
@@ -27,6 +28,36 @@ class DashboardResponse(BaseModel):
     relevance_percent: float
     # мини-график активности за последние 7 дней
     activity_last_7_days: list[DayActivity]
+
+
+# ── #4 Extended Stats ─────────────────────────────────────────────────────────
+
+class DocumentsByStatus(BaseModel):
+    """Количество документов по каждому статусу."""
+    draft: int = 0
+    in_progress: int = 0
+    awaiting_approval: int = 0
+    ready: int = 0
+    failed: int = 0
+
+
+class DashboardStatsResponse(BaseModel):
+    """Расширенная статистика для виджетов главной страницы.
+
+    saved_hours         — оценочное время, сэкономленное благодаря авто-правкам
+                          (accepted_count * AVG_MINUTES_PER_SUGGESTION / 60).
+    approved_percent    — доля принятых правок от всех решённых (accepted+rejected).
+    documents_by_status — разбивка документов по статусам для pie/bar виджета.
+    total_suggestions   — суммарное кол-во правок по всем документам пользователя.
+    accepted_count      — принятых правок.
+    rejected_count      — отклонённых правок.
+    """
+    saved_hours: float
+    approved_percent: float        # 0.0 – 100.0
+    documents_by_status: DocumentsByStatus
+    total_suggestions: int
+    accepted_count: int
+    rejected_count: int
 
 
 # ── #2 Attention ──────────────────────────────────────────────────────────────

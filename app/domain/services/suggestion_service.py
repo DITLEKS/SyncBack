@@ -13,6 +13,10 @@ HIGH-2-FIX: atomic_review_save — публичный метод с единст
   reentrant-семантику (а SQLAlchemy UoW её не реализует), повторный вход
   открывает новую сессию/транзакцию, и все flush() первого уровня пропадают.
   Метод помечен комментарием — НЕ вызывать внутри уже открытого uow-блока.
+
+NEW:
+  get_suggestion_by_id — получить одну правку по UUID (нужно редактору при навигации).
+  bulk_reject          — отклонить все PENDING-правки (зеркало bulk_accept).
 """
 from __future__ import annotations
 
@@ -59,6 +63,13 @@ class ReviewSaveResult:
 @dataclass
 class BulkAcceptResult:
     """Результат bulk-accept — список правок + актуальный документ."""
+    suggestions: list[SuggestionProtocol]
+    document: DocumentProtocol
+
+
+@dataclass
+class BulkRejectResult:
+    """Результат bulk-reject — список правок + актуальный документ."""
     suggestions: list[SuggestionProtocol]
     document: DocumentProtocol
 
@@ -159,6 +170,21 @@ class SuggestionService:
             document = await self._get_document_or_raise(project_id, document_id)
             return await self._get_suggestion_for_document(document, suggestion_id)
 
+    async def get_suggestion_by_id(
+        self,
+        project_id: uuid.UUID,
+        document_id: uuid.UUID,
+        suggestion_id: uuid.UUID,
+    ) -> SuggestionProtocol:
+        """Получить одну правку по UUID.
+
+        Используется редактором при навигации между правками по ID
+        (например, при переходе по ссылке или после accept/reject одной правки).
+        Делегирует в get_suggestion_for_document — проверяет принадлежность
+        документу и актуальность analysis_job.
+        """
+        return await self.get_suggestion_for_document(project_id, document_id, suggestion_id)
+
     async def get_accepted_changes(
         self, document_id: uuid.UUID
     ) -> list[AppliedChange]:
@@ -255,6 +281,26 @@ class SuggestionService:
             refreshed = await self._uow.documents.get_by_id(document_id)
             await self._uow.commit()
         return BulkAcceptResult(suggestions=accepted, document=refreshed or document)
+
+    async def bulk_reject(
+        self,
+        project_id: uuid.UUID,
+        document_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> BulkRejectResult:
+        """Отклонить все PENDING-правки одним UPDATE (зеркало bulk_accept).
+
+        Использует bulk_reject_all репозитория — один UPDATE WHERE status=PENDING.
+        Не загружает UUID в память: репозиторий возвращает обновлённые объекты.
+        """
+        async with self._uow:
+            document = await self._get_document_or_raise(project_id, document_id)
+            self._assert_awaiting_approval(document)
+            job_id = self._assert_has_active_job(document)
+            rejected = await self._uow.suggestions.bulk_reject_all(job_id, user_id)
+            refreshed = await self._uow.documents.get_by_id(document_id)
+            await self._uow.commit()
+        return BulkRejectResult(suggestions=rejected, document=refreshed or document)
 
     async def apply_review(
         self,

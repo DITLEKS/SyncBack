@@ -166,6 +166,28 @@ async def list_suggestions(
     )
 
 
+@router.get("/{suggestion_id}", response_model=SuggestionResponse)
+async def get_suggestion(
+    document_id: uuid.UUID,
+    suggestion_id: uuid.UUID,
+    project: Project = Depends(get_allowed_project),
+    suggestion_service: SuggestionService = Depends(get_suggestion_service),
+) -> SuggestionResponse:
+    """Получить одну правку по ID.
+
+    Используется редактором при навигации между правками:
+    после accept/reject одной правки фронт может запросить следующую по ID.
+    Возвращает 404 если правка не найдена или принадлежит устаревшему job.
+    """
+    try:
+        suggestion = await suggestion_service.get_suggestion_by_id(
+            project.id, document_id, suggestion_id
+        )
+    except (DocumentNotFoundError, SuggestionNotFoundError, StaleSuggestionJobError) as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return SuggestionResponse.model_validate(suggestion)
+
+
 @router.put("/review", response_model=ReviewSaveResponse)
 async def review_save(
     document_id: uuid.UUID,
@@ -230,6 +252,81 @@ async def review_save(
         rejected_count=result.rejected_count,
         pending_count=result.pending_count,
         finalized=result.finalized,
+    )
+
+
+@router.post("/accept-all", response_model=BulkAcceptResponse)
+async def bulk_accept_suggestions(
+    document_id: uuid.UUID,
+    project: Project = Depends(get_allowed_project),
+    current_user: User = Depends(get_current_user),
+    suggestion_service: SuggestionService = Depends(get_suggestion_service),
+    audit_log_service: AuditLogService = Depends(get_audit_log_service),
+) -> BulkAcceptResponse:
+    """Принять все PENDING-правки одним запросом (кнопка «Принять все» в Editor).
+
+    Один UPDATE без загрузки UUID в память.
+    После операции возвращает статус документа и review_version
+    чтобы фронт не делал лишний GET /editor.
+    """
+    try:
+        result = await suggestion_service.bulk_accept(
+            project.id, document_id, current_user.id
+        )
+    except (DocumentNotFoundError, SuggestionNotFoundError) as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    accepted_ids = [s.id for s in result.suggestions]
+    await _safe_bulk_log(
+        audit_log_service,
+        current_user.id,
+        [(sid, AuditActionVO.BULK_ACCEPT) for sid in accepted_ids],
+    )
+    doc = result.document
+    return BulkAcceptResponse(
+        accepted_count=len(accepted_ids),
+        document_status=doc.status.value if doc else None,
+        review_version=doc.review_version if doc else None,
+    )
+
+
+@router.post("/reject-all", response_model=BulkAcceptResponse)
+async def bulk_reject_suggestions(
+    document_id: uuid.UUID,
+    project: Project = Depends(get_allowed_project),
+    current_user: User = Depends(get_current_user),
+    suggestion_service: SuggestionService = Depends(get_suggestion_service),
+    audit_log_service: AuditLogService = Depends(get_audit_log_service),
+) -> BulkAcceptResponse:
+    """Отклонить все PENDING-правки одним запросом (кнопка «Отклонить все» в Editor).
+
+    Зеркало /accept-all — один UPDATE WHERE status=PENDING.
+    Возвращает BulkAcceptResponse (accepted_count=0, rejected_count=N)
+    через то же поле accepted_count для унификации схемы на фронте.
+    Поле accepted_count содержит кол-во отклонённых правок.
+    """
+    try:
+        result = await suggestion_service.bulk_reject(
+            project.id, document_id, current_user.id
+        )
+    except (DocumentNotFoundError, SuggestionNotFoundError) as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    rejected_ids = [s.id for s in result.suggestions]
+    await _safe_bulk_log(
+        audit_log_service,
+        current_user.id,
+        [(sid, AuditActionVO.REJECT) for sid in rejected_ids],
+    )
+    doc = result.document
+    return BulkAcceptResponse(
+        accepted_count=len(rejected_ids),  # переиспользуем поле как count
+        document_status=doc.status.value if doc else None,
+        review_version=doc.review_version if doc else None,
     )
 
 
