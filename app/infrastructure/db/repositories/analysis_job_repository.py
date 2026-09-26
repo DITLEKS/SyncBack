@@ -9,15 +9,13 @@ SQLAlchemy-адаптер для AnalysisJob.
 - Конвертация инкапсулирована в _status_to_orm / _status_from_orm.
 - Импорты ORM-моделей отложены (TYPE_CHECKING / локальные) — домен не зависит от инфры.
 - H-2: create_for_document принимает параметры, а не готовый ORM-инстанс.
-- HIGH-3: mark_dispatched, mark_failed_queue_unavailable, cancel — прямые мутации
-  document.status заменены на _set_doc_status() через _status_to_orm(DocumentStatusVO),
-  убран raw _doc_status(str) helper.
 - CRIT-A/B: AnalysisJobRepository больше НЕ мутирует document.status напрямую.
-  mark_dispatched / mark_failed_queue_unavailable / cancel принимают опциональный
-  document и возвращают DocumentStatusVO, которую вызывающий код применяет через
-  uow.documents.update_status(). Это восстанавливает инвариант одного агрегата.
-- HIGH-B: mark_failed_queue_unavailable и cancel делегируют логику update_status().
+  mark_dispatched / mark_failed_queue_unavailable / cancel возвращают DocumentStatusVO,
+  которую вызывающий код применяет через uow.documents.update_status().
 - M-B: mark_processing_if_active → добавлен RETURNING для надёжного rowcount.
+- H-NEW-1: убраны все session.refresh() из create_for_document, mark_dispatched
+  и update_status — flush() достаточен в рамках текущей транзакции.
+  Если вызывающему коду нужны lazy-атрибуты — он использует uow.refresh(job).
 """
 from __future__ import annotations
 
@@ -98,7 +96,7 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         """Фабричный метод: создаёт ORM-объект AnalysisJob внутри репозитория.
 
         CRIT-1/H-2: сигнатура синхронизирована с IAnalysisJobRepository.create_for_document.
-        Сервис передаёт только параметры — репозиторий сам строит ORM-инстанс.
+        H-NEW-1: session.refresh(job) удалён — flush() достаточно.
         Commit — ответственность вызывающего UoW.
         """
         from app.infrastructure.db.models.analysis_job import AnalysisJob as M
@@ -111,7 +109,6 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         self._session.add(job)
         document.current_analysis_job_id = job.id
         await self._session.flush()
-        await self._session.refresh(job)
         return job
 
     async def mark_dispatched(
@@ -122,17 +119,16 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         """Пометить задачу как отправленную в Celery.
 
         CRIT-A: больше не мутирует document напрямую.
+        H-NEW-1: удалены session.refresh(job) до и после флаша.
         Возвращает (job, new_doc_status | None) — вызывающий код применяет
         изменение документа через uow.documents.update_status().
         """
         from app.infrastructure.db.models.enums import AnalysisJobStatus
-        await self._session.refresh(job)
         job.celery_task_id = task_id
         new_doc_status: DocumentStatusVO | None = None
         if job.status in (AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING):
             new_doc_status = DocumentStatusVO.IN_PROGRESS
         await self._session.flush()
-        await self._session.refresh(job)
         return job, new_doc_status
 
     async def mark_failed_queue_unavailable(
@@ -200,6 +196,7 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> "AnalysisJob":
+        """H-NEW-1: удалён session.refresh(job) — flush() достаточен."""
         from app.infrastructure.db.models.enums import AnalysisJobStatus
         _terminal = {
             AnalysisJobStatus.SUCCESS,
@@ -216,5 +213,4 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         if orm_status in _terminal:
             job.finished_at = now
         await self._session.flush()
-        await self._session.refresh(job)
         return job

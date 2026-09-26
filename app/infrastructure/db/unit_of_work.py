@@ -7,10 +7,13 @@ SQLAlchemy-реализация Unit of Work.
 Правило:
   - Никогда не вызывайте session.commit() внутри репозиториев.
   - Никогда не вызывайте uow.commit() более одного раза за операцию
-    (исключение — Celery-задачи с промежуточными чекпойнтами: каждый чекпойнт
-    создаёт новый `async with uow` блок).
-  - H-4: refresh() доступен через IUnitOfWork.refresh() — не обращайся к uow._session напрямую.
+    (исключение — Celery-задачи с промежуточными чекпойнтами).
+  - H-4: refresh() доступен через IUnitOfWork.refresh() — не обращайсь к uow._session напрямую.
   - HIGH-A: self.users добавлен, чтобы избежать AttributeError при uow.users.
+  - H-NEW-2: self.dashboard удалён из SqlAlchemyUnitOfWork.
+    DashboardRepository — read-model, не агрегат; инжектируется как IDashboardQueryService
+    через FastAPI Depends(get_dashboard_service) (DashboardService получает UoW,
+    но не DashboardRepository в IUnitOfWork).
 """
 from __future__ import annotations
 
@@ -22,7 +25,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.infrastructure.db.repositories.analysis_job_repository import AnalysisJobRepository
 from app.infrastructure.db.repositories.audit_log_repository import AuditLogRepository
-from app.infrastructure.db.repositories.dashboard_repository import DashboardRepository
 from app.infrastructure.db.repositories.document_repository import DocumentRepository
 from app.infrastructure.db.repositories.project_repository import ProjectRepository
 from app.infrastructure.db.repositories.source_repository import SourceRepository
@@ -50,7 +52,6 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         # Extended repositories
         self.projects    = ProjectRepository(session)
         self.sources     = SourceRepository(session)
-        self.dashboard   = DashboardRepository(session)
 
         # Auth repositories (HIGH-A: добавлен, чтобы uow.users не давал AttributeError)
         self.users       = UserRepository(session)
