@@ -11,6 +11,8 @@ Celery-задачи пайплайна анализа.
 - Parse-once: document скачивается и парсится один раз в _start_job,
   plain_text кэшируется в Redis. _run_source_pipeline читает кэш и деградирует
   до прямого скачивания при cache miss (истёкший TTL, недоступный Redis).
+- P2: заменены прямые ORM enum AnalysisJobStatus/DocumentStatus
+  на domain VO AnalysisJobStatusVO/DocumentStatusVO везде в файле.
 """
 
 import asyncio
@@ -23,9 +25,9 @@ from celery import chord
 from app.core.config import get_settings
 from app.domain.exceptions import DocumentParseError, LLMInvalidResponseError, LLMTimeoutError
 from app.domain.interfaces.source_connector import SourceKind, SourceRef
+from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO
 from app.infrastructure.cache.redis_client import get_redis_client
 from app.infrastructure.cache.sync_redis_client import get_sync_redis_client
-from app.infrastructure.db.models.enums import AnalysisJobStatus, DocumentStatus
 from app.infrastructure.db.repositories.analysis_job_repository import AnalysisJobRepository
 from app.infrastructure.db.repositories.document_repository import DocumentRepository
 from app.infrastructure.db.repositories.source_repository import SourceRepository
@@ -79,7 +81,6 @@ async def _cache_parsed_document(
 
     ttl = max(_settings.llm_timeout_seconds * sources_count * 2, 300)
     redis = get_redis_client()
-    # setex: атомарный SET + EXPIRE — не нужен отдельный EXPIRE
     await redis.setex(_parsed_doc_key(job_id), ttl, plain_text)
 
     return plain_text
@@ -91,7 +92,6 @@ async def _get_cached_plain_text(job_id: str) -> str | None:
         redis = get_redis_client()
         return await redis.get(_parsed_doc_key(job_id))
     except Exception:  # noqa: BLE001
-        # Redis недоступен — деградируем до прямого скачивания в caller.
         logger.warning(
             "Redis недоступен при чтении кэша документа",
             extra={"job_id": job_id},
@@ -105,7 +105,6 @@ async def _cleanup_parsed_cache(job_id: str) -> None:
         redis = get_redis_client()
         await redis.delete(_parsed_doc_key(job_id))
     except Exception:  # noqa: BLE001
-        # Некритично — TTL всё равно очистит ключ.
         logger.debug("Не удалось удалить кэш документа", extra={"job_id": job_id})
 
 
@@ -114,7 +113,7 @@ async def _cleanup_parsed_cache(job_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _is_cancelled(job) -> bool:
-    return job.status == AnalysisJobStatus.CANCELLED
+    return job.status == AnalysisJobStatusVO.CANCELLED
 
 
 class _Tally(NamedTuple):
@@ -154,27 +153,31 @@ async def _apply_job_outcome(
             message = "Не обработаны источники: " + ", ".join(
                 f"{r.get('source_id', '?')} ({r.get('error_code')})" for r in tally.failed
             )
-        await job_repo.update_status(job, AnalysisJobStatus.SUCCESS, error_message=message)
+        await job_repo.update_status(job, AnalysisJobStatusVO.SUCCESS, error_message=message)
         if is_current:
             document.status = (
-                DocumentStatus.AWAITING_APPROVAL if tally.suggestions_count else DocumentStatus.READY
+                DocumentStatusVO.AWAITING_APPROVAL
+                if tally.suggestions_count
+                else DocumentStatusVO.READY
             )
     elif tally.failed:
         message = "; ".join(
             f"{r.get('source_id', '?')}: {r.get('error_message')}" for r in tally.failed
         )
-        await job_repo.update_status(job, AnalysisJobStatus.FAILED, "ALL_SOURCES_FAILED", message)
+        await job_repo.update_status(
+            job, AnalysisJobStatusVO.FAILED, "ALL_SOURCES_FAILED", message
+        )
         if is_current:
-            document.status = DocumentStatus.DRAFT
+            document.status = DocumentStatusVO.DRAFT
     else:
         await job_repo.update_status(
             job,
-            AnalysisJobStatus.FAILED,
+            AnalysisJobStatusVO.FAILED,
             "NO_SOURCES_ATTACHED",
             "К документу не привязано ни одного источника",
         )
         if is_current:
-            document.status = DocumentStatus.DRAFT
+            document.status = DocumentStatusVO.DRAFT
 
 
 async def _recover_after_commit_failure(
@@ -192,14 +195,17 @@ async def _recover_after_commit_failure(
             if recovery_job is not None:
                 await recovery_job_repo.update_status(
                     recovery_job,
-                    AnalysisJobStatus.FAILED,
+                    AnalysisJobStatusVO.FAILED,
                     error_code="COMMIT_ERROR",
                     error_message=f"Ошибка коммита финализации: {commit_exc}",
                 )
 
             recovery_doc = await recovery_doc_repo.get_by_id(document_id)
-            if recovery_doc is not None and recovery_doc.status == DocumentStatus.IN_PROGRESS:
-                recovery_doc.status = DocumentStatus.DRAFT
+            if (
+                recovery_doc is not None
+                and recovery_doc.status == DocumentStatusVO.IN_PROGRESS
+            ):
+                recovery_doc.status = DocumentStatusVO.DRAFT
                 await recovery_session.commit()
     except Exception:  # noqa: BLE001
         logger.exception(
@@ -226,9 +232,15 @@ async def _start_job(job_id: str) -> list[str]:
 
         job = await job_repo.get_by_id(uuid.UUID(job_id))
         if job is None:
-            logger.error("run_analysis_job вызван для несуществующего job_id", extra={"job_id": job_id})
+            logger.error(
+                "run_analysis_job вызван для несуществующего job_id",
+                extra={"job_id": job_id},
+            )
             return []
-        if job.status not in (AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING):
+        if job.status not in (
+            AnalysisJobStatusVO.PENDING,
+            AnalysisJobStatusVO.PROCESSING,
+        ):
             return []
         if not await job_repo.mark_processing_if_active(job.id):
             return []
@@ -241,13 +253,14 @@ async def _start_job(job_id: str) -> list[str]:
                 extra={"job_id": job_id, "document_id": str(job.document_id)},
             )
             await job_repo.update_status(
-                job, AnalysisJobStatus.FAILED,
+                job,
+                AnalysisJobStatusVO.FAILED,
                 error_code="DOCUMENT_NOT_FOUND",
                 error_message="Документ не найден",
             )
             return []
         if document.current_analysis_job_id == job.id:
-            document.status = DocumentStatus.IN_PROGRESS
+            document.status = DocumentStatusVO.IN_PROGRESS
             await session.commit()
 
         await session.refresh(document, ["sources"])
@@ -263,7 +276,6 @@ async def _start_job(job_id: str) -> list[str]:
                 sources_count=len(source_ids),
             )
         except Exception:  # noqa: BLE001
-            # Некритично — каждый источник скачает документ самостоятельно.
             logger.warning(
                 "Не удалось закэшировать plain_text документа; "
                 "каждый источник будет скачивать файл отдельно",
@@ -288,7 +300,6 @@ async def _run_source_pipeline(
     plain_text = await _get_cached_plain_text(str(job_id))
 
     if plain_text is None:
-        # Cache miss — скачиваем и парсим документ напрямую (fallback).
         logger.debug(
             "Cache miss для plain_text документа; скачиваем из MinIO",
             extra={"job_id": str(job_id), "storage_key": document_storage_key},
@@ -390,7 +401,10 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
 
         job = await job_repo.get_by_id(uuid.UUID(job_id))
         if job is None:
-            logger.error("finalize_analysis_job вызван для несуществующего job_id", extra={"job_id": job_id})
+            logger.error(
+                "finalize_analysis_job вызван для несуществующего job_id",
+                extra={"job_id": job_id},
+            )
             return
         if _is_cancelled(job):
             await _cleanup_parsed_cache(job_id)
@@ -398,7 +412,12 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
 
         document = await document_repo.get_by_id(job.document_id)
         if document is None:
-            await job_repo.update_status(job, AnalysisJobStatus.FAILED, "DOCUMENT_NOT_FOUND", "Документ не найден")
+            await job_repo.update_status(
+                job,
+                AnalysisJobStatusVO.FAILED,
+                "DOCUMENT_NOT_FOUND",
+                "Документ не найден",
+            )
             await _cleanup_parsed_cache(job_id)
             return
 
@@ -415,7 +434,6 @@ async def _finalize_job(job_id: str, source_results: list[dict]) -> None:
             await session.rollback()
             await _recover_after_commit_failure(job_id, job.document_id, commit_exc)
         finally:
-            # Кэш очищается в любом исходе — TTL подчищает остатки.
             await _cleanup_parsed_cache(job_id)
 
 
