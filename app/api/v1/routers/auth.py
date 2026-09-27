@@ -1,12 +1,18 @@
 """
 Роутер регистрации/логина/текущего пользователя.
+
+M-block: добавлен rate limit 5/minute на POST /register (защита от
+массовых регистраций). Лимит применяется по IP клиента; при превышении
+vозвращается HTTP 429 с заголовком Retry-After.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from slowapi.errors import RateLimitExceeded  # noqa: F401  — re-exported для тестов
 
 from app.api.deps import get_current_user
 from app.api.schemas.auth import TokenResponse, UserLoginRequest, UserRegisterRequest, UserResponse
 from app.core.dependencies import get_auth_service
+from app.core.limiter import limiter
 from app.domain.exceptions import (
     AccountTemporarilyLockedError,
     EmailAlreadyRegisteredError,
@@ -19,7 +25,17 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-async def register(payload: UserRegisterRequest, auth_service: AuthService = Depends(get_auth_service)) -> UserResponse:
+@limiter.limit("5/minute")
+async def register(
+    request: Request,  # slowapi требует Request как первый позиционный аргумент
+    payload: UserRegisterRequest,
+    auth_service: AuthService = Depends(get_auth_service),
+) -> UserResponse:
+    """Регистрация нового пользователя.
+
+    Rate limit: 5 запросов в минуту с одного IP.
+    При превышении — HTTP 429 + заголовок Retry-After.
+    """
     try:
         user = await auth_service.register(payload.email, payload.password)
     except EmailAlreadyRegisteredError as exc:
@@ -28,7 +44,10 @@ async def register(payload: UserRegisterRequest, auth_service: AuthService = Dep
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(payload: UserLoginRequest, auth_service: AuthService = Depends(get_auth_service)) -> TokenResponse:
+async def login(
+    payload: UserLoginRequest,
+    auth_service: AuthService = Depends(get_auth_service),
+) -> TokenResponse:
     try:
         access_token, expires_in = await auth_service.authenticate(payload.email, payload.password)
     except AccountTemporarilyLockedError as exc:

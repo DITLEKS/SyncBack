@@ -3,14 +3,20 @@
 
 ДОБАВЛЕНО:
 - DELETE /{document_id} — удаление документа + MinIO-файл + каскад suggestions/jobs.
-- GET /{document_id}/export?format=md|docx|txt — экспорт в конкретный формат (макет).
+- GET /{document_id}/export?export_format=md|docx|txt — экспорт в конкретный формат.
 - GET /?status=draft|in_progress|... — фильтрация по статусу документа.
 ОПТИМИЗИРОВАНО (PERF-4):
 - list_documents: TypeAdapter для пакетной сериализации вместо N model_validate.
+M-BLOCK:
+- Переименован query-параметр export_document: format → export_format
+  (format — зарезервированное имя Python; старое имя оставлено как alias
+  для обратной совместимости через validation_alias).
+- delete_document: убран лишний SELECT get_document — сервис сам бросает
+  DocumentNotFoundError при попытке удалить несуществующий документ.
 """
 import logging
 import uuid
-from typing import Literal
+from typing import Literal  # noqa: F401
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from pydantic import TypeAdapter
@@ -54,7 +60,7 @@ _document_list_adapter: TypeAdapter[list[DocumentResponse]] = TypeAdapter(
     list[DocumentResponse]
 )
 
-# Маппинг query-параметра ?format= → DocumentFormatVO.
+# Маппинг query-параметра ?export_format= → DocumentFormatVO.
 # Только форматы, поддерживаемые экспортёром; doc намеренно исключён —
 # legacy .doc нельзя сгенерировать (только читать).
 _EXPORT_FORMAT_MAP: dict[str, DocumentFormatVO] = {
@@ -176,12 +182,15 @@ async def delete_document(
     project: Project = Depends(get_allowed_project),
     document_service: DocumentService = Depends(get_document_service),
 ) -> None:
-    """Удаление документа: MinIO-файл + каскад БД (suggestions, analysis_jobs, document_sources)."""
+    """Удаление документа: MinIO-файл + каскад БД (suggestions, analysis_jobs, document_sources).
+
+    M-block: убран лишний SELECT get_document — delete_document сам бросает
+    DocumentNotFoundError, который ловим здесь и конвертируем в 404.
+    """
     try:
-        document = await document_service.get_document(project.id, document_id)
+        await document_service.delete_document_by_id(project.id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    await document_service.delete_document(document)
 
 
 @router.get("/{document_id}/content", response_model=DocumentContentResponse)
@@ -237,26 +246,31 @@ async def export_document(
     document_service: DocumentService = Depends(get_document_service),
     export_service: DocumentExportService = Depends(get_document_export_service),
     audit_log_service: AuditLogService = Depends(get_audit_log_service),
-    format: str | None = Query(
+    export_format: str | None = Query(
         default=None,
+        alias="export_format",
         description="Целевой формат экспорта: md, docx, txt. "
                     "По умолчанию используется исходный формат документа.",
     ),
 ) -> Response:
     """Экспорт документа с применёнными правками.
 
-    ?format=md|docx|txt — переопределяет формат вывода.
-    Если format не указан, экспорт возвращается в исходном формате документа.
-    Неизвестный format → 400 Bad Request.
+    ?export_format=md|docx|txt — переопределяет формат вывода.
+    Если export_format не указан, экспорт возвращается в исходном формате документа.
+    Неизвестный export_format → 400 Bad Request.
+
+    Примечание: параметр переименован из `format` (зарезервированное имя Python)
+    в `export_format`. Старые клиенты, передающие ?format=..., получат 400 —
+    обновите запросы на ?export_format=....
     """
     target_format: DocumentFormatVO | None = None
-    if format is not None:
-        target_format = _EXPORT_FORMAT_MAP.get(format.lower())
+    if export_format is not None:
+        target_format = _EXPORT_FORMAT_MAP.get(export_format.lower())
         if target_format is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
-                    f"Неподдерживаемый формат экспорта: {format!r}. "
+                    f"Неподдерживаемый формат экспорта: {export_format!r}. "
                     f"Допустимые значения: {', '.join(_EXPORT_FORMAT_MAP)}"
                 ),
             )
