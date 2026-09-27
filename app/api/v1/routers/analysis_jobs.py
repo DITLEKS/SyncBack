@@ -20,11 +20,12 @@ FIX-1: suppress(Exception) заменён на явный try/except с logger.w
 FIX-3: идемпотентный запрос проверяет document_id — если ключ совпадает,
         но document_id другой — возвращаем 409, а не чужой job.
 
-C-1 (аудит): POST /{job_id}/cancel → DELETE /{job_id}.
-  Отмена — изменение состояния ресурса на cancelled.
-  DELETE /{job_id} → 200 + AnalysisJobResponse(status=cancelled).
-  Старый маршрут POST /{job_id}/cancel оставлен как deprecated redirect (307)
-  для плавной миграции фронта — удалить после обновления клиента.
+C-1 (аудит): REST-правильный способ отмены — DELETE /{job_id}.
+  Возвращает 200 + AnalysisJobResponse(status=cancelled).
+
+REFACTOR: dispatch run_analysis_job делегирован в service.dispatch_job() —
+  роутер не импортирует Celery-задачи напрямую.
+  Deprecated POST /{job_id}/cancel удалён (фронт не подключён).
 """
 
 import logging
@@ -32,7 +33,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse
 
 from app.api.deps import get_allowed_project
 from app.api.schemas.analysis_job import (
@@ -49,7 +50,6 @@ from app.domain.exceptions import (
 )
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.infrastructure.db.models.project import Project
-from app.workers.tasks.analysis_tasks import run_analysis_job
 
 logger = logging.getLogger("syncscribe.api.analysis_jobs")
 
@@ -59,7 +59,6 @@ router = APIRouter(
 )
 
 
-# #9 Хелпер, чтобы не дублировать JSONResponse + jsonable_encoder в трёх местах
 def _job_response(job, http_status: int = status.HTTP_201_CREATED) -> JSONResponse:
     return JSONResponse(
         status_code=http_status,
@@ -75,9 +74,7 @@ def _job_response(job, http_status: int = status.HTTP_201_CREATED) -> JSONRespon
         200: {"model": AnalysisJobResponse, "description": "Идемпотентный запрос — задача уже существует"},
         409: {
             "model": AnalysisJobConflictResponse,
-            "description": (
-                "Анализ уже запущен, или документ READY — нужен force=True (#9)"
-            ),
+            "description": "Анализ уже запущен, или документ READY — нужен force=True (#9)",
         },
     },
 )
@@ -89,7 +86,6 @@ async def start_analysis_job(
     body: AnalysisJobCreateRequest = AnalysisJobCreateRequest(),
 ) -> JSONResponse:
     # P0-7: идемпотентный повторный запрос
-    # FIX-3: проверяем, что найденный job принадлежит именно этому document_id.
     if idempotency_key:
         existing = await service.find_job_by_idempotency_key(
             project.id, document_id, idempotency_key
@@ -103,9 +99,9 @@ async def start_analysis_job(
                         f"({existing.document_id}). Используйте уникальный ключ."
                     ),
                 )
-            return _job_response(existing, status.HTTP_200_OK)  # #9
+            return _job_response(existing, status.HTTP_200_OK)
 
-    # P0-9: повторный анализ документа в статусе READY без force.
+    # P0-9: повторный анализ документа в статусе READY без force
     try:
         is_ready = await service.check_document_is_ready(project.id, document_id)
     except DocumentNotFoundError as exc:
@@ -130,14 +126,13 @@ async def start_analysis_job(
     except (AnalysisAlreadyRunningError, InvalidDocumentStatusError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    # REFACTOR: dispatch делегирован в сервис — роутер не знает о Celery
     try:
-        task = run_analysis_job.delay(str(job.id))
+        job = await service.dispatch_job(job)
     except Exception as exc:  # noqa: BLE001
         job = await service.mark_job_queue_unavailable(job, str(exc))
-        return _job_response(job)  # #9
 
-    job = await service.mark_dispatched(job, task.id)
-    return _job_response(job)  # #9
+    return _job_response(job)
 
 
 @router.get("/{job_id}", response_model=AnalysisJobResponse)
@@ -153,12 +148,6 @@ async def get_analysis_job(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return AnalysisJobResponse.model_validate(job)
 
-
-# ---------------------------------------------------------------------------
-# C-1: DELETE /{job_id} — REST-семантика отмены задачи
-# Отмена = изменение состояния ресурса на cancelled.
-# Возвращает 200 + AnalysisJobResponse(status=cancelled).
-# ---------------------------------------------------------------------------
 
 @router.delete(
     "/{job_id}",
@@ -179,9 +168,8 @@ async def cancel_analysis_job(
 ) -> AnalysisJobResponse:
     """Отменить задачу анализа.
 
-    C-1: REST-правильный способ — DELETE /{job_id} (отменить = уничтожить намерение).
-    Возвращает 200 + AnalysisJobResponse с status=cancelled, чтобы фронт
-    обновил стор без дополнительного GET.
+    C-1: DELETE /{job_id} — REST-правильный способ отмены.
+    Возвращает 200 + AnalysisJobResponse с status=cancelled.
     """
     try:
         job = await service.cancel_job(project.id, document_id, job_id)
@@ -190,8 +178,6 @@ async def cancel_analysis_job(
     except AnalysisJobNotCancellableError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    # N-2: revoke делегирован в сервис — роутер не знает о celery_app напрямую.
-    # FIX-1: suppress(Exception) заменён на явный try/except с логированием.
     if job.celery_task_id:
         try:
             await service.revoke_celery_task(job.celery_task_id)
@@ -203,24 +189,3 @@ async def cancel_analysis_job(
             )
 
     return AnalysisJobResponse.model_validate(job)
-
-
-# ---------------------------------------------------------------------------
-# Deprecated alias: POST /{job_id}/cancel → 307 → DELETE /{job_id}
-# Оставлен для плавной миграции фронта. Удалить после обновления клиента.
-# ---------------------------------------------------------------------------
-
-@router.post(
-    "/{job_id}/cancel",
-    include_in_schema=False,  # скрыт из OpenAPI — фронт должен перейти на DELETE
-    deprecated=True,
-)
-async def cancel_analysis_job_deprecated(
-    document_id: uuid.UUID,
-    job_id: uuid.UUID,
-) -> RedirectResponse:
-    """Deprecated. Используйте DELETE /{job_id}."""
-    return RedirectResponse(
-        url=f"../{job_id}",
-        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
-    )

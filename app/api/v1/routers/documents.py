@@ -4,11 +4,11 @@
 ДОБАВЛЕНО:
 - DELETE /{document_id} — удаление документа + MinIO-файл + каскад suggestions/jobs.
 - GET /{document_id}/export?export_format=md|docx|txt — экспорт в конкретный формат.
+  Является каноническим endpoint экспорта (POST /editor/export удалён).
 - GET /?status=draft|in_progress|... — фильтрация по статусу документа.
 ОПТИМИЗИРОВАНО (PERF-4):
 - list_documents: TypeAdapter для пакетной сериализации вместо N model_validate.
 M-BLOCK:
-- Переименован query-параметр export_document: format → export_format.
 - delete_document: убран лишний SELECT get_document.
 M-5: get_document_content ловит конкретные ошибки:
 - DocumentParseError → 422
@@ -197,7 +197,6 @@ async def get_document_content(
         document = await document_service.get_document(project.id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    # M-5: разграничиваем ошибки парсера, хранилища и неожиданные.
     try:
         parsed = await document_service.get_document_content(document)
     except DocumentParseError as exc:
@@ -206,7 +205,6 @@ async def get_document_content(
             detail=f"Не удалось распарсить документ: {exc}",
         ) from exc
     except OSError as exc:
-        # OSError / IOError сигнализируют об ошибке MinIO-адаптера (сеть, таймаут).
         logger.error(
             "Storage error while fetching document content",
             extra={"document_id": str(document_id)},
@@ -253,7 +251,7 @@ async def get_download_url(
     return DocumentDownloadResponse(download_url=url, expires_in=expires_in)
 
 
-@router.get("/{document_id}/export")
+@router.get("/{document_id}/export", summary="Экспорт документа с принятыми правками")
 async def export_document(
     document_id: uuid.UUID,
     project: Project = Depends(get_allowed_project),
@@ -263,7 +261,6 @@ async def export_document(
     audit_log_service: AuditLogService = Depends(get_audit_log_service),
     export_format: str | None = Query(
         default=None,
-        alias="export_format",
         description="Целевой формат экспорта: md, docx, txt.",
     ),
 ) -> Response:

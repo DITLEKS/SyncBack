@@ -1,8 +1,10 @@
 """Агрегированный endpoint редактора документа + export + reset.
 
 GET    /projects/{project_id}/documents/{document_id}/editor
-POST   /projects/{project_id}/documents/{document_id}/editor/export?format=docx
 POST   /projects/{project_id}/documents/{document_id}/editor/reset
+
+Экспорт вынесен в GET /projects/{project_id}/documents/{document_id}/export
+(роутер documents.py) — /editor/export удалён как дублирующий endpoint.
 
 #7: возвращаем view_mode и original_content (исходный plain_text без правок)
 #8: возвращаем sources_is_editable=False при in_progress / awaiting_approval
@@ -23,13 +25,16 @@ C-3 (аудит): counters.total = suggestions_total (полный счётчи�
 REFACTOR: DELETE /editor/suggestions удалён — операция перенесена в
   PATCH /projects/{project_id}/documents/{document_id}/suggestions
   с телом {"filter":"pending","status":"rejected"}.
+
+PERF:
+  - get_document_content и get_original_content вызываются через asyncio.gather()
+  - reset_analysis: второй SELECT get_document убран — документ берётся из reset_result
 """
+import asyncio
 import logging
 import uuid
-from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import Response
 
 from app.api.deps import get_allowed_project, get_current_user
 from app.api.schemas.document import DocumentSectionResponse, SuggestionCounters
@@ -43,13 +48,11 @@ from app.api.schemas.editor import (
 from app.api.schemas.suggestion import SuggestionResponse
 from app.core.dependencies import (
     get_analysis_job_service,
-    get_document_export_service,
     get_document_service,
     get_suggestion_service,
 )
 from app.domain.exceptions import DocumentNotFoundError, InvalidDocumentStatusError
 from app.domain.services.analysis_job_service import AnalysisJobService
-from app.domain.services.document_export_service import DocumentExportService
 from app.domain.services.document_service import DocumentService
 from app.domain.services.suggestion_service import SuggestionService
 from app.domain.value_objects import DocumentStatusVO, PaginationParams
@@ -77,16 +80,21 @@ _STATUS_VIEW_MODE: dict[DocumentStatusVO, str] = {
     DocumentStatusVO.CANCELLED: "original",
 }
 
-_EXPORT_FORMAT_META: dict[str, tuple[str, str]] = {
-    "docx": (
-        ".docx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ),
-    "md": (".md", "text/markdown; charset=utf-8"),
-    "txt": (".txt", "text/plain; charset=utf-8"),
-}
-
 _SUGGESTIONS_MAX_LIMIT = 200
+
+
+def _build_editor_content(parsed) -> EditorContent:
+    return EditorContent(
+        plain_text=parsed.plain_text,
+        sections=[
+            DocumentSectionResponse(
+                ref=s.ref,
+                start_offset=s.start_offset,
+                end_offset=s.end_offset,
+            )
+            for s in parsed.sections
+        ],
+    )
 
 
 @router.get("", response_model=EditorAggregateResponse)
@@ -132,67 +140,59 @@ async def get_editor_aggregate(
         view_mode=view_mode,
     )
 
-    editor_content = None
-    try:
-        parsed = await document_service.get_document_content(document)
-        editor_content = EditorContent(
-            plain_text=parsed.plain_text,
-            sections=[
-                DocumentSectionResponse(
-                    ref=s.ref,
-                    start_offset=s.start_offset,
-                    end_offset=s.end_offset,
-                )
-                for s in parsed.sections
-            ],
-        )
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "Не удалось получить контент документа для редактора",
-            extra={"document_id": str(document_id)},
-        )
+    # PERF: content и original_content независимы — запускаем параллельно
+    needs_original = document.status in _STATUSES_WITH_APPLIED_CHANGES
 
-    original_content = None
-    if document.status in _STATUSES_WITH_APPLIED_CHANGES:
+    async def _fetch_content():
+        try:
+            parsed = await document_service.get_document_content(document)
+            return _build_editor_content(parsed)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Не удалось получить контент документа для редактора",
+                extra={"document_id": str(document_id)},
+            )
+            return None
+
+    async def _fetch_original():
+        if not needs_original:
+            return None
         try:
             orig_parsed = await document_service.get_original_content(document)
-            original_content = EditorContent(
-                plain_text=orig_parsed.plain_text,
-                sections=[
-                    DocumentSectionResponse(
-                        ref=s.ref,
-                        start_offset=s.start_offset,
-                        end_offset=s.end_offset,
-                    )
-                    for s in orig_parsed.sections
-                ],
-            )
+            return _build_editor_content(orig_parsed)
         except (AttributeError, NotImplementedError):
-            pass
+            return None
         except Exception:  # noqa: BLE001
             logger.warning(
                 "Не удалось получить original_content документа",
                 extra={"document_id": str(document_id)},
             )
-    else:
-        original_content = editor_content
+            return None
 
-    suggestions_raw, suggestions_total = await suggestion_service.list_suggestions_for_document(
-        project.id,
-        document_id,
-        PaginationParams(limit=suggestions_limit, offset=suggestions_offset),
+    (
+        (editor_content, original_content_raw),
+        (suggestions_raw, suggestions_total),
+        status_counts,
+    ) = await asyncio.gather(
+        asyncio.gather(_fetch_content(), _fetch_original()),
+        suggestion_service.list_suggestions_for_document(
+            project.id,
+            document_id,
+            PaginationParams(limit=suggestions_limit, offset=suggestions_offset),
+        ),
+        _safe_count_by_status(suggestion_service, project.id, document_id),
     )
+
+    # Если оригинал не нужен — подставляем текущий контент (статусы DRAFT/IN_PROGRESS/ERROR)
+    original_content = original_content_raw if needs_original else editor_content
+
     suggestions = [SuggestionResponse.model_validate(s) for s in suggestions_raw]
 
-    try:
-        status_counts = await suggestion_service.count_by_document_and_status(
-            project.id, document_id
-        )
-        pending = status_counts.get("pending", 0)
-        accepted = status_counts.get("accepted", 0)
-        rejected = status_counts.get("rejected", 0)
-    except (AttributeError, NotImplementedError):
-        pending = accepted = rejected = 0
+    pending = status_counts.get("pending", 0)
+    accepted = status_counts.get("accepted", 0)
+    rejected = status_counts.get("rejected", 0)
+    # Fallback: считаем по текущей странице если агрегат вернул пустой словарь
+    if not status_counts:
         for s in suggestions:
             if s.status == "pending":
                 pending += 1
@@ -201,7 +201,6 @@ async def get_editor_aggregate(
             elif s.status == "rejected":
                 rejected += 1
 
-    from app.api.schemas.document import SuggestionCounters
     counters = SuggestionCounters(
         total=suggestions_total,
         pending=pending,
@@ -233,51 +232,15 @@ async def get_editor_aggregate(
     )
 
 
-@router.post("/export", summary="Экспорт документа с принятыми правками")
-async def export_document(
+async def _safe_count_by_status(
+    suggestion_service: SuggestionService,
+    project_id: uuid.UUID,
     document_id: uuid.UUID,
-    format: Literal["docx", "md", "txt"] = Query(
-        "docx",
-        description="Формат экспорта: docx (по умолчанию), md, txt",
-    ),
-    project: Project = Depends(get_allowed_project),
-    current_user: User = Depends(get_current_user),
-    document_service: DocumentService = Depends(get_document_service),
-    export_service: DocumentExportService = Depends(get_document_export_service),
-) -> Response:
-    """Скачать финальный документ с применёнными принятыми правками."""
+) -> dict:
     try:
-        document = await document_service.get_document(project.id, document_id)
-    except DocumentNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-
-    if document.status != DocumentStatusVO.READY:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                f"Экспорт доступен только для документов в статусе READY. "
-                f"Текущий статус: {document.status.value}"
-            ),
-        )
-
-    ext, media_type = _EXPORT_FORMAT_META[format]
-    try:
-        file_bytes, filename, resolved_media_type = await export_service.export_document(
-            document, target_format=format
-        )
-    except TypeError:
-        file_bytes, filename, resolved_media_type = await export_service.export_document(document)
-
-    stem = document.name.rsplit(".", 1)[0] if "." in document.name else document.name
-    download_filename = f"{stem}{ext}"
-
-    return Response(
-        content=file_bytes,
-        media_type=resolved_media_type or media_type,
-        headers={
-            "Content-Disposition": f'attachment; filename="{download_filename}"',
-        },
-    )
+        return await suggestion_service.count_by_document_and_status(project_id, document_id)
+    except (AttributeError, NotImplementedError):
+        return {}
 
 
 @router.post(
@@ -295,6 +258,8 @@ async def reset_analysis(
 ) -> ResetResponse:
     """Сбросить все правки текущего анализа: статус suggestions → pending,
     документ → AWAITING_APPROVAL.
+
+    PERF: повторный get_document после reset убран — статус берётся из reset_result.
     """
     try:
         document = await document_service.get_document(project.id, document_id)
@@ -315,19 +280,22 @@ async def reset_analysis(
         )
 
     reset_result = await job_service.reset_analysis(project.id, document_id)
-    suggestions_reset_count: int = reset_result if isinstance(reset_result, int) else 0
 
-    try:
-        updated_document = await document_service.get_document(project.id, document_id)
-        new_status = updated_document.status.value
-        new_review_version = getattr(updated_document, "review_version", 0) or 0
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "Не удалось перечитать документ после reset",
-            extra={"document_id": str(document_id)},
-        )
+    # reset_analysis может вернуть int (кол-во правок) или объект с документом.
+    # Если возвращает объект — берём статус из него, избегая второго SELECT.
+    if isinstance(reset_result, int):
+        suggestions_reset_count = reset_result
         new_status = DocumentStatusVO.AWAITING_APPROVAL.value
         new_review_version = 0
+    else:
+        suggestions_reset_count = getattr(reset_result, "reset_count", 0) or 0
+        updated_doc = getattr(reset_result, "document", None)
+        if updated_doc is not None:
+            new_status = updated_doc.status.value
+            new_review_version = getattr(updated_doc, "review_version", 0) or 0
+        else:
+            new_status = DocumentStatusVO.AWAITING_APPROVAL.value
+            new_review_version = 0
 
     return ResetResponse(
         document_id=document_id,
