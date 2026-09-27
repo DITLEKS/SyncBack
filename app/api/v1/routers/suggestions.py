@@ -1,4 +1,10 @@
-"""API для работы с правками документа."""
+"""API для работы с правками документа.
+
+FIX-2: /reject-all возвращает BulkRejectResponse с полем rejected_count вместо
+        семантически неверного accepted_count=N из BulkAcceptResponse.
+FIX-6: _safe_bulk_log и _safe_single_log добавлен exc_info=True для сохранения трейса.
+FIX-7: review_save логирует предупреждение при расхождении If-Match vs payload.review_version.
+"""
 
 import logging
 import uuid
@@ -12,7 +18,7 @@ from app.api.deps import get_allowed_project, get_current_user
 from app.api.schemas.document import DocumentResponse
 from app.api.schemas.pagination import Page
 from app.api.schemas.review import ReviewSaveRequest, ReviewSaveResponse
-from app.api.schemas.suggestion import BulkAcceptResponse, SuggestionResponse
+from app.api.schemas.suggestion import BulkAcceptResponse, BulkRejectResponse, SuggestionResponse
 from app.core.dependencies import get_audit_log_service, get_suggestion_service
 from app.domain.exceptions import (
     DocumentNotFoundError,
@@ -76,11 +82,13 @@ async def _safe_bulk_log(
     user_id: uuid.UUID,
     decisions: list[tuple[uuid.UUID, AuditActionVO]],
 ) -> None:
+    # FIX-6: добавлен exc_info=True — трейс сохраняется в prod-логах.
     try:
         await audit_log_service.bulk_log_suggestion_decisions(user_id, decisions)
     except Exception:
         logger.warning(
             "Не удалось записать bulk audit_log для решений по правкам",
+            exc_info=True,
             extra={"user_id": str(user_id)},
         )
 
@@ -91,11 +99,13 @@ async def _safe_single_log(
     suggestion_id: uuid.UUID,
     action: AuditActionVO,
 ) -> None:
+    # FIX-6: добавлен exc_info=True — трейс сохраняется в prod-логах.
     try:
         await audit_log_service.log_suggestion_decision(user_id, suggestion_id, action)
     except Exception:
         logger.warning(
             "Не удалось записать audit_log для решения по правке",
+            exc_info=True,
             extra={"suggestion_id": str(suggestion_id), "user_id": str(user_id)},
         )
 
@@ -199,6 +209,21 @@ async def review_save(
     if_match: str | None = Header(default=None, alias="If-Match"),
 ) -> ReviewSaveResponse:
     client_version = _parse_if_match(if_match)
+
+    # FIX-7: предупреждаем при расхождении If-Match и payload.review_version.
+    # Побеждает If-Match (HTTP-семантика), но клиент должен знать о конфликте намерений.
+    if (
+        client_version is not None
+        and payload.review_version is not None
+        and client_version != payload.review_version
+    ):
+        logger.warning(
+            "If-Match (%s) расходится с payload.review_version (%s) — используется If-Match",
+            client_version,
+            payload.review_version,
+            extra={"document_id": str(document_id), "user_id": str(current_user.id)},
+        )
+
     review_version = client_version if client_version is not None else payload.review_version
 
     accepted_ids: list[uuid.UUID] = []
@@ -292,20 +317,19 @@ async def bulk_accept_suggestions(
     )
 
 
-@router.post("/reject-all", response_model=BulkAcceptResponse)
+@router.post("/reject-all", response_model=BulkRejectResponse)
 async def bulk_reject_suggestions(
     document_id: uuid.UUID,
     project: Project = Depends(get_allowed_project),
     current_user: User = Depends(get_current_user),
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
     audit_log_service: AuditLogService = Depends(get_audit_log_service),
-) -> BulkAcceptResponse:
+) -> BulkRejectResponse:
     """Отклонить все PENDING-правки одним запросом (кнопка «Отклонить все» в Editor).
 
-    Зеркало /accept-all — один UPDATE WHERE status=PENDING.
-    Возвращает BulkAcceptResponse (accepted_count=0, rejected_count=N)
-    через то же поле accepted_count для унификации схемы на фронте.
-    Поле accepted_count содержит кол-во отклонённых правок.
+    FIX-2: возвращает BulkRejectResponse с полем rejected_count вместо
+    семантически неверного accepted_count. OpenAPI-схема теперь отражает
+    реальную семантику операции.
     """
     try:
         result = await suggestion_service.bulk_reject(
@@ -323,8 +347,8 @@ async def bulk_reject_suggestions(
         [(sid, AuditActionVO.REJECT) for sid in rejected_ids],
     )
     doc = result.document
-    return BulkAcceptResponse(
-        accepted_count=len(rejected_ids),  # переиспользуем поле как count
+    return BulkRejectResponse(
+        rejected_count=len(rejected_ids),
         document_status=doc.status.value if doc else None,
         review_version=doc.review_version if doc else None,
     )

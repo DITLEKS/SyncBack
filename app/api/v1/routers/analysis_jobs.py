@@ -15,10 +15,14 @@ N-2 (ревью): убран прямой импорт celery_app из роут�
 N-4 (ревью): убран импорт DocumentStatus (ORM-enum из инфраструктуры).
   Сравнение статуса перенесено внутрь сервисного метода get_document_for_job(),
   где сессия гарантированно открыта (N-5). Роутер получает простой bool.
+
+FIX-1: suppress(Exception) заменён на явный try/except с logger.warning + exc_info.
+FIX-3: идемпотентный запрос проверяет document_id — если ключ совпадает,
+        но document_id другой — возвращаем 409, а не чужой job.
 """
 
+import logging
 import uuid
-from contextlib import suppress
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.encoders import jsonable_encoder
@@ -40,6 +44,8 @@ from app.domain.exceptions import (
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.infrastructure.db.models.project import Project
 from app.workers.tasks.analysis_tasks import run_analysis_job
+
+logger = logging.getLogger("syncscribe.api.analysis_jobs")
 
 router = APIRouter(
     prefix="/projects/{project_id}/documents/{document_id}/analysis-jobs",
@@ -77,11 +83,21 @@ async def start_analysis_job(
     body: AnalysisJobCreateRequest = AnalysisJobCreateRequest(),
 ) -> JSONResponse:
     # P0-7: идемпотентный повторный запрос
+    # FIX-3: проверяем, что найденный job принадлежит именно этому document_id.
+    # Один и тот же Idempotency-Key с другим document_id — ошибка клиента (409).
     if idempotency_key:
         existing = await service.find_job_by_idempotency_key(
             project.id, document_id, idempotency_key
         )
         if existing is not None:
+            if existing.document_id != document_id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"Idempotency-Key уже использован для другого документа "
+                        f"({existing.document_id}). Используйте уникальный ключ."
+                    ),
+                )
             return _job_response(existing, status.HTTP_200_OK)  # #9
 
     # P0-9: повторный анализ документа в статусе READY без force.
@@ -149,8 +165,18 @@ async def cancel_analysis_job(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except AnalysisJobNotCancellableError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    # N-2: revoke делегирован в сервис — роутер не знает о celery_app напрямую
+
+    # N-2: revoke делегирован в сервис — роутер не знает о celery_app напрямую.
+    # FIX-1: suppress(Exception) заменён на явный try/except с логированием,
+    #         чтобы revoke-failures были видны в prod-логах.
     if job.celery_task_id:
-        with suppress(Exception):
+        try:
             await service.revoke_celery_task(job.celery_task_id)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Не удалось отозвать Celery-задачу при отмене job",
+                exc_info=True,
+                extra={"celery_task_id": job.celery_task_id, "job_id": str(job_id)},
+            )
+
     return AnalysisJobResponse.model_validate(job)
