@@ -26,6 +26,8 @@ R-5: ISourceRepository.list_by_project — добавлен опциональн
   scope: SourceScopeVO | None = None для фильтрации по scope.
 FIX-review-4: get_primary_document_id_for_source — M2M-запрос первого
   document_id для источника; используется в DELETE /sources/{id} guard.
+C-2 (issue #37): ISuggestionRepository дополнен абстрактными методами
+  reset_status() и bulk_reject_all() — приведён к реализации.
 """
 from __future__ import annotations
 
@@ -33,11 +35,12 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, TypedDict
 
-from app.domain.value_objects import DocumentStatusVO, SourceScopeVO
+from app.domain.value_objects import DocumentStatusVO, SourceScopeVO, SuggestionStatusVO
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models.document import Document
     from app.infrastructure.db.models.source import Source
+    from app.infrastructure.db.models.suggestion import Suggestion
 
 
 class DocumentRow(TypedDict):
@@ -258,3 +261,142 @@ class ISourceRepository(ABC):
         project_id: uuid.UUID,
         source_id: uuid.UUID,
     ) -> "Source | None": ...
+
+
+class ISuggestionRepository(ABC):
+    # ------------------------------------------------------------------
+    # Read
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def get_by_id(
+        self, suggestion_id: uuid.UUID
+    ) -> "Suggestion | None": ...
+
+    @abstractmethod
+    async def list_by_analysis_job(
+        self,
+        analysis_job_id: uuid.UUID,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        status: SuggestionStatusVO | None = None,
+    ) -> "list[Suggestion]": ...
+
+    @abstractmethod
+    async def list_with_total(
+        self,
+        analysis_job_id: uuid.UUID,
+        *,
+        limit: int,
+        offset: int,
+        status: SuggestionStatusVO | None = None,
+    ) -> "tuple[list[Suggestion], int]":
+        """OPT-1: один SELECT с window-функцией вместо двух запросов.
+
+        func.count().over() вычисляется ДО применения LIMIT/OFFSET в PostgreSQL,
+        поэтому возвращает полный COUNT фильтрованной выборки.
+        """
+        ...
+
+    @abstractmethod
+    async def count_by_analysis_job(self, analysis_job_id: uuid.UUID) -> int: ...
+
+    @abstractmethod
+    async def count_by_analysis_job_and_status(
+        self,
+        analysis_job_id: uuid.UUID,
+        status: SuggestionStatusVO,
+    ) -> int: ...
+
+    @abstractmethod
+    async def list_by_analysis_job_and_status(
+        self,
+        analysis_job_id: uuid.UUID,
+        status: SuggestionStatusVO,
+    ) -> "list[Suggestion]": ...
+
+    @abstractmethod
+    async def list_by_analysis_job_and_status_page(
+        self,
+        analysis_job_id: uuid.UUID,
+        status: SuggestionStatusVO,
+        limit: int,
+        offset: int = 0,
+    ) -> "list[Suggestion]": ...
+
+    @abstractmethod
+    async def list_ids_by_analysis_job_and_status(
+        self,
+        analysis_job_id: uuid.UUID,
+        status: SuggestionStatusVO,
+    ) -> list[uuid.UUID]: ...
+
+    # ------------------------------------------------------------------
+    # Write
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def bulk_create(
+        self, suggestions: "list[Suggestion]"
+    ) -> "list[Suggestion]": ...
+
+    @abstractmethod
+    async def update_status(
+        self,
+        suggestion: "Suggestion",
+        decision: Any,
+    ) -> None:
+        """Атомарный UPDATE ... WHERE status = 'pending'.
+
+        Бросает SuggestionAlreadyDecidedError если строка не затронута.
+        S-2 (иссю #37): возвращает None никогда — либо исключение, либо None имплицитно.
+        """
+        ...
+
+    @abstractmethod
+    async def bulk_update_status(
+        self,
+        decisions: Any,
+    ) -> int:
+        """Один UPDATE ... WHERE id IN (...) AND status = 'pending'.
+
+        M-1 (иссю #37): scope-фильтр исправлен — decisions.document_id
+        сравнивается с M.document_id, а не M.analysis_job_id.
+        """
+        ...
+
+    @abstractmethod
+    async def bulk_accept_all(
+        self,
+        analysis_job_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> "list[Suggestion]":
+        """Принять все PENDING-правки одним UPDATE, вернуть обновлённые объекты."""
+        ...
+
+    @abstractmethod
+    async def bulk_reject_all(
+        self,
+        analysis_job_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> "list[Suggestion]":
+        """C-3 (issue #37): отклонить все PENDING-правки одним UPDATE.
+
+        Зеркало bulk_accept_all — один UPDATE WHERE status=PENDING,
+        затем SELECT обновлённых объектов.
+        """
+        ...
+
+    @abstractmethod
+    async def reset_status(
+        self,
+        suggestion: "Suggestion",
+    ) -> "Suggestion | None":
+        """C-2 (issue #37): сбросить решение правки обратно в PENDING.
+
+        Атомарный UPDATE WHERE status != PENDING AND id = ?.
+        Возвращает обновлённый объект или None если правка уже PENDING
+        (сбрасывать нечего — идемпотентно со стороны репозитория).
+        """
+        ...
