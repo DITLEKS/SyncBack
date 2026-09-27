@@ -7,6 +7,7 @@ CRIT-D4: класс теперь наследует IDashboardQueryService.
   - get_stats                 единый COUNT(*) FILTER вместо трёх отдельных (PERF-1)
   - activity_last_7_days      GROUP BY date за последние 7 дней (из document_opens)
   - get_attention_documents   Топ-N AWAITING_APPROVAL по pending_suggestions DESC
+                              H-4: переведён на outerjoin + COUNT FILTER (устранён N+1)
   - get_recent_documents      5 последних открытых + счётчики правок (OPT-2: 1 запрос)
   - upsert_open               ON CONFLICT DO UPDATE last_opened_at
 
@@ -91,31 +92,37 @@ class DashboardRepository(IDashboardQueryService):
     async def get_attention_documents(
         self, owner_id: uuid.UUID, limit: int = 4
     ) -> list[dict]:
-        pending_count = (
-            select(func.count(Suggestion.id))
-            .where(
-                Suggestion.document_id == Document.id,
-                Suggestion.status == SuggestionStatus.PENDING,
-            )
-            .correlate(Document)
-            .scalar_subquery()
-        )
+        # H-4: заменён scalar_subquery (N+1 коррелированных запросов) на
+        # outerjoin + COUNT FILTER — один запрос как в get_recent_documents.
         q = (
             select(
                 Document.id,
                 Document.name,
                 Document.project_id,
                 Document.status,
-                Project.name.label("project_name"),
-                pending_count.label("pending_suggestions"),
                 Document.uploaded_at,
+                Project.name.label("project_name"),
+                func.count(Suggestion.id).filter(
+                    Suggestion.status == SuggestionStatus.PENDING
+                ).label("pending_suggestions"),
             )
             .join(Project, Document.project_id == Project.id)
+            .outerjoin(Suggestion, Suggestion.document_id == Document.id)
             .where(
                 Project.owner_id == owner_id,
                 Document.status == DocumentStatus.AWAITING_APPROVAL,
             )
-            .order_by(pending_count.desc())
+            .group_by(
+                Document.id,
+                Document.name,
+                Document.project_id,
+                Document.status,
+                Document.uploaded_at,
+                Project.name,
+            )
+            .order_by(func.count(Suggestion.id).filter(
+                Suggestion.status == SuggestionStatus.PENDING
+            ).desc())
             .limit(limit)
         )
         rows = (await self._session.execute(q)).all()
@@ -153,7 +160,6 @@ class DashboardRepository(IDashboardQueryService):
             )
             .join(DocumentOpen, DocumentOpen.document_id == Document.id)
             .join(Project, Document.project_id == Project.id)
-            # N-1: Suggestion теперь имеет document_id — JOIN напрямую, без AnalysisJob.
             .outerjoin(Suggestion, Suggestion.document_id == Document.id)
             .where(DocumentOpen.user_id == user_id)
             .group_by(
@@ -187,8 +193,6 @@ class DashboardRepository(IDashboardQueryService):
         stmt = (
             pg_insert(DocumentOpen)
             .values(
-                # N-7: удалён id=uuid.uuid4() — у DocumentOpen нет поля id,
-                # PK составной (user_id, document_id). Лишний аргумент вызывал CompileError.
                 user_id=user_id,
                 document_id=document_id,
                 last_opened_at=now,

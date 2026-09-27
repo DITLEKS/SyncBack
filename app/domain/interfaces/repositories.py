@@ -141,18 +141,26 @@ class ISuggestionRepository(ABC):
         self, suggestion_id: uuid.UUID
     ) -> SuggestionProtocol | None: ...
 
+    # H-2: сигнатура приведена в соответствие с реализацией —
+    # pagination заменён на keyword-аргументы limit/offset/status.
     @abstractmethod
     async def list_by_analysis_job(
         self,
         analysis_job_id: uuid.UUID,
-        pagination: KeysetPage | PaginationParams,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        status: SuggestionStatusVO | None = None,
     ) -> list[SuggestionProtocol]: ...
 
     @abstractmethod
     async def list_with_total(
         self,
         analysis_job_id: uuid.UUID,
-        pagination: PaginationParams,
+        *,
+        limit: int,
+        offset: int,
+        status: SuggestionStatusVO | None = None,
     ) -> tuple[list[SuggestionProtocol], int]: ...
 
     @abstractmethod
@@ -175,18 +183,20 @@ class ISuggestionRepository(ABC):
         self, analysis_job_id: uuid.UUID, status: SuggestionStatusVO
     ) -> list[uuid.UUID]: ...
 
+    # H-2: возвращаемый тип — None (не SuggestionProtocol | None).
     @abstractmethod
     async def update_status(
         self,
         suggestion: SuggestionProtocol,
         decision: SuggestionDecision,
-    ) -> SuggestionProtocol | None: ...
+    ) -> None: ...
 
+    # H-2: возвращаемый тип — int (rowcount), не list[SuggestionProtocol].
     @abstractmethod
     async def bulk_update_status(
         self,
         decisions: ReviewDecisions,
-    ) -> list[SuggestionProtocol]: ...
+    ) -> int: ...
 
     @abstractmethod
     async def bulk_accept_all(

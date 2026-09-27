@@ -33,6 +33,8 @@ class Document(Base):
     )
     storage_key = Column(String(1024), nullable=False)
     size_bytes = Column(Integer, nullable=False)
+    # C-2: uploaded_at актуально — колонка не дропалась ни в одной миграции;
+    # используется в DashboardRepository.get_attention_documents.
     uploaded_at = Column(DateTime(timezone=True), nullable=False)
     status = Column(
         Enum(
@@ -44,12 +46,12 @@ class Document(Base):
         default=DocumentStatus.DRAFT,
         server_default=DocumentStatus.DRAFT.value,
     )
-    # R-1: current_analysis_job_id удалён — круговая FK.
-    # Текущий job: SELECT * FROM analysis_jobs WHERE document_id = ? ORDER BY created_at DESC LIMIT 1
-    # с индексом ix_analysis_jobs_doc_latest (миграция 0017).
     review_version = Column(Integer, nullable=False, default=0, server_default="0")
-    # N-2: добавлено поле exported_storage_key — используется в
-    # DocumentRepository.update_exported_key(). Без поля метод падал с AttributeError.
+    # C-1: добавлено поле original_storage_key — колонка существует в БД
+    # с миграции 0011. Без ORM-объявления RETURNING storage_key, original_storage_key
+    # в delete_by_id падал с AttributeError, а MinIO-снапшот никогда не удалялся.
+    original_storage_key = Column(String(1024), nullable=True)
+    # N-2: exported_storage_key — используется в DocumentRepository.update_exported_key().
     exported_storage_key = Column(String(1024), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(

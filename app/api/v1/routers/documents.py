@@ -8,11 +8,12 @@
 ОПТИМИЗИРОВАНО (PERF-4):
 - list_documents: TypeAdapter для пакетной сериализации вместо N model_validate.
 M-BLOCK:
-- Переименован query-параметр export_document: format → export_format
-  (format — зарезервированное имя Python; старое имя оставлено как alias
-  для обратной совместимости через validation_alias).
-- delete_document: убран лишний SELECT get_document — сервис сам бросает
-  DocumentNotFoundError при попытке удалить несуществующий документ.
+- Переименован query-параметр export_document: format → export_format.
+- delete_document: убран лишний SELECT get_document.
+M-5: get_document_content ловит конкретные ошибки:
+- DocumentParseError → 422
+- StorageError (OSError/IOError от MinIO-адаптера) → 502
+- Остальные Exception логируются → 500
 """
 import logging
 import uuid
@@ -40,6 +41,7 @@ from app.core.dependencies import (
 )
 from app.domain.exceptions import (
     DocumentNotFoundError,
+    DocumentParseError,
     FileTooLargeError,
     SourceNotFoundError,
     UnsupportedFileFormatError,
@@ -54,22 +56,16 @@ from app.infrastructure.db.models.user import User
 
 logger = logging.getLogger("syncscribe.api.documents")
 
-# PERF-4: один TypeAdapter на уровне модуля — единый проход по списку
-# вместо N отдельных model_validate.
 _document_list_adapter: TypeAdapter[list[DocumentResponse]] = TypeAdapter(
     list[DocumentResponse]
 )
 
-# Маппинг query-параметра ?export_format= → DocumentFormatVO.
-# Только форматы, поддерживаемые экспортёром; doc намеренно исключён —
-# legacy .doc нельзя сгенерировать (только читать).
 _EXPORT_FORMAT_MAP: dict[str, DocumentFormatVO] = {
     "md":   DocumentFormatVO.MARKDOWN,
     "docx": DocumentFormatVO.DOCX,
     "txt":  DocumentFormatVO.TXT,
 }
 
-# Маппинг строкового query-параметра ?status= → DocumentStatusVO.
 _STATUS_FILTER_MAP: dict[str, DocumentStatusVO] = {
     vo.value: vo for vo in DocumentStatusVO
 }
@@ -138,7 +134,6 @@ async def list_documents(
     project: Project = Depends(get_allowed_project),
     document_service: DocumentService = Depends(get_document_service),
 ) -> Page[DocumentResponse]:
-    """Список документов проекта с опциональным фильтром по статусу."""
     status_vo: DocumentStatusVO | None = None
     if status_filter is not None:
         status_vo = _STATUS_FILTER_MAP.get(status_filter.lower())
@@ -182,11 +177,6 @@ async def delete_document(
     project: Project = Depends(get_allowed_project),
     document_service: DocumentService = Depends(get_document_service),
 ) -> None:
-    """Удаление документа: MinIO-файл + каскад БД (suggestions, analysis_jobs, document_sources).
-
-    M-block: убран лишний SELECT get_document — delete_document сам бросает
-    DocumentNotFoundError, который ловим здесь и конвертируем в 404.
-    """
     try:
         await document_service.delete_document_by_id(project.id, document_id)
     except DocumentNotFoundError as exc:
@@ -203,12 +193,33 @@ async def get_document_content(
         document = await document_service.get_document(project.id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    # M-5: разграничиваем ошибки парсера, хранилища и неожиданные.
     try:
         parsed = await document_service.get_document_content(document)
-    except Exception as exc:
+    except DocumentParseError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Не удалось распарсить документ: {exc}",
+        ) from exc
+    except OSError as exc:
+        # OSError / IOError сигнализируют об ошибке MinIO-адаптера (сеть, таймаут).
+        logger.error(
+            "Storage error while fetching document content",
+            extra={"document_id": str(document_id)},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Ошибка хранилища: не удалось получить содержимое документа",
+        ) from exc
+    except Exception as exc:
+        logger.exception(
+            "Unexpected error while fetching document content",
+            extra={"document_id": str(document_id)},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Внутренняя ошибка сервера при обработке документа",
         ) from exc
     return DocumentContentResponse(
         plain_text=parsed.plain_text,
@@ -249,20 +260,9 @@ async def export_document(
     export_format: str | None = Query(
         default=None,
         alias="export_format",
-        description="Целевой формат экспорта: md, docx, txt. "
-                    "По умолчанию используется исходный формат документа.",
+        description="Целевой формат экспорта: md, docx, txt.",
     ),
 ) -> Response:
-    """Экспорт документа с применёнными правками.
-
-    ?export_format=md|docx|txt — переопределяет формат вывода.
-    Если export_format не указан, экспорт возвращается в исходном формате документа.
-    Неизвестный export_format → 400 Bad Request.
-
-    Примечание: параметр переименован из `format` (зарезервированное имя Python)
-    в `export_format`. Старые клиенты, передающие ?format=..., получат 400 —
-    обновите запросы на ?export_format=....
-    """
     target_format: DocumentFormatVO | None = None
     if export_format is not None:
         target_format = _EXPORT_FORMAT_MAP.get(export_format.lower())

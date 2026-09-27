@@ -151,13 +151,9 @@ class DocumentRepository(IDocumentRepository):
     ) -> tuple[list[dict[str, Any]], int]:
         """OPT-3: CTE + window COUNT() OVER () — 1 round-trip вместо 2.
 
-        N-1: Suggestion теперь имеет document_id — outerjoin напрямую без AnalysisJob.
-        Итог: убран промежуточный JOIN через analysis_jobs для счётчиков suggestions.
-
-        OPT-5: поиск по name использует ilike('%...%').
-        Для ускорения применить GIN-индекс (pg_trgm):
-          CREATE EXTENSION IF NOT EXISTS pg_trgm;
-          CREATE INDEX ix_documents_name_trgm ON documents USING gin (name gin_trgm_ops);
+        M-1: маппинг результата выполняется по явному label "doc",
+        а не по хрупкому строковому ключу "Document" (имя ORM-класса
+        может измениться в новых версиях SA).
         """
         from app.infrastructure.db.models.document import Document as M
         from app.infrastructure.db.models.enums import SuggestionStatus
@@ -184,9 +180,11 @@ class DocumentRepository(IDocumentRepository):
             .label("suggestions_rejected")
         )
 
+        # M-1: явный label "doc" вместо хрупкого "Document"
         base_q = (
             select(
-                M,
+                M.id.label("doc_id"),
+                M.label("doc"),
                 P.name.label("project_name"),
                 suggestions_total,
                 suggestions_pending,
@@ -224,7 +222,7 @@ class DocumentRepository(IDocumentRepository):
             .order_by(
                 getattr(cte.c, sort_by).asc() if sort_dir == "asc"
                 else getattr(cte.c, sort_by).desc(),
-                cte.c.id.desc(),
+                cte.c.doc_id.desc(),
             )
             .limit(limit)
             .offset(offset)
@@ -237,10 +235,9 @@ class DocumentRepository(IDocumentRepository):
             return [], 0
 
         total: int = rows[0]._mapping["_total"]
-        doc_col_name = "Document"
         items: list[dict[str, Any]] = [
             {
-                "document": row._mapping.get(doc_col_name) or row._mapping.get("document"),
+                "document": row._mapping["doc"],
                 "project_name": row._mapping["project_name"],
                 "suggestions_total": row._mapping["suggestions_total"],
                 "suggestions_pending": row._mapping["suggestions_pending"],

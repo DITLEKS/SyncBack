@@ -26,9 +26,25 @@ from app.core.config import get_settings
 from app.core.correlation_middleware import CorrelationIdMiddleware
 from app.core.limiter import limiter
 from app.core.logging_setup import configure_logging
-from app.domain.exceptions import DomainError
+from app.domain.exceptions import (
+    AnalysisJobNotFoundError,
+    DomainError,
+    DocumentNotFoundError,
+    ProjectNotFoundError,
+    SourceNotFoundError,
+    SuggestionNotFoundError,
+)
 
 logger = logging.getLogger("syncscribe.main")
+
+# M-2: NotFound-исключения, которые должны возвращать 404 (не 400).
+_NOT_FOUND_EXCEPTIONS = (
+    DocumentNotFoundError,
+    ProjectNotFoundError,
+    SourceNotFoundError,
+    SuggestionNotFoundError,
+    AnalysisJobNotFoundError,
+)
 
 
 @asynccontextmanager
@@ -64,9 +80,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # M-block: подключаем slowapi limiter.
-    # Должно быть до регистрации роутеров, чтобы exception handler
-    # перехватывал RateLimitExceeded раньше дефолтного 500-обработчика.
+    # slowapi limiter — до регистрации роутеров.
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -82,6 +96,17 @@ def create_app() -> FastAPI:
 
     app.add_middleware(CorrelationIdMiddleware)
 
+    # M-2: NotFound-подклассы DomainError → 404 (должны быть ПЕРЕД общим DomainError handler).
+    @app.exception_handler(_NOT_FOUND_EXCEPTIONS[0])
+    @app.exception_handler(_NOT_FOUND_EXCEPTIONS[1])
+    @app.exception_handler(_NOT_FOUND_EXCEPTIONS[2])
+    @app.exception_handler(_NOT_FOUND_EXCEPTIONS[3])
+    @app.exception_handler(_NOT_FOUND_EXCEPTIONS[4])
+    async def not_found_error_handler(request, exc) -> JSONResponse:
+        logger.warning("Ресурс не найден", extra={"error_type": type(exc).__name__})
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    # Общий обработчик DomainError → 400 (после специфичных 404-handlers).
     @app.exception_handler(DomainError)
     async def domain_error_handler(request, exc: DomainError) -> JSONResponse:
         logger.warning("Необработанная доменная ошибка", extra={"error_type": type(exc).__name__})

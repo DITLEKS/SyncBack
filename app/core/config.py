@@ -19,10 +19,6 @@ class Settings(BaseSettings):
 
     redis_url: str
 
-    # SSE Pub/Sub channel name.
-    # В multi-instance (prod) деплое все инстансы API должны использовать
-    # один и тот же канал — тогда события от воркеров доставляются
-    # всем подключённым клиентам независимо от того, к какому инстансу они подключены.
     redis_sse_channel: str = "syncscribe:sse"
 
     minio_endpoint: str
@@ -51,10 +47,6 @@ class Settings(BaseSettings):
     log_format: Literal["json", "text"] = "json"
 
     # C-1: дефолт ["*"] убран — поле обязательно.
-    # Без явного CORS_ALLOWED_ORIGINS в окружении приложение не запустится,
-    # что исключает случайный деплой с открытым CORS в staging/production.
-    # Для локальной разработки добавьте в .env:
-    #   CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173
     cors_allowed_origins: list[str]
 
     @field_validator("cors_allowed_origins", mode="before")
@@ -64,6 +56,19 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v  # type: ignore[return-value]
+
+    # M-3: jwt_secret обязан быть не менее 32 символов.
+    # Слабый секрет (например, "secret" или пустая строка) позволяет
+    # брутфорс-подбор JWT и компрометацию всех токенов в продакшне.
+    @field_validator("jwt_secret")
+    @classmethod
+    def _validate_jwt_secret(cls, v: str) -> str:
+        if len(v) < 32:
+            raise ValueError(
+                "jwt_secret должен содержать не менее 32 символов. "
+                "Сгенерируйте надёжный секрет: python -c \"import secrets; print(secrets.token_hex(32))\""
+            )
+        return v
 
     @property
     def max_upload_size_bytes(self) -> int:
