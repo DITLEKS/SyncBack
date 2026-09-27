@@ -1,12 +1,12 @@
 """
 Дашборд / рабочее пространство.
 
-POST  GET  /dashboard            — агрегаты + статистика виджетов (единый endpoint)
-P0-#2 GET  /documents/attention  — топ-4 документа в awaiting_approval
-P0-#3 GET  /documents/recent     — 5 последних открытых
-P0-#3 POST /documents/{id}/open  — трекинг открытия документа
+GET  /me/dashboard              — агрегаты + статистика виджетов (единый endpoint)
+GET  /me/documents/attention    — топ-4 документа в awaiting_approval
+GET  /me/documents/recent       — 5 последних открытых
+POST /projects/{id}/documents/{id}/open  — трекинг открытия документа
 
-GET /dashboard/stats удалён — его данные вошли в GET /dashboard (OPT-D1).
+GET /dashboard/stats удалён — его данные вошли в GET /me/dashboard (OPT-D1).
 """
 import uuid
 
@@ -23,7 +23,7 @@ from app.domain.services.dashboard_service import DashboardService
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.user import User
 
-router = APIRouter(tags=["dashboard"])
+router = APIRouter(prefix="/me", tags=["dashboard"])
 
 
 @router.get("/dashboard", response_model=DashboardResponse)
@@ -61,6 +61,7 @@ async def get_recent_documents(
     "/projects/{project_id}/documents/{document_id}/open",
     status_code=status.HTTP_204_NO_CONTENT,
     tags=["documents"],
+    prefix="",  # этот маршрут не входит в /me — он на уровне /api/v1
 )
 async def track_document_open(
     document_id: uuid.UUID,

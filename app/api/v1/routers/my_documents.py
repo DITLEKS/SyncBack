@@ -12,7 +12,7 @@ I-1: после list_all_for_user делается один батч-запро�
   sources=[...] — список бейджей.
   Данный эндпоинт всегда возвращает sources=[...] (никогда None),
   так как батч-запрос делается всегда. None используется будущими
-  лёгкими GET /documents?include_sources=false эндпоинтами.
+  лёгкими GET /me/documents?include_sources=false эндпоинтами.
 """
 import uuid
 from collections import defaultdict
@@ -34,7 +34,7 @@ from app.domain.services.source_service import SourceService
 from app.domain.value_objects import DocumentStatusVO, PaginationParams
 from app.infrastructure.db.models.user import User
 
-router = APIRouter(prefix="/documents", tags=["my-documents"])
+router = APIRouter(prefix="/me/documents", tags=["my-documents"])
 
 
 @router.get("", response_model=DocumentListPage)

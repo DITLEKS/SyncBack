@@ -2,7 +2,7 @@
 SSE-роутер — real-time обновления статусов документов без WebSocket
 и без перезагрузки страницы.
 
-GET /api/v1/events/documents
+GET /api/v1/me/events/documents
   Фронт подключается как EventSource и получает события:
 
   - document_status_changed   {document_id, status, pending_suggestions}
@@ -46,7 +46,7 @@ from app.infrastructure.db.models.user import User
 
 logger = logging.getLogger("syncscribe.api.sse")
 
-router = APIRouter(prefix="/events", tags=["sse"])
+router = APIRouter(prefix="/me/events", tags=["sse"])
 
 PING_INTERVAL = 25  # секунд между keepalive-пингами
 DOCUMENT_IDS_MAX = 50  # максимум ID в фильтре

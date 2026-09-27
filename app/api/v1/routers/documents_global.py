@@ -1,7 +1,7 @@
 """
 P0-#6: Загрузка документа с выбором проекта из «Мои документы».
 
-POST /documents — multipart upload с обязательным полем project_id.
+POST /me/documents — multipart upload с обязательным полем project_id.
 Это дополнение к POST /projects/{project_id}/documents (для загрузки
 из контекста конкретного проекта). Здесь пользователь выбирает проект
 из выпадающего списка на экране «Мои документы».
@@ -28,7 +28,7 @@ from app.domain.services.document_service import DocumentService
 from app.domain.services.project_service import ProjectService
 from app.infrastructure.db.models.user import User
 
-router = APIRouter(prefix="/documents", tags=["my-documents"])
+router = APIRouter(prefix="/me/documents", tags=["my-documents"])
 
 
 @router.post("", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
