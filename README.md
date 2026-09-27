@@ -186,7 +186,7 @@ PUT    /projects/{project_id}/documents/{document_id}/suggestions/review       (
 POST   /projects/{project_id}/documents/{document_id}/suggestions/{suggestion_id}/reset
 
 GET    /projects/{project_id}/documents/{document_id}/editor                   (агрегат редактора; ?suggestions_limit=&suggestions_offset=)
-POST   /projects/{project_id}/documents/{document_id}/editor/reset             (сброс анализа → AWAITING_APPROVAL)
+POST   /projects/{project_id}/documents/{document_id}/editor/reset             (сброс анализа → AWAITING_APPROVAL; 200 + ResetResponse)
 
 GET    /events/documents                                           (SSE: real-time статусы; ?document_ids=uuid1,uuid2,..., макс 50)
 
@@ -217,12 +217,31 @@ GET    /health                                                      (без пр
 - Тело (опционально): `{"document_ids": ["uuid1", "uuid2"]}`. Без тела или при `document_ids=null` — запускает анализ для всех analyzable документов проекта.
 - `201 Created` если `started > 0`; `200 OK` если все пропущены.
 
-**Editor aggregate** (`GET /editor`): возвращает мета-данные документа, контент, original_content (для статусов AWAITING_APPROVAL / READY), пагинированные правки, счётчики и объект `permissions`:
-- `can_analyze` — доступно из `draft`, `ready`, `error`, `cancelled` (повторный запуск после сбоя/отмены).
+**Editor aggregate** (`GET /editor`): возвращает мета-данные документа, контент, `original_content` (для статусов `awaiting_approval` / `ready`), пагинированные правки, счётчики и объект `permissions`.
+
+Query-параметры пагинации правок:
+- `suggestions_limit` (default=50, max=200) — размер страницы;
+- `suggestions_offset` (default=0) — смещение.
+
+Поле `suggestions_total` в ответе — полный счётчик правок документа (для пагинатора фронта). Счётчики `pending`/`accepted`/`rejected` вычисляются O(1) агрегатным SQL-запросом, не O(n) проходом по текущей странице.
+
+Поля `permissions`:
+- `can_analyze` — доступно из `draft`, `ready`, `error`, `cancelled` (**повторный запуск после сбоя/отмены без ручного сброса статуса**).
 - `can_review` — только `awaiting_approval`.
 - `can_export` — только `ready`.
 - `can_delete` — всё кроме `in_progress`.
-- `sources_is_editable` — недоступно только при `in_progress` и `awaiting_approval`.
+- `sources_is_editable` — недоступно только при `in_progress` и `awaiting_approval`. Статусы `error` и `cancelled` трактуются как редактируемые (анализ не запущен, источники менять разрешено — аналогично `draft`).
+- `view_mode` — режим отображения контента: `original` (draft/in_progress/error/cancelled), `suggested` (awaiting_approval), `clean` (ready).
+
+**POST /editor/reset** — сброс анализа документа обратно в `awaiting_approval`. Возвращает `200 OK` с телом `ResetResponse`:
+```json
+{
+  "document_status": "awaiting_approval",
+  "review_version": 3,
+  "suggestions_reset_count": 12
+}
+```
+Фронт обновляет стор без дополнительного `GET /editor`.
 
 **OpenAPI-схема**: `response_model` для list-эндпоинтов указывает на конкретный алиас `PageSuggestionResponse = Page[SuggestionResponse]`, разрешённый при определении класса — FastAPI корректно строит схему без runtime-introspection generic alias.
 
@@ -233,9 +252,9 @@ GET    /health                                                      (без пр
 - После загрузки — `draft`.
 - После успешной постановки задачи в Celery — `in_progress`.
 - Успешный анализ с правками — `awaiting_approval`; без правок — `ready`.
-- Ошибка — `error`; отмена — `cancelled`. Оба статуса позволяют **повторный запуск анализа** (как `draft`).
+- Ошибка — `error`; отмена — `cancelled`. **Оба статуса позволяют повторный запуск анализа** (`can_analyze=true`) без ручного сброса статуса через БД — поведение аналогично `draft`.
 - Из `awaiting_approval` в `ready` — только через `PUT /suggestions/review` с `finalize=true` или `PATCH /suggestions` при отсутствии `pending`-правок.
-- Из `awaiting_approval` / `ready` — откат через `POST /editor/reset` (возвращает в `awaiting_approval`).
+- Из `awaiting_approval` / `ready` — откат через `POST /editor/reset` (возвращает в `awaiting_approval`, сбрасывает правки, инкрементирует `review_version`).
 
 Для одного документа разрешена только одна активная задача (`pending` или `processing`). Ограничение обеспечено сервисом и частичным уникальным индексом PostgreSQL.
 
