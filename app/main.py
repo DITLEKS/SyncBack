@@ -7,16 +7,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.v1.routers.analysis_jobs import router as analysis_jobs_router
-from app.api.v1.routers.analysis_jobs_bulk import router as analysis_jobs_bulk_router  # P0-#5
+from app.api.v1.routers.analysis_jobs_bulk import router as analysis_jobs_bulk_router
 from app.api.v1.routers.auth import router as auth_router
-from app.api.v1.routers.dashboard import router as dashboard_router  # P0-#1-3
+from app.api.v1.routers.dashboard import router as dashboard_router
 from app.api.v1.routers.documents import router as documents_router
-from app.api.v1.routers.documents_global import router as documents_global_router  # P0-#6
-from app.api.v1.routers.editor import router as editor_router  # P0-8
+from app.api.v1.routers.documents_global import router as documents_global_router
+from app.api.v1.routers.editor import router as editor_router
 from app.api.v1.routers.my_documents import router as my_documents_router
 from app.api.v1.routers.projects import router as projects_router
 from app.api.v1.routers.sources import router as sources_router
-from app.api.v1.routers.sse import init_sse_broker
+from app.api.v1.routers.sse import init_sse_broker, shutdown_sse_broker
 from app.api.v1.routers.sse import router as sse_router
 from app.api.v1.routers.suggestions import router as suggestions_router
 from app.api.v1.routers.system import router as system_router
@@ -36,11 +36,22 @@ async def lifespan(app: FastAPI):
         "Запуск SyncScribe backend",
         extra={"env": settings.env, "llm_provider": settings.llm_provider},
     )
-    # Инициализируем SSE-брокер при старте приложения
-    init_sse_broker()
-    logger.info("SSE broker инициализирован")
-    yield
-    logger.info("Остановка SyncScribe backend")
+
+    # Инициализируем SSE-брокер при старте приложения.
+    # Redis Pub/Sub (multi-instance) если redis_url задан;
+    # иначе автоматический fallback на InMemorySSEBroker (single-instance).
+    await init_sse_broker(
+        redis_url=settings.redis_url,
+        channel=settings.redis_sse_channel,
+    )
+    logger.info("SSE broker инициализирован", extra={"channel": settings.redis_sse_channel})
+
+    try:
+        yield
+    finally:
+        await shutdown_sse_broker()
+        logger.info("SSE broker остановлен")
+        logger.info("Остановка SyncScribe backend")
 
 
 def create_app() -> FastAPI:
@@ -76,16 +87,16 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(projects_router, prefix="/api/v1")
-    app.include_router(my_documents_router, prefix="/api/v1")      # P0-4 GET /documents
-    app.include_router(documents_global_router, prefix="/api/v1")  # P0-#6 POST /documents
+    app.include_router(my_documents_router, prefix="/api/v1")
+    app.include_router(documents_global_router, prefix="/api/v1")
     app.include_router(documents_router, prefix="/api/v1")
     app.include_router(sources_router, prefix="/api/v1")
     app.include_router(analysis_jobs_router, prefix="/api/v1")
-    app.include_router(analysis_jobs_bulk_router, prefix="/api/v1")  # P0-#5
+    app.include_router(analysis_jobs_bulk_router, prefix="/api/v1")
     app.include_router(suggestions_router, prefix="/api/v1")
-    app.include_router(editor_router, prefix="/api/v1")              # P0-8
-    app.include_router(dashboard_router, prefix="/api/v1")           # P0-#1-3
-    app.include_router(sse_router, prefix="/api/v1")                 # SSE real-time events
+    app.include_router(editor_router, prefix="/api/v1")
+    app.include_router(dashboard_router, prefix="/api/v1")
+    app.include_router(sse_router, prefix="/api/v1")
     app.include_router(system_router, prefix="/api/v1")
 
     return app
