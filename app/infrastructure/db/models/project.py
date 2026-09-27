@@ -1,10 +1,3 @@
-"""
-Проект — верхнеуровневая единица группировки документов и источников.
-
-ИСПРАВЛЕНО: добавлено поле description — фронтенд показывает краткое описание
-проекта под названием в списке проектов, а такого поля в модели не было.
-"""
-
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -16,7 +9,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.infrastructure.db.base import Base
 
 if TYPE_CHECKING:
-    # ИСПРАВЛЕНО (F821): импорт только для статического анализа типов.
     from app.infrastructure.db.models.document import Document
     from app.infrastructure.db.models.source import Source
     from app.infrastructure.db.models.user import User
@@ -29,9 +21,18 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     owner_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
 
     owner: Mapped["User"] = relationship(back_populates="projects")
     documents: Mapped[list["Document"]] = relationship(back_populates="project", cascade="all, delete-orphan")
