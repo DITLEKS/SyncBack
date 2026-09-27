@@ -23,6 +23,11 @@ WARN-1 (ревью): SourceBadge.type исправлен с Literal["url","file"
      Literal["url","file"]. SourceType enum (enums.py) содержит только FILE и URL
      после миграции 0018. Значение "note" никогда не возвращается из БД —
      мёртвый вариант в Literal вводил в заблуждение.
+FIX-review-7: SourceResponse.scope: str → Literal["project", "document"].
+     Фронт теперь статически знает допустимые значения scope.
+FIX-review-8: NoteCreateRequest задокументирован как internal-only.
+     type сохраняется как 'file' (MinIO), не 'note' — явно указано в docstring.
+     deprecated=True проставляется в роутере при регистрации эндпоинта.
 """
 
 import uuid
@@ -49,6 +54,13 @@ class SourceCreateRequest(BaseModel):
 class NoteCreateRequest(BaseModel):
     """Creating a text note (P2: сохраняется как .txt в MinIO).
 
+    ВНИМАНИЕ (FIX-review-8): этот запрос является internal-only.
+    Тип источника в ответе будет 'file', НЕ 'note' — SourceType enum
+    содержит только FILE и URL (миграция 0018). Если фронт ожидает
+    type='note' в ответе — он получит 'file'. Эндпоинт, использующий
+    NoteCreateRequest, должен быть помечен deprecated=True в роутере
+    и не выставляться во внешний OpenAPI.
+
     FIX-9: добавлено document_id — при scope='document' необходимо
     указать документ, к которому привязывается источник.
     """
@@ -63,7 +75,9 @@ class SourceResponse(BaseModel):
     project_id: uuid.UUID
     name: str
     type: str
-    scope: str
+    # FIX-review-7: scope: str → Literal["project", "document"].
+    # Фронт статически знает допустимые значения; Pydantic валидирует ответ.
+    scope: Literal["project", "document"]
     # FIX-3: uploaded_at удалён из модели Source в R-4 — используем created_at.
     created_at: datetime
 

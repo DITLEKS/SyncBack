@@ -11,6 +11,11 @@ R-1: добавлен AttachSourcesResponse — возвращается вме�
 I-1: DocumentListItem.sources: list[SourceBadge] — источники документа
      (document-scope) для отображения бейджей без доп-запроса.
      None = поле не было запрошено/загружено; [] = загружено, источников нет.
+FIX-review-4: DocumentListItem.created_at → uploaded_at.
+     DocumentResponse.uploaded_at — семантически «когда загружен файл».
+     DocumentListItem использовал created_at (server_default=now), что
+     расходилось с DocumentResponse и смущало фронт. ORM Document содержит
+     оба поля; меняем на uploaded_at для консистентности API.
 """
 import uuid
 from datetime import datetime
@@ -93,7 +98,9 @@ class DocumentListItem(BaseModel):
     size_bytes: int
     status: str
     current_analysis_job_id: uuid.UUID | None = None
-    created_at: datetime
+    # FIX-review-4: uploaded_at вместо created_at — консистентно с
+    # DocumentResponse.uploaded_at и семантикой «когда загружен файл».
+    uploaded_at: datetime
     updated_at: datetime
     project: DocumentListProject
     suggestions: SuggestionCounters
