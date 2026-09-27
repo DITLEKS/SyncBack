@@ -12,10 +12,14 @@
   - SQLAlchemy-модели удовлетворяют Protocol-ам структурно — никаких
     изменений в конкретных реализациях не требуется.
   - @runtime_checkable позволяет использовать isinstance() в тестах.
+
+C-4 (issue #37): добавлены decided_by и decided_at в SuggestionProtocol —
+  нужны для SuggestionResponse.model_validate(suggestion, from_attributes=True).
 """
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from app.domain.value_objects import DocumentStatusVO, SuggestionStatusVO
@@ -49,6 +53,9 @@ class SuggestionProtocol(Protocol):
     old_text: str | None
     new_text: str | None
     status: SuggestionStatusVO
+    # C-4: required by SuggestionResponse serialization
+    decided_by: uuid.UUID | None
+    decided_at: datetime | None
 
 
 @runtime_checkable

@@ -73,12 +73,14 @@ class DocumentFormatVO(StrEnum):
 
 
 class AuditActionVO(StrEnum):
-    ACCEPT      = "accept"
-    REJECT      = "reject"
-    BULK_ACCEPT = "bulk_accept"
-    FINALIZE    = "finalize"
-    REOPEN      = "reopen"
-    RESET       = "reset"   # отмена ранее принятого/отклонённого решения
+    ACCEPT          = "accept"
+    REJECT          = "reject"
+    BULK_ACCEPT     = "bulk_accept"
+    BULK_REJECT     = "bulk_reject"      # M-3 (issue #37)
+    FINALIZE        = "finalize"         # kept for backward compat
+    FINALIZE_REVIEW = "finalize_review"  # S-3 (issue #37) — used by router
+    REOPEN          = "reopen"
+    RESET           = "reset"            # отмена ранее принятого/отклонённого решения
 
 
 # ---------------------------------------------------------------------------

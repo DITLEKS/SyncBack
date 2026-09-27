@@ -1,3 +1,11 @@
+"""
+Suggestion ORM model.
+
+C-1 (issue #37): добавлены колонки decided_by (FK -> users.id, nullable)
+      и decided_at (datetime, nullable). Эти поля обнуляются при reset_status()
+      и заполняются при update_status() / bulk_accept_all / bulk_reject_all.
+      reviewed_at оставлен для обратной совместимости (старые миграции).
+"""
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -66,6 +74,14 @@ class Suggestion(Base):
     suggested_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     confidence_score: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
+    # C-1: who made the decision and when
+    decided_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # reviewed_at kept for backward compat (pre-C-1 data); new code uses decided_at.
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

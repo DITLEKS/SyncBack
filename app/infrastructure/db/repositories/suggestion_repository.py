@@ -18,10 +18,15 @@ SQLAlchemy-адаптер для Suggestion.
 - RESET: reset_status() — UPDATE WHERE status != PENDING, обнуляет
   decided_by/decided_at, возвращает обновлённый объект или None если правка
   уже PENDING.
+- C-3 (issue #37): bulk_reject_all — зеркало bulk_accept_all.
+- M-1 (issue #37): bulk_update_status scope-фильтр исправлен:
+  decisions.document_id сравнивается с M.document_id (денормализованная
+  колонка), а не с M.analysis_job_id.
 """
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Sequence
 
 from sqlalchemy import case, func, select, update
@@ -85,8 +90,9 @@ class SuggestionRepository(ISuggestionRepository):
     ) -> "tuple[list[Suggestion], int]":
         """OPT-1: один SELECT с window-функцией вместо двух запросов.
 
-        func.count().over() возвращает 0 при пустой выборке, поэтому
-        отдельный fallback-запрос для пустого результата не нужен.
+        func.count().over() вычисляется ДО применения LIMIT/OFFSET в PostgreSQL,
+        поэтому возвращает полный COUNT строк фильтрованной выборки.
+        Поведение покрыто тестом test_list_with_total_window_count.
         """
         from app.infrastructure.db.models.suggestion import Suggestion as M
         where_clauses = [M.analysis_job_id == analysis_job_id]
@@ -198,8 +204,10 @@ class SuggestionRepository(ISuggestionRepository):
     ) -> None:
         """
         Атомарный UPDATE ... WHERE status = 'pending'.
+        Raises SuggestionAlreadyDecidedError если строка не затронута.
         """
         from app.infrastructure.db.models.enums import SuggestionStatus
+        now = datetime.now(timezone.utc)
         stmt = (
             update(type(suggestion))
             .where(
@@ -208,8 +216,8 @@ class SuggestionRepository(ISuggestionRepository):
             )
             .values(
                 status=_status_to_orm(decision.status),
-                decided_by=decision.decided_by,
-                decided_at=decision.decided_at,
+                decided_by=decision.user_id,
+                decided_at=now,
             )
             .returning(type(suggestion).id)
         )
@@ -228,6 +236,10 @@ class SuggestionRepository(ISuggestionRepository):
     ) -> int:
         """
         Один UPDATE ... WHERE id IN (...) AND status = 'pending'.
+
+        M-1 (issue #37): scope-фильтр исправлен — decisions.document_id
+        сравнивается с денормализованной колонкой M.document_id, а не
+        с M.analysis_job_id (что было семантически неверно).
         """
         from app.infrastructure.db.models.enums import SuggestionStatus
         all_decisions = decisions.decisions
@@ -248,7 +260,7 @@ class SuggestionRepository(ISuggestionRepository):
         stmt = (
             update(M)
             .where(
-                M.analysis_job_id == decisions.document_id,  # document_id used as scope
+                M.document_id == decisions.document_id,  # M-1 fix: document_id scope
                 M.status == SuggestionStatus.PENDING,
                 M.id.in_(all_ids),
             )
@@ -258,11 +270,80 @@ class SuggestionRepository(ISuggestionRepository):
                     else_=_status_to_orm(SuggestionStatusVO.REJECTED),
                 ),
                 decided_by=decisions.user_id,
+                decided_at=func.now(),
             )
         )
         result = await self._session.execute(stmt)
         await self._session.flush()
         return result.rowcount
+
+    async def bulk_accept_all(
+        self,
+        analysis_job_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> "list[Suggestion]":
+        """Принять все PENDING-правки одним UPDATE, вернуть обновлённые объекты."""
+        from app.infrastructure.db.models.enums import SuggestionStatus
+        from app.infrastructure.db.models.suggestion import Suggestion as M
+        now = datetime.now(timezone.utc)
+        stmt = (
+            update(M)
+            .where(
+                M.analysis_job_id == analysis_job_id,
+                M.status == SuggestionStatus.PENDING,
+            )
+            .values(
+                status=SuggestionStatus.ACCEPTED,
+                decided_by=user_id,
+                decided_at=now,
+            )
+            .returning(M.id)
+        )
+        result = await self._session.execute(stmt)
+        updated_ids = list(result.scalars().all())
+        await self._session.flush()
+        if not updated_ids:
+            return []
+        rows = await self._session.execute(
+            select(M).where(M.id.in_(updated_ids))
+        )
+        return list(rows.scalars().all())
+
+    async def bulk_reject_all(
+        self,
+        analysis_job_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> "list[Suggestion]":
+        """C-3 (issue #37): отклонить все PENDING-правки одним UPDATE.
+
+        Зеркало bulk_accept_all — один UPDATE WHERE status=PENDING,
+        затем SELECT обновлённых объектов из identity map / БД.
+        """
+        from app.infrastructure.db.models.enums import SuggestionStatus
+        from app.infrastructure.db.models.suggestion import Suggestion as M
+        now = datetime.now(timezone.utc)
+        stmt = (
+            update(M)
+            .where(
+                M.analysis_job_id == analysis_job_id,
+                M.status == SuggestionStatus.PENDING,
+            )
+            .values(
+                status=SuggestionStatus.REJECTED,
+                decided_by=user_id,
+                decided_at=now,
+            )
+            .returning(M.id)
+        )
+        result = await self._session.execute(stmt)
+        updated_ids = list(result.scalars().all())
+        await self._session.flush()
+        if not updated_ids:
+            return []
+        rows = await self._session.execute(
+            select(M).where(M.id.in_(updated_ids))
+        )
+        return list(rows.scalars().all())
 
     async def reset_status(
         self,
@@ -295,6 +376,5 @@ class SuggestionRepository(ISuggestionRepository):
         await self._session.flush()
         if updated_id is None:
             return None
-        # Обновляем объект в identity map сессии
         await self._session.refresh(suggestion)
         return suggestion

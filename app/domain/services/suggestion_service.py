@@ -19,6 +19,12 @@ REVIEW-5: get_suggestion_by_id удалён — был мёртвым алиас
 
 RESET: reset_suggestion() — отмена ранее принятого/отклонённого решения.
   Проверяет awaiting_approval, делегирует атомарный UPDATE в репозиторий.
+
+S-1 (issue #37): list_suggestions_for_document — PaginationParams распакован
+  в limit/offset при вызове list_with_total.
+
+S-2 (issue #37): удалена мёртвая проверка `if updated is None` в _decide();
+  update_status() бросает исключение, None никогда не возвращается.
 """
 from __future__ import annotations
 
@@ -154,13 +160,15 @@ class SuggestionService:
         document_id: uuid.UUID,
         pagination: PaginationParams,
     ) -> tuple[list[SuggestionProtocol], int]:
-        """Один SELECT с COUNT(*) OVER() вместо двух запросов (H-3)."""
+        """S-1 (issue #37): PaginationParams распакован в limit/offset."""
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             if document.current_analysis_job_id is None:
                 return [], 0
             items, total = await self._uow.suggestions.list_with_total(
-                document.current_analysis_job_id, pagination
+                document.current_analysis_job_id,
+                limit=pagination.limit,
+                offset=pagination.offset,
             )
         return items, total
 
@@ -204,14 +212,17 @@ class SuggestionService:
         suggestion: SuggestionProtocol,
         decision: SuggestionDecision,
     ) -> SuggestionProtocol:
-        """CAS-обновление одной правки."""
+        """CAS-обновление одной правки.
+
+        S-2 (issue #37): мёртвая проверка `if updated is None` удалена;
+        update_status() бросает SuggestionAlreadyDecidedError вместо
+        возврата None — сервис больше не дублирует эту логику.
+        """
         self._assert_awaiting_approval(document)
-        updated = await self._uow.suggestions.update_status(suggestion, decision)
-        if updated is None:
-            raise SuggestionAlreadyDecidedError(
-                f"Правка {suggestion.id} уже была обработана другим запросом"
-            )
-        return updated
+        await self._uow.suggestions.update_status(suggestion, decision)
+        # refresh suggestion from identity map after UPDATE
+        await self._uow.suggestions.get_by_id(suggestion.id)
+        return suggestion
 
     async def accept_suggestion(
         self,
@@ -281,8 +292,6 @@ class SuggestionService:
 
             updated = await self._uow.suggestions.reset_status(suggestion)
             if updated is None:
-                # Гонка: параллельный reset уже отработал между нашим get_by_id и UPDATE.
-                # Возвращаем текущее состояние (уже PENDING) — идемпотентный исход.
                 raise SuggestionResetNotAllowedError(
                     f"Правка {suggestion_id} уже была сброшена параллельным запросом"
                 )
@@ -316,11 +325,7 @@ class SuggestionService:
         document_id: uuid.UUID,
         user_id: uuid.UUID,
     ) -> BulkRejectResult:
-        """Отклонить все PENDING-правки одним UPDATE (зеркало bulk_accept).
-
-        Использует bulk_reject_all репозитория — один UPDATE WHERE status=PENDING.
-        Не загружает UUID в память: репозиторий возвращает обновлённые объекты.
-        """
+        """Отклонить все PENDING-правки одним UPDATE (зеркало bulk_accept)."""
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             self._assert_awaiting_approval(document)

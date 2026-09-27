@@ -205,6 +205,21 @@ class ISuggestionRepository(ABC):
         user_id: uuid.UUID,
     ) -> list[SuggestionProtocol]: ...
 
+    # C-3 (issue #37): зеркало bulk_accept_all для отклонения
+    @abstractmethod
+    async def bulk_reject_all(
+        self,
+        analysis_job_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> list[SuggestionProtocol]: ...
+
+    # C-2 (issue #37): reset_status объявлен в интерфейсе
+    @abstractmethod
+    async def reset_status(
+        self,
+        suggestion: SuggestionProtocol,
+    ) -> SuggestionProtocol | None: ...
+
 
 # ---------------------------------------------------------------------------
 # AnalysisJob
