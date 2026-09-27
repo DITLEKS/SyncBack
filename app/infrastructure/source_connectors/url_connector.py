@@ -2,17 +2,17 @@
 UrlConnector — скачивает текст по HTTP(S)-ссылке.
 
 Особенности:
-  - httpx.AsyncClient с разумными таймаутами и User-Agent.
-  - Проверяет robots.txt: если страница закрыта для ботов — логирует
-    предупреждение и всё равно пробует скачать (MVP; строгий robots.txt
-    можно включить через флаг конфигурации).
+  - httpx.AsyncClient с явными таймаутами (connect=5s, read=20s).
+  - robots.txt читается в отдельном потоке через asyncio.to_thread()
+    с таймаутом 3 с, чтобы не блокировать event loop. (R-3 fix)
   - Редиректы: httpx следует автоматически (follow_redirects=True).
-  - Content-type: если text/html — парсит через BeautifulSoup (lxml/html.parser),
+  - Content-type: если text/html — парсит через BeautifulSoup,
     убирает теги и возвращает чистый текст. Иначе — декодирует как UTF-8.
-  - Лимит: 5 МБ на ответ (защита от бесконечных страниц).
+  - Лимит: 5 МБ на ответ.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import urllib.parse
 import urllib.robotparser
@@ -26,6 +26,7 @@ logger = logging.getLogger("syncscribe.connectors.url")
 _MAX_BYTES = 5 * 1024 * 1024  # 5 МБ
 _USER_AGENT = "SyncScribeBot/1.0 (+https://syncscribe.app/bot)"
 _TIMEOUT = httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0)
+_ROBOTS_TIMEOUT = 3.0  # секунды ожидания robots.txt (блокирующий вызов в потоке)
 
 
 class UrlConnector:
@@ -37,7 +38,7 @@ class UrlConnector:
             raise ValueError(f"url отсутствует для источника {source.id}")
 
         url = source.url
-        self._log_robots(url)
+        await self._check_robots_async(url)  # non-blocking (R-3 fix)
 
         async with httpx.AsyncClient(
             follow_redirects=True,
@@ -68,24 +69,34 @@ class UrlConnector:
         )
 
     # ------------------------------------------------------------------
-    # Helpers
+    # R-3 fix: robots.txt читается в потоке, не блокирует event loop
     # ------------------------------------------------------------------
 
-    def _log_robots(self, url: str) -> None:
-        """Проверяем robots.txt и логируем предупреждение (не блокируем в MVP)."""
+    async def _check_robots_async(self, url: str) -> None:
+        """Асинхронная проверка robots.txt через asyncio.to_thread() с таймаутом."""
         try:
-            parsed = urllib.parse.urlparse(url)
-            robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
-            rp = urllib.robotparser.RobotFileParser()
-            rp.set_url(robots_url)
-            rp.read()  # синхронный вызов; приемлемо для редкой операции
-            if not rp.can_fetch(_USER_AGENT, url):
-                logger.warning(
-                    "robots.txt запрещает crawl (MVP: всё равно скачиваем)",
-                    extra={"url": url},
-                )
+            await asyncio.wait_for(
+                asyncio.to_thread(self._read_robots_sync, url),
+                timeout=_ROBOTS_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.debug("robots.txt check timed out, продолжаем", extra={"url": url})
         except Exception as exc:
-            logger.debug("Не удалось прочитать robots.txt", extra={"url": url, "exc": str(exc)})
+            logger.debug("robots.txt check failed, продолжаем", extra={"url": url, "exc": str(exc)})
+
+    @staticmethod
+    def _read_robots_sync(url: str) -> None:
+        """Синхронный вызов — выполняется в отдельном потоке."""
+        parsed = urllib.parse.urlparse(url)
+        robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+        rp = urllib.robotparser.RobotFileParser()
+        rp.set_url(robots_url)
+        rp.read()
+        if not rp.can_fetch(_USER_AGENT, url):
+            logger.warning(
+                "robots.txt запрещает crawl (MVP: всё равно скачиваем)",
+                extra={"url": url},
+            )
 
     @staticmethod
     def _strip_html(raw: bytes) -> str:
@@ -96,5 +107,4 @@ class UrlConnector:
                 tag.decompose()
             return soup.get_text(separator="\n", strip=True)
         except ImportError:
-            # bs4 не установлена — возвращаем сырой текст
             return raw.decode("utf-8", errors="replace")

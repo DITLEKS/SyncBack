@@ -13,14 +13,15 @@ GET /api/v1/events/documents
 Параметр ?document_ids=uuid1,uuid2,...  — фильтр: слать только события
 по конкретным документам (опционально, макс 50 ID).
 
-Архитектура:
-  SSEBroker — синглтон с asyncio.Queue per subscriber (in-memory fan-out).
-  Публикация событий из бизнес-логики: inject SSEBroker через DI и вызывай
-  await broker.publish(SSEEvent(...)).
+Архитектура (R-1 fix):
+  По умолчанию используется RedisPubSubBroker — каждый инстанс FastAPI
+  подписывается на общий Redis-канал, поэтому события от воркеров
+  доставляются ВСЕМ подключённым клиентам независимо от того, к какому
+  инстансу они подключены.
 
-  Масштабирование: для мульти-инстанс деплоя заменить in-memory очередь
-  на Redis Pub/Sub в SSEBroker.publish() / _reader_loop() — интерфейс
-  остаётся тем же.
+  Если переменная среды REDIS_SSE_PUBSUB_CHANNEL не задана или Redis
+  недоступен при старте, автоматически активируется InMemorySSEBroker
+  (старое поведение — допустимо для single-instance деплоя).
 """
 from __future__ import annotations
 
@@ -28,8 +29,8 @@ import asyncio
 import json
 import logging
 import uuid
+from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
 from typing import AsyncIterator
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -42,6 +43,9 @@ logger = logging.getLogger("syncscribe.api.sse")
 
 router = APIRouter(prefix="/events", tags=["sse"])
 
+PING_INTERVAL = 25  # секунд между keepalive-пингами
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Event model
 # ─────────────────────────────────────────────────────────────────────────────
@@ -50,11 +54,9 @@ router = APIRouter(prefix="/events", tags=["sse"])
 @dataclass
 class SSEEvent:
     """Одно SSE-событие, отправляемое клиенту."""
-    event: str                     # тип события
+    event: str
     data: dict = field(default_factory=dict)
-    # UUID документа-субъекта (None для глобальных событий dashboard)
     document_id: uuid.UUID | None = None
-    # UUID пользователя-получателя (None = broadcast всем)
     user_id: uuid.UUID | None = None
 
     def to_sse_bytes(self) -> bytes:
@@ -64,122 +66,287 @@ class SSEEvent:
             f"data: {json.dumps(payload)}\n\n"
         ).encode()
 
+    def to_json(self) -> str:
+        """Сериализация для Redis Pub/Sub."""
+        return json.dumps({
+            "event": self.event,
+            "data": self.data,
+            "document_id": str(self.document_id) if self.document_id else None,
+            "user_id": str(self.user_id) if self.user_id else None,
+        })
+
+    @staticmethod
+    def from_json(raw: str) -> "SSEEvent":
+        d = json.loads(raw)
+        return SSEEvent(
+            event=d["event"],
+            data=d.get("data", {}),
+            document_id=uuid.UUID(d["document_id"]) if d.get("document_id") else None,
+            user_id=uuid.UUID(d["user_id"]) if d.get("user_id") else None,
+        )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Broker
+# Broker interface
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class SSEBroker:
-    """In-memory pub/sub для SSE.
+class ISSEBroker(ABC):
+    @abstractmethod
+    async def publish(self, event: SSEEvent) -> None: ...
 
-    Использование:
-        broker = get_sse_broker()          # синглтон через DI
-        await broker.publish(SSEEvent(...))  # из любого сервиса/воркера
-    """
-
-    def __init__(self) -> None:
-        # subscriber_id -> asyncio.Queue
-        self._queues: dict[str, asyncio.Queue[SSEEvent | None]] = {}
-        # subscriber_id -> (user_id, document_ids filter set)
-        self._meta: dict[str, tuple[uuid.UUID, frozenset[uuid.UUID]]] = {}
-
-    def _make_id(self) -> str:
-        return str(uuid.uuid4())
-
-    def subscribe(
+    @abstractmethod
+    async def subscribe(
         self,
         user_id: uuid.UUID,
         document_ids: frozenset[uuid.UUID],
-    ) -> tuple[str, asyncio.Queue[SSEEvent | None]]:
-        """Зарегистрировать нового подписчика. Возвращает (sub_id, queue)."""
-        sub_id = self._make_id()
-        q: asyncio.Queue[SSEEvent | None] = asyncio.Queue(maxsize=256)
+    ) -> tuple[str, asyncio.Queue]: ...
+
+    @abstractmethod
+    def unsubscribe(self, sub_id: str) -> None: ...
+
+    @abstractmethod
+    async def start(self) -> None: ...
+
+    @abstractmethod
+    async def stop(self) -> None: ...
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# In-memory broker (single-instance fallback)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class InMemorySSEBroker(ISSEBroker):
+    """In-memory pub/sub — используется только при single-instance деплое."""
+
+    def __init__(self) -> None:
+        self._queues: dict[str, asyncio.Queue[SSEEvent | None]] = {}
+        self._meta: dict[str, tuple[uuid.UUID, frozenset[uuid.UUID]]] = {}
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        for q in self._queues.values():
+            await q.put(None)
+        self._queues.clear()
+        self._meta.clear()
+
+    async def subscribe(
+        self,
+        user_id: uuid.UUID,
+        document_ids: frozenset[uuid.UUID],
+    ) -> tuple[str, asyncio.Queue]:
+        sub_id = str(uuid.uuid4())
+        q: asyncio.Queue = asyncio.Queue(maxsize=256)
         self._queues[sub_id] = q
         self._meta[sub_id] = (user_id, document_ids)
-        logger.debug("SSE subscriber +%s (user=%s)", sub_id[:8], user_id)
         return sub_id, q
 
     def unsubscribe(self, sub_id: str) -> None:
         self._queues.pop(sub_id, None)
         self._meta.pop(sub_id, None)
-        logger.debug("SSE subscriber -%s", sub_id[:8])
 
     async def publish(self, event: SSEEvent) -> None:
-        """Разослать событие всем подходящим подписчикам (non-blocking put_nowait)."""
         for sub_id, q in list(self._queues.items()):
             meta = self._meta.get(sub_id)
             if meta is None:
                 continue
             sub_user_id, filter_ids = meta
-
-            # Фильтр по пользователю
             if event.user_id is not None and event.user_id != sub_user_id:
                 continue
-
-            # Фильтр по document_ids (если подписчик задал список)
             if filter_ids and event.document_id is not None:
                 if event.document_id not in filter_ids:
                     continue
-
             try:
                 q.put_nowait(event)
             except asyncio.QueueFull:
-                # Медленный клиент — пропускаем, не блокируем остальных
-                logger.warning("SSE queue full for subscriber %s, dropping event", sub_id[:8])
+                logger.warning("SSE queue full for %s, dropping", sub_id[:8])
 
 
-# Синглтон брокера — инициализируется один раз при старте приложения
-_broker: SSEBroker | None = None
+# ─────────────────────────────────────────────────────────────────────────────
+# Redis Pub/Sub broker (multi-instance)
+# ─────────────────────────────────────────────────────────────────────────────
 
 
-def init_sse_broker() -> SSEBroker:
+class RedisPubSubBroker(ISSEBroker):
+    """Redis Pub/Sub брокер — поддерживает мульти-инстанс деплой.
+
+    Publish: любой инстанс (API или Celery-воркер) публикует событие
+    в Redis-канал через self._redis.publish().
+
+    Subscribe: каждый инстанс API поднимает один фоновый asyncio.Task,
+    который читает из Redis pubsub и раскидывает события по локальным
+    asyncio.Queue подписчиков (аналогично InMemorySSEBroker).
+    """
+
+    def __init__(self, redis_url: str, channel: str = "syncscribe:sse") -> None:
+        self._redis_url = redis_url
+        self._channel = channel
+        self._queues: dict[str, asyncio.Queue] = {}
+        self._meta: dict[str, tuple[uuid.UUID, frozenset[uuid.UUID]]] = {}
+        self._reader_task: asyncio.Task | None = None
+        self._redis = None
+        self._pubsub = None
+
+    async def start(self) -> None:
+        import redis.asyncio as aioredis
+        self._redis = aioredis.from_url(self._redis_url, decode_responses=True)
+        self._pubsub = self._redis.pubsub()
+        await self._pubsub.subscribe(self._channel)
+        self._reader_task = asyncio.create_task(self._reader_loop())
+        logger.info("RedisPubSubBroker started (channel=%s)", self._channel)
+
+    async def stop(self) -> None:
+        if self._reader_task:
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                pass
+        if self._pubsub:
+            await self._pubsub.unsubscribe(self._channel)
+            await self._pubsub.close()
+        if self._redis:
+            await self._redis.aclose()
+        for q in self._queues.values():
+            await q.put(None)
+        self._queues.clear()
+        self._meta.clear()
+
+    async def _reader_loop(self) -> None:
+        """Читаем из Redis и раскидываем по локальным очередям."""
+        try:
+            async for message in self._pubsub.listen():
+                if message["type"] != "message":
+                    continue
+                try:
+                    event = SSEEvent.from_json(message["data"])
+                except Exception as exc:
+                    logger.warning("Невалидное SSE-сообщение из Redis: %s", exc)
+                    continue
+                await self._fan_out(event)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.exception("RedisPubSubBroker reader loop crashed: %s", exc)
+
+    async def _fan_out(self, event: SSEEvent) -> None:
+        for sub_id, q in list(self._queues.items()):
+            meta = self._meta.get(sub_id)
+            if meta is None:
+                continue
+            sub_user_id, filter_ids = meta
+            if event.user_id is not None and event.user_id != sub_user_id:
+                continue
+            if filter_ids and event.document_id is not None:
+                if event.document_id not in filter_ids:
+                    continue
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                logger.warning("SSE queue full for %s, dropping", sub_id[:8])
+
+    async def subscribe(
+        self,
+        user_id: uuid.UUID,
+        document_ids: frozenset[uuid.UUID],
+    ) -> tuple[str, asyncio.Queue]:
+        sub_id = str(uuid.uuid4())
+        q: asyncio.Queue = asyncio.Queue(maxsize=256)
+        self._queues[sub_id] = q
+        self._meta[sub_id] = (user_id, document_ids)
+        return sub_id, q
+
+    def unsubscribe(self, sub_id: str) -> None:
+        self._queues.pop(sub_id, None)
+        self._meta.pop(sub_id, None)
+
+    async def publish(self, event: SSEEvent) -> None:
+        """Публикуем в Redis — все подписанные инстансы получат через _reader_loop."""
+        if self._redis is None:
+            return
+        try:
+            await self._redis.publish(self._channel, event.to_json())
+        except Exception as exc:
+            logger.warning("Redis publish failed: %s", exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Factory / singleton
+# ─────────────────────────────────────────────────────────────────────────────
+
+_broker: ISSEBroker | None = None
+
+
+async def init_sse_broker(redis_url: str | None = None, channel: str = "syncscribe:sse") -> ISSEBroker:
+    """Инициализировать брокер при старте приложения (вызывать из lifespan).
+
+    Если redis_url задан — использует RedisPubSubBroker (рекомендовано для prod).
+    Иначе — InMemorySSEBroker (только single-instance).
+    """
     global _broker
-    _broker = SSEBroker()
+    if redis_url:
+        try:
+            broker = RedisPubSubBroker(redis_url=redis_url, channel=channel)
+            await broker.start()
+            _broker = broker
+            logger.info("SSE: использует Redis Pub/Sub (%s)", channel)
+        except Exception as exc:
+            logger.warning(
+                "SSE: Redis недоступен (%s), fallback на in-memory брокер", exc
+            )
+            _broker = InMemorySSEBroker()
+    else:
+        _broker = InMemorySSEBroker()
+        logger.info("SSE: использует in-memory брокер (single-instance only)")
     return _broker
 
 
-def get_sse_broker() -> SSEBroker:
+async def shutdown_sse_broker() -> None:
+    """Вызывать из lifespan при остановке."""
+    global _broker
+    if _broker is not None:
+        await _broker.stop()
+        _broker = None
+
+
+def get_sse_broker() -> ISSEBroker:
     """FastAPI Depends / прямой вызов из сервисов."""
+    global _broker
     if _broker is None:
-        # Ленивая инициализация на случай, если lifespan ещё не отработал
-        return init_sse_broker()
+        _broker = InMemorySSEBroker()  # ленивая init
     return _broker
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SSE stream generator
+# Stream generator
 # ─────────────────────────────────────────────────────────────────────────────
-
-PING_INTERVAL = 25  # секунд между keepalive-пингами
 
 
 async def _event_stream(
     request: Request,
     user_id: uuid.UUID,
     document_ids: frozenset[uuid.UUID],
-    broker: SSEBroker,
+    broker: ISSEBroker,
 ) -> AsyncIterator[bytes]:
-    sub_id, q = broker.subscribe(user_id, document_ids)
+    sub_id, q = await broker.subscribe(user_id, document_ids)
     try:
         while True:
-            # Ждём событие или timeout для ping
             try:
                 event: SSEEvent | None = await asyncio.wait_for(
                     q.get(), timeout=PING_INTERVAL
                 )
             except asyncio.TimeoutError:
-                # keepalive ping
                 yield b"event: ping\ndata: {}\n\n"
                 continue
 
             if event is None:
-                # Сигнал завершения от брокера
                 break
 
             yield event.to_sse_bytes()
 
-            # Проверяем, что клиент ещё жив
             if await request.is_disconnected():
                 break
     finally:
@@ -196,28 +363,11 @@ async def document_events(
     request: Request,
     document_ids: str | None = Query(
         default=None,
-        description=(
-            "Опциональный фильтр: UUID документов через запятую (макс 50). "
-            "Если не указан — получаете все события своих документов."
-        ),
+        description="Опциональный фильтр: UUID через запятую (макс 50).",
     ),
     current_user: User = Depends(get_current_user),
-    broker: SSEBroker = Depends(get_sse_broker),
+    broker: ISSEBroker = Depends(get_sse_broker),
 ) -> StreamingResponse:
-    """Server-Sent Events для real-time обновлений статусов документов.
-
-    Фронт подключается как:
-        const es = new EventSource('/api/v1/events/documents', {
-            headers: { Authorization: 'Bearer <token>' }
-        });
-        es.addEventListener('document_status_changed', (e) => {
-            const { document_id, status } = JSON.parse(e.data);
-            // обновить UI без перезагрузки
-        });
-
-    Keepalive ping приходит каждые 25 секунд.
-    """
-    # Парсим опциональный фильтр document_ids
     filter_ids: frozenset[uuid.UUID] = frozenset()
     if document_ids:
         raw_ids = [s.strip() for s in document_ids.split(",") if s.strip()][:50]
@@ -226,7 +376,7 @@ async def document_events(
             try:
                 parsed.append(uuid.UUID(raw))
             except ValueError:
-                pass  # невалидные UUID просто пропускаем
+                pass
         filter_ids = frozenset(parsed)
 
     return StreamingResponse(
@@ -234,7 +384,7 @@ async def document_events(
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",   # отключить nginx-буферизацию
+            "X-Accel-Buffering": "no",
             "Connection": "keep-alive",
         },
     )
