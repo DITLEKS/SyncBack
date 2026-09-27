@@ -1,18 +1,13 @@
 """
-DashboardRepository — реальные SQL-агрегаты для GET /dashboard.
-
-CRIT-D4: класс теперь наследует IDashboardQueryService.
+DashboardRepository — SQL-агрегаты для GET /dashboard.
 
 Запросы:
-  - get_stats                 единый COUNT(*) FILTER вместо трёх отдельных (PERF-1)
-  - activity_last_7_days      GROUP BY date за последние 7 дней (из document_opens)
-  - get_attention_documents   Топ-N AWAITING_APPROVAL по pending_suggestions DESC
-                              H-4: переведён на outerjoin + COUNT FILTER (устранён N+1)
-  - get_recent_documents      5 последних открытых + счётчики правок (OPT-2: 1 запрос)
-  - upsert_open               ON CONFLICT DO UPDATE last_opened_at
-
-N-7: удалён лишний аргумент id= из pg_insert(DocumentOpen) — у модели нет
-     поля id, PK составной (user_id, document_id).
+  get_stats              — единый COUNT(*) FILTER (базовая статистика)
+  get_trends             — SELECT из dashboard_snapshots за N дней
+  upsert_snapshot        — ON CONFLICT DO UPDATE для фонового джоба
+  get_attention_documents— Топ-N AWAITING_APPROVAL по pending_suggestions DESC
+  get_recent_documents   — 5 последних открытых + счётчики правок
+  upsert_open            — ON CONFLICT DO UPDATE last_opened_at
 """
 from __future__ import annotations
 
@@ -25,6 +20,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.dashboard_query_service import IDashboardQueryService
+from app.infrastructure.db.models.dashboard_snapshot import DashboardSnapshot
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.document_open import DocumentOpen
 from app.infrastructure.db.models.enums import DocumentStatus, SuggestionStatus
@@ -36,12 +32,7 @@ class DashboardRepository(IDashboardQueryService):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    def _owned_docs_q(self, owner_id: uuid.UUID):
-        return (
-            select(Document)
-            .join(Project, Document.project_id == Project.id)
-            .where(Project.owner_id == owner_id)
-        )
+    # ── базовая статистика ──────────────────────────────────────────────────────
 
     async def get_stats(self, owner_id: uuid.UUID) -> dict:
         q = (
@@ -64,36 +55,73 @@ class DashboardRepository(IDashboardQueryService):
         row = (await self._session.execute(q)).one()
         return {"total": row.total, "awaiting": row.awaiting, "ready": row.ready}
 
-    async def get_activity_last_7_days(
-        self, owner_id: uuid.UUID
+    # ── снэпшоты / тренды ─────────────────────────────────────────────────────
+
+    async def get_trends(
+        self, owner_id: uuid.UUID, days: int = 7
     ) -> list[dict]:
-        since = datetime.now(tz=timezone.utc) - timedelta(days=6)
-        day_col = func.date_trunc("day", DocumentOpen.last_opened_at).label("day")
+        """SELECT снэпшоты за последние `days` дней (today-days+1 … today)."""
+        today = datetime.now(tz=timezone.utc).date()
+        since = today - timedelta(days=days - 1)
         q = (
-            select(day_col, func.count().label("opens"))
-            .where(
-                DocumentOpen.user_id == owner_id,
-                DocumentOpen.last_opened_at >= since,
+            select(
+                DashboardSnapshot.snapshot_date,
+                DashboardSnapshot.total_count,
+                DashboardSnapshot.awaiting_count,
+                DashboardSnapshot.relevance_percent,
             )
-            .group_by(day_col)
-            .order_by(day_col)
+            .where(
+                DashboardSnapshot.owner_id == owner_id,
+                DashboardSnapshot.snapshot_date >= since,
+            )
+            .order_by(DashboardSnapshot.snapshot_date)
         )
         rows = (await self._session.execute(q)).all()
-        result_map: dict[date, int] = {r.day.date(): r.opens for r in rows}
-        today = datetime.now(tz=timezone.utc).date()
         return [
             {
-                "date": (today - timedelta(days=i)).isoformat(),
-                "opens": result_map.get(today - timedelta(days=i), 0),
+                "snapshot_date": r.snapshot_date,
+                "total_count": r.total_count,
+                "awaiting_count": r.awaiting_count,
+                "relevance_percent": r.relevance_percent,
             }
-            for i in range(6, -1, -1)
+            for r in rows
         ]
+
+    async def upsert_snapshot(
+        self,
+        owner_id: uuid.UUID,
+        snapshot_date: date,
+        total_count: int,
+        awaiting_count: int,
+        relevance_percent: float,
+    ) -> None:
+        """ON CONFLICT (owner_id, snapshot_date) DO UPDATE."""
+        stmt = (
+            pg_insert(DashboardSnapshot)
+            .values(
+                owner_id=owner_id,
+                snapshot_date=snapshot_date,
+                total_count=total_count,
+                awaiting_count=awaiting_count,
+                relevance_percent=relevance_percent,
+            )
+            .on_conflict_do_update(
+                constraint="uq_dashboard_snapshot_owner_date",
+                set_={
+                    "total_count": total_count,
+                    "awaiting_count": awaiting_count,
+                    "relevance_percent": relevance_percent,
+                },
+            )
+        )
+        await self._session.execute(stmt)
+        await self._session.flush()
+
+    # ── внимание / последние документы ──────────────────────────────────────
 
     async def get_attention_documents(
         self, owner_id: uuid.UUID, limit: int = 4
     ) -> list[dict]:
-        # H-4: заменён scalar_subquery (N+1 коррелированных запросов) на
-        # outerjoin + COUNT FILTER — один запрос как в get_recent_documents.
         q = (
             select(
                 Document.id,
@@ -113,16 +141,14 @@ class DashboardRepository(IDashboardQueryService):
                 Document.status == DocumentStatus.AWAITING_APPROVAL,
             )
             .group_by(
-                Document.id,
-                Document.name,
-                Document.project_id,
-                Document.status,
-                Document.uploaded_at,
-                Project.name,
+                Document.id, Document.name, Document.project_id,
+                Document.status, Document.uploaded_at, Project.name,
             )
-            .order_by(func.count(Suggestion.id).filter(
-                Suggestion.status == SuggestionStatus.PENDING
-            ).desc())
+            .order_by(
+                func.count(Suggestion.id).filter(
+                    Suggestion.status == SuggestionStatus.PENDING
+                ).desc()
+            )
             .limit(limit)
         )
         rows = (await self._session.execute(q)).all()
@@ -163,12 +189,8 @@ class DashboardRepository(IDashboardQueryService):
             .outerjoin(Suggestion, Suggestion.document_id == Document.id)
             .where(DocumentOpen.user_id == user_id)
             .group_by(
-                Document.id,
-                Document.name,
-                Document.project_id,
-                Project.name,
-                Document.status,
-                DocumentOpen.last_opened_at,
+                Document.id, Document.name, Document.project_id,
+                Project.name, Document.status, DocumentOpen.last_opened_at,
             )
             .order_by(DocumentOpen.last_opened_at.desc())
             .limit(limit)
@@ -192,11 +214,7 @@ class DashboardRepository(IDashboardQueryService):
         now = datetime.now(tz=timezone.utc)
         stmt = (
             pg_insert(DocumentOpen)
-            .values(
-                user_id=user_id,
-                document_id=document_id,
-                last_opened_at=now,
-            )
+            .values(user_id=user_id, document_id=document_id, last_opened_at=now)
             .on_conflict_do_update(
                 constraint="uq_document_opens_user_document",
                 set_={"last_opened_at": now},

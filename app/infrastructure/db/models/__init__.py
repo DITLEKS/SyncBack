@@ -1,25 +1,21 @@
 """
-Импортируем все ORM-модели в одном месте, чтобы Base.metadata знала обо всех таблицах.
+Регистрация ORM-моделей — импортируется в alembic/env.py и app.core.dependencies
+для того, чтобы Base.metadata содержала все таблицы.
 """
-
-from app.infrastructure.db.models.analysis_job import AnalysisJob
-from app.infrastructure.db.models.audit_log import AuditLog
-from app.infrastructure.db.models.document import Document
-from app.infrastructure.db.models.document_open import DocumentOpen
-from app.infrastructure.db.models.document_source import document_sources
-from app.infrastructure.db.models.project import Project
-from app.infrastructure.db.models.source import Source
-from app.infrastructure.db.models.suggestion import Suggestion
-from app.infrastructure.db.models.user import User
-
-__all__ = [
-    "AnalysisJob",
-    "AuditLog",
-    "Document",
-    "DocumentOpen",
-    "document_sources",
-    "Project",
-    "Source",
-    "Suggestion",
-    "User",
-]
+from app.infrastructure.db.models.analysis_job import AnalysisJob  # noqa: F401
+from app.infrastructure.db.models.audit_log import AuditLog  # noqa: F401
+from app.infrastructure.db.models.dashboard_snapshot import DashboardSnapshot  # noqa: F401
+from app.infrastructure.db.models.document import Document  # noqa: F401
+from app.infrastructure.db.models.document_block import DocumentBlock  # noqa: F401
+from app.infrastructure.db.models.document_open import DocumentOpen  # noqa: F401
+from app.infrastructure.db.models.document_source import DocumentSource  # noqa: F401
+from app.infrastructure.db.models.enums import (  # noqa: F401
+    AnalysisJobStatus,
+    DocumentStatus,
+    SourceScope,
+    SuggestionStatus,
+)
+from app.infrastructure.db.models.project import Project  # noqa: F401
+from app.infrastructure.db.models.source import Source  # noqa: F401
+from app.infrastructure.db.models.suggestion import Suggestion  # noqa: F401
+from app.infrastructure.db.models.user import User  # noqa: F401

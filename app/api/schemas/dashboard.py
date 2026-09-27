@@ -1,7 +1,7 @@
 """
 Схемы для дашборда (рабочее пространство).
 
-GET /dashboard           — агрегаты рабочего пространства
+GET /dashboard           — агрегаты + тренды виджетов
 GET /documents/attention — топ-4 документа в awaiting_approval
 GET /documents/recent    — 5 последних открытых
 """
@@ -13,25 +13,38 @@ from pydantic import BaseModel
 
 # ── GET /dashboard ──────────────────────────────────────────────────────────────────
 
-class DayActivity(BaseModel):
-    date: str   # ISO 8601 date, например "2026-09-14"
-    opens: int  # кол-во уникальных открытий документов за день
+class TrendPoint(BaseModel):
+    """[дата, значение] для sparkline-графика."""
+    date: str    # ISO 8601, например "2026-09-27"
+    value: float
 
 
 class DashboardResponse(BaseModel):
-    """Агрегаты экрана «Рабочее пространство».
+    """Агрегаты + sparkline-тренды экрана «Рабочее пространство».
 
-    Соответствует виджетам UI:
-      - Документов всего  → total_documents
-      - Ожидают проверки → awaiting_approval_count
-      - Актуальность базы → relevance_percent (ready / total × 100)
-      - Мини-график активности → activity_last_7_days
+    Текущее состояние (виджеты):
+      total_documents         — документов всего
+      awaiting_approval_count — ожидают проверки
+      relevance_percent       — актуальность базы (ready / total × 100)
+
+    Sparkline-тренды за 7 дней ([дата, значение]):
+      total_trend     — общее кол-во документов на конец каждого дня
+      awaiting_trend  — кол-во документов awaiting_approval в моменте
+      relevance_trend — актуальность базы (%)
+
+    Значения берутся из dashboard_snapshots; дни без снэпшота
+    заполняются текущим значением.
     """
+    # — текущее состояние
     total_documents: int
     awaiting_approval_count: int
     ready_count: int
     relevance_percent: float
-    activity_last_7_days: list[DayActivity]
+
+    # — sparkline-тренды
+    total_trend: list[TrendPoint]
+    awaiting_trend: list[TrendPoint]
+    relevance_trend: list[TrendPoint]
 
 
 # ── GET /documents/attention ──────────────────────────────────────────────────────

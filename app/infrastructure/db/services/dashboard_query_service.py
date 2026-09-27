@@ -1,22 +1,13 @@
 """
-SqlAlchemyDashboardQueryService — инфраструктурная реализация IDashboardQueryService.
+SqlAlchemyDashboardQueryService — инфраструктурная реализация
+IDashboardQueryService. Делегирует все вызовы DashboardRepository.
 
-L-C: вынесено из IUnitOfWork. Инжектируется через FastAPI Depends:
-
-    from app.infrastructure.db.services.dashboard_query_service import (
-        SqlAlchemyDashboardQueryService,
-    )
-
-    async def get_dashboard_query_service(
-        session: AsyncSession = Depends(get_db),
-    ) -> IDashboardQueryService:
-        return SqlAlchemyDashboardQueryService(session)
-
-Данный модуль не импортирует IUnitOfWork и не вызывает commit()/rollback().
+L-C: не импортирует IUnitOfWork и не вызывает commit()/rollback().
 """
 from __future__ import annotations
 
 import uuid
+from datetime import date
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,16 +16,26 @@ from app.infrastructure.db.repositories.dashboard_repository import DashboardRep
 
 
 class SqlAlchemyDashboardQueryService(IDashboardQueryService):
-    """Делегирует все вызовы DashboardRepository, скрывая его от внешнего мира."""
-
     def __init__(self, session: AsyncSession) -> None:
         self._repo = DashboardRepository(session)
 
     async def get_stats(self, owner_id: uuid.UUID) -> dict:
         return await self._repo.get_stats(owner_id)
 
-    async def get_activity_last_7_days(self, owner_id: uuid.UUID) -> list[dict]:
-        return await self._repo.get_activity_last_7_days(owner_id)
+    async def get_trends(self, owner_id: uuid.UUID, days: int = 7) -> list[dict]:
+        return await self._repo.get_trends(owner_id, days)
+
+    async def upsert_snapshot(
+        self,
+        owner_id: uuid.UUID,
+        snapshot_date: date,
+        total_count: int,
+        awaiting_count: int,
+        relevance_percent: float,
+    ) -> None:
+        await self._repo.upsert_snapshot(
+            owner_id, snapshot_date, total_count, awaiting_count, relevance_percent
+        )
 
     async def get_attention_documents(
         self, owner_id: uuid.UUID, limit: int = 4

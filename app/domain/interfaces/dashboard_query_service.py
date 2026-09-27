@@ -2,50 +2,54 @@
 IDashboardQueryService — порт read-model для дашборда.
 
 L-C: DashboardRepository — это query-модель, а не агрегатный репозиторий.
-Unit of Work управляет агрегатами и транзакциями; read-model'и инжектируются
-напрямую через FastAPI Depends, минуя IUnitOfWork.
-
-Использование в роутере:
-    async def get_dashboard(
-        dashboard_svc: IDashboardQueryService = Depends(get_dashboard_query_service),
-    ) -> ...
+Unit of Work управляет агрегатами; read-model’ы инжектируются
+напрямую через FastAPI Depends.
 """
 from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
+from datetime import date
 
 
 class IDashboardQueryService(ABC):
-    """Абстрактный read-model сервис дашборда.
-
-    Все методы read-only (SELECT); транзакция не нужна.
-    Реализация: SqlAlchemyDashboardQueryService.
-    """
+    """Read-only агрегаты дашборда. Реализация: SqlAlchemyDashboardQueryService."""
 
     @abstractmethod
     async def get_stats(self, owner_id: uuid.UUID) -> dict:
-        """Агрегатная статистика документов пользователя: {total, awaiting, ready}."""
+        """Агрегатная статистика: {total, awaiting, ready}."""
 
     @abstractmethod
-    async def get_extended_stats(self, owner_id: uuid.UUID) -> dict:
-        """Расширенная статистика для виджетов.
+    async def get_trends(
+        self, owner_id: uuid.UUID, days: int = 7
+    ) -> list[dict]:
+        """Снэпшоты за `days` дней из dashboard_snapshots.
 
-        Возвращает dict с ключами:
-          draft, in_progress, awaiting_approval, ready, failed,
-          total_suggestions, accepted_count, rejected_count.
-        Оценка saved_hours вычисляется в DashboardService.
+        Возвращает отсортированный по дате список:
+          [{snapshot_date, total_count, awaiting_count, relevance_percent}]
+        Дни без снэпшота в список не включаются —
+        сервис заполняет их текущим значением.
         """
 
     @abstractmethod
-    async def get_activity_last_7_days(self, owner_id: uuid.UUID) -> list[dict]:
-        """Активность за 7 дней: [{date: str, opens: int}]."""
+    async def upsert_snapshot(
+        self,
+        owner_id: uuid.UUID,
+        snapshot_date: date,
+        total_count: int,
+        awaiting_count: int,
+        relevance_percent: float,
+    ) -> None:
+        """Сохранить снэпшот за день (ON CONFLICT DO UPDATE).
+
+        Вызывается фоновым джобом.
+        """
 
     @abstractmethod
     async def get_attention_documents(
         self, owner_id: uuid.UUID, limit: int = 4
     ) -> list[dict]:
-        """Топ-N документов AWAITING_APPROVAL, отсортированных по pending_suggestions DESC."""
+        """Топ-N документов AWAITING_APPROVAL по pending_suggestions DESC."""
 
     @abstractmethod
     async def get_recent_documents(
