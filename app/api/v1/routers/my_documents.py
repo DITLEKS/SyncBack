@@ -5,7 +5,17 @@ I-1: после list_all_for_user делается один батч-запро�
   list_sources_for_documents() и результат раскладывается
   в DocumentListItem.sources: list[SourceBadge].
   Фронт получает бейджи источников без доп-запросов.
+
+Контракт sources в DocumentListItem:
+  sources=None  — поле не запрашивалось (лёгкий листинг без источников).
+  sources=[]    — запрашивалось, источников нет.
+  sources=[...] — список бейджей.
+  Данный эндпоинт всегда возвращает sources=[...] (никогда None),
+  так как батч-запрос делается всегда. None используется будущими
+  лёгкими GET /documents?include_sources=false эндпоинтами.
 """
+import uuid
+from collections import defaultdict
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
@@ -55,6 +65,12 @@ async def list_my_documents(
     document_service: DocumentService = Depends(get_document_service),
     source_service: SourceService = Depends(get_source_service),
 ) -> DocumentListPage:
+    """Список всех документов текущего пользователя.
+
+    I-1: DocumentListItem.sources заполняется через батч-запрос
+    list_sources_for_documents. Возвращает sources=[...] (никогда None).
+    См. контракт sources в docstring модуля.
+    """
     pagination = PaginationParams(limit=limit, offset=offset)
     rows, total = await document_service.list_all_for_user(
         current_user.id,
@@ -67,22 +83,14 @@ async def list_my_documents(
     )
 
     # I-1: один батч-запрос для всех document-scope источников.
-    # Группировка по project_id не нужна — документы пользователя могут
-    # принадлежать разным проектам, поэтому запрашиваем по document_ids напрямую.
-    # list_sources_for_documents принимает project_id для scope-изоляции;
-    # здесь используем project_id из каждого документа отдельно.
-    # Для простоты делаем один запрос без project_id фильтра через
-    # get_sources_by_document_ids_no_project (будущий рефактор если понадобится).
-    # Пока — группируем по project_id и делаем N запросов по проектам.
-    from collections import defaultdict
-    import uuid
-
-    # Группируем документы по project_id
+    # Документы пользователя могут принадлежать разным проектам — группируем
+    # по project_id и делаем N запросов (обычно 1 для большинства пользователей).
+    # Будущий рефактор: если понадобится единый запрос без группировки —
+    # добавить list_by_document_ids_no_project в репозиторий.
     by_project: dict[uuid.UUID, list] = defaultdict(list)
     for row in rows:
         by_project[row["document"].project_id].append(row["document"])
 
-    # Батч-запрос per project (обычно 1 проект для большинства пользователей)
     sources_by_doc: dict[uuid.UUID, list] = {}
     for project_id, docs in by_project.items():
         doc_ids = [d.id for d in docs]
@@ -109,12 +117,13 @@ async def list_my_documents(
                 accepted=row["suggestions_accepted"],
                 rejected=row["suggestions_rejected"],
             ),
-            # I-1: бейджи источников документа
+            # I-1: бейджи источников документа; никогда не None (батч всегда выполняется).
+            # [] — если у документа нет привязанных document-scope источников.
             sources=[
                 SourceBadge(
                     id=s.id,
                     name=s.name,
-                    type=s.type.value if hasattr(s.type, "value") else s.type,
+                    type=s.type,  # field_validator normalises enum → str
                 )
                 for s in sources_by_doc.get(row["document"].id, [])
             ],

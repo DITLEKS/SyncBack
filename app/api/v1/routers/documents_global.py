@@ -5,6 +5,10 @@ POST /documents — multipart upload с обязательным полем proj
 Это дополнение к POST /projects/{project_id}/documents (для загрузки
 из контекста конкретного проекта). Здесь пользователь выбирает проект
 из выпадающего списка на экране «Мои документы».
+
+NOTE: этот роутер только POST (upload) и возвращает DocumentResponse,
+а не DocumentListItem. sources=None здесь не актуален — свежезагруженный
+документ ещё не имеет источников.
 """
 import uuid
 

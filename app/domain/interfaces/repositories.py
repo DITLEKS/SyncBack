@@ -10,18 +10,33 @@ FIX-1: ISourceRepository.list_by_document_ids возвращает
   колонке Source.document_id (связь через M2M document_sources).
 FIX-B1: удалён @abstractmethod delete(source_id) — метод никогда не был
   реализован в SourceRepository (единственный рабочий путь — delete_if_owned).
-  Наличие нереализованного abstractmethod приводило к TypeError при
-  инстанцировании SourceRepository.
+FIX-2 (ревью): IDocumentRepository.list_all_for_user сигнатура обновлена под
+  реальный возвращаемый тип: list[DocumentRow] — дикты с агрегатами.
+  DocumentRow — TypedDict с явным контрактом ключей (document, project_name, suggestions_*).
 """
 from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models.document import Document
     from app.infrastructure.db.models.source import Source
+
+
+class DocumentRow(TypedDict):
+    """FIX-2: контракт строки результата list_all_for_user.
+
+    Каждый dict в списке содержит объект Document + агрегаты
+    из SQL-запроса (LEFT JOIN на projects и COUNT правок).
+    """
+    document: "Document"
+    project_name: str
+    suggestions_total: int
+    suggestions_pending: int
+    suggestions_accepted: int
+    suggestions_rejected: int
 
 
 class IDocumentRepository(ABC):
@@ -30,8 +45,17 @@ class IDocumentRepository(ABC):
 
     @abstractmethod
     async def list_all_for_user(
-        self, user_id: uuid.UUID, limit: int, offset: int
-    ) -> "list[Document]": ...
+        self,
+        user_id: uuid.UUID,
+        limit: int,
+        offset: int,
+    ) -> "list[DocumentRow]":
+        """FIX-2: возвращает list[DocumentRow] (агрегированные дикты),
+        а не list[Document] (старый контракт).
+        Содержит данные для построения DocumentListItem: project_name,
+        suggestions_total/pending/accepted/rejected.
+        """
+        ...
 
     @abstractmethod
     async def count_for_user(self, user_id: uuid.UUID) -> int: ...
