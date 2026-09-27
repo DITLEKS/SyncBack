@@ -1,11 +1,10 @@
 """
 Схемы правок (suggestions).
 
-P0-#13: BulkAcceptResponse расширен полями document_status и review_version,
-        чтобы фронт не делал лишний GET /editor после bulk-accept.
 RESET:  SuggestionResponse расширен nullable-полями decided_by / decided_at —
         после reset оба поля равны null, что сигнализирует фронту о сбросе.
 PATCH:  PatchSuggestionsRequest/Response — единый bulk/single update статуса правок.
+        Заменяет удалённые BulkAcceptResponse / BulkRejectResponse и RPC-суффиксы.
 """
 import uuid
 from datetime import datetime
@@ -28,19 +27,6 @@ class SuggestionResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
-
-
-class BulkAcceptResponse(BaseModel):
-    accepted_count: int
-    # P0-#13: статус документа после bulk-accept + актуальная версия ревью.
-    document_status: str | None = None
-    review_version: int | None = None
-
-
-class BulkRejectResponse(BaseModel):
-    rejected_count: int
-    document_status: str | None = None
-    review_version: int | None = None
 
 
 # ---------------------------------------------------------------------------
