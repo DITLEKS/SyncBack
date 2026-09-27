@@ -44,6 +44,9 @@ celery_app.conf.update(
     accept_content=["json"],
     task_track_started=True,
     task_acks_late=True,
+    # H-4: при падении воркера незавершённая задача возвращается в очередь,
+    # а не теряется. Работает в паре с task_acks_late=True.
+    task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,
     result_expires=86400,
 )
