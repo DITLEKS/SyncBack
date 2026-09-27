@@ -9,6 +9,13 @@ GET /projects/{project_id}/documents/{document_id}/editor
      опрашивать за исходным текстом.
   #8 — добавлен sources_is_editable: bool в EditorPermissions —
      фронт видит режим read-only для блока источников без повторного запроса.
+
+API-1: добавлено поле suggestions_total в EditorAggregateResponse —
+     общее число правок документа (не зависит от текущей страницы).
+     counters.total = len(suggestions на странице); suggestions_total = полный итог.
+
+API-5: добавлена схема ResetResponse — возвращается вместо 204 после POST /editor/reset,
+     чтобы фронт обновил стор без дополнительного GET /editor.
 """
 from __future__ import annotations
 
@@ -30,7 +37,7 @@ EditorViewMode = Literal["original", "suggested", "clean"]
 
 
 class EditorDocumentMeta(BaseModel):
-    """Mетаданные документа для редактора."""
+    """Метаданные документа для редактора."""
 
     id: uuid.UUID
     title: str
@@ -48,7 +55,7 @@ class EditorDocumentMeta(BaseModel):
 
 
 class EditorContent(BaseModel):
-    """Kонтент документа: plain_text + позиции секций."""
+    """Контент документа: plain_text + позиции секций."""
 
     plain_text: str
     sections: list[DocumentSectionResponse]
@@ -70,17 +77,44 @@ class EditorAggregateResponse(BaseModel):
     """Полный агрегат для экрана редактора — один запрос вместо N+1.
 
     Поля:
-    - document:          метаданные + статус + review_version + view_mode (#7)
-    - content:           plain_text + секции (None, если парсинг не выполнялся)
-    - original_content:  исходный plain_text без правок (#7, None если анализ не запускался)
-    - suggestions:       список правок текущего анализа (пусто, если анализа нет)
-    - counters:          pending/accepted/rejected/total
-    - permissions:       что разрешено + sources_is_editable (#8)
+    - document:           метаданные + статус + review_version + view_mode (#7)
+    - content:            plain_text + секции (None, если парсинг не выполнялся)
+    - original_content:   исходный plain_text без правок (#7, None если анализ не запускался)
+    - suggestions:        список правок текущей СТРАНИЦЫ
+    - suggestions_total:  полное число правок документа (API-1) — используется
+                          фронтом для построения пагинатора; НЕ зависит от
+                          текущего suggestions_limit/suggestions_offset
+    - counters:           pending/accepted/rejected/total (по странице)
+    - permissions:        что разрешено + sources_is_editable (#8)
     """
 
     document: EditorDocumentMeta
     content: EditorContent | None
     original_content: EditorContent | None  # #7: исходный текст до правок
     suggestions: list[SuggestionResponse]
+    # API-1: полный итог всех правок документа (не только текущей страницы)
+    suggestions_total: int = 0
     counters: SuggestionCounters
     permissions: EditorPermissions
+
+
+# ---------------------------------------------------------------------------
+# API-5: схема ответа POST /editor/reset
+# ---------------------------------------------------------------------------
+
+class ResetResponse(BaseModel):
+    """Ответ POST /editor/reset (API-5).
+
+    Возвращается вместо 204, чтобы фронт мог обновить стор
+    без дополнительного GET /editor.
+
+    Поля:
+    - document_id:             идентификатор документа
+    - document_status:         новый статус (awaiting_approval)
+    - review_version:          актуальная версия после сброса
+    - suggestions_reset_count: число правок, переведённых в PENDING
+    """
+    document_id: uuid.UUID
+    document_status: str
+    review_version: int
+    suggestions_reset_count: int
