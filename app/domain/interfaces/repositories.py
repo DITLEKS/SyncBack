@@ -22,6 +22,8 @@ CRIT-3: delete принимает Document, а не UUID — приведён к
   (session.delete(document)).
 WARN-2: ISourceRepository.attach_to_document добавлен — M2M-вставка
   в document_sources при scope=DOCUMENT без полного replace.
+R-5: ISourceRepository.list_by_project — добавлен опциональный параметр
+  scope: SourceScopeVO | None = None для фильтрации по scope.
 """
 from __future__ import annotations
 
@@ -29,7 +31,7 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, TypedDict
 
-from app.domain.value_objects import DocumentStatusVO
+from app.domain.value_objects import DocumentStatusVO, SourceScopeVO
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models.document import Document
@@ -41,6 +43,8 @@ class DocumentRow(TypedDict):
 
     Каждый dict в списке содержит объект Document + агрегаты
     из SQL-запроса (LEFT JOIN на projects и COUNT правок).
+    Поле sources НЕ включено сюда намеренно — оно инжектируется отдельным
+    батч-запросом в роутере через SourceService.list_sources_for_documents.
     """
     document: "Document"
     project_name: str
@@ -159,8 +163,18 @@ class ISourceRepository(ABC):
 
     @abstractmethod
     async def list_by_project(
-        self, project_id: uuid.UUID, limit: int, offset: int
-    ) -> "list[Source]": ...
+        self,
+        project_id: uuid.UUID,
+        limit: int,
+        offset: int,
+        scope: SourceScopeVO | None = None,
+    ) -> "list[Source]":
+        """R-5: опциональная фильтрация по scope.
+
+        scope=None (по умолчанию) — все источники проекта.
+        scope=SourceScopeVO.PROJECT — только PROJECT-scope (для /sources эндпоинта).
+        """
+        ...
 
     @abstractmethod
     async def count_by_project(self, project_id: uuid.UUID) -> int: ...

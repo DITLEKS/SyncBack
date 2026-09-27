@@ -18,8 +18,11 @@ I-1: list_sources_for_documents — батч-загрузка document-scope и�
 OPT-S2: delete_source_with_guard — атомарное удаление без предварительного get_source();
         бросает SourceNotFoundError если источник не найден или принадлежит другому проекту.
         FIX-1: document_id не хранится на Source → возвращаем None (нет document-lock).
-FIX-B1: delete_source() (deprecated) переброшен на delete_if_owned чтобы не вызывать
-        несуществующий ISourceRepository.delete(). Поведение идентично.
+FIX-5: delete_source (deprecated) удалён — все вызовы перешли на
+       delete_source_with_guard. Удаление legacy-метода устраняет путаницу.
+FIX-6: create_note_source — storage.upload перенесён внутрь async with uow.
+       Это гарантирует что при сбое __aenter__ cleanup storage выполнится
+       в рамках единой try/except области.
 WARN-2: create_url_source / create_note_source / create_file_source принимают
         document_id: uuid.UUID | None = None. При scope=DOCUMENT + document_id
         вызывают uow.sources.attach_to_document(source.id, document_id) — M2M-вставка.
@@ -102,6 +105,10 @@ class SourceService:
     ) -> "Source":
         """Сохраняет текстовую заметку как .txt в MinIO.
 
+        FIX-6: storage.upload перенесён внутрь async with uow — если UoW
+        не открылся, cleanup не теряется. Весь процесс (upload → DB → M2M)
+        обёрнут в единый try/except для атомарного rollback MinIO.
+
         WARN-2: при scope=DOCUMENT + document_id вставляет M2M-запись.
         """
         if len(text_content.encode()) > self._settings.max_upload_size_bytes:
@@ -111,14 +118,14 @@ class SourceService:
 
         source_id = uuid.uuid4()
         storage_key = f"projects/{project.id}/sources/{source_id}/note.txt"
-        await self._storage.upload(
-            storage_key,
-            text_content.encode("utf-8"),
-            "text/plain; charset=utf-8",
-        )
 
         try:
             async with self._uow:
+                await self._storage.upload(
+                    storage_key,
+                    text_content.encode("utf-8"),
+                    "text/plain; charset=utf-8",
+                )
                 source = await self._uow.sources.create_with_id(
                     source_id=source_id,
                     project_id=project.id,
@@ -202,11 +209,16 @@ class SourceService:
     # ------------------------------------------------------------------
 
     async def list_sources(
-        self, project_id: uuid.UUID, limit: int, offset: int
+        self,
+        project_id: uuid.UUID,
+        limit: int,
+        offset: int,
+        scope: SourceScopeVO | None = None,
     ) -> "tuple[list[Source], int]":
+        """R-5: опциональная фильтрация по scope передаётся в репозиторий."""
         async with self._uow:
             items = await self._uow.sources.list_by_project(
-                project_id, limit=limit, offset=offset
+                project_id, limit=limit, offset=offset, scope=scope
             )
             total = await self._uow.sources.count_by_project(project_id)
         return items, total
@@ -269,28 +281,6 @@ class SourceService:
     # Delete
     # ------------------------------------------------------------------
 
-    async def delete_source(
-        self, project_id: uuid.UUID, source_id: uuid.UUID
-    ) -> None:
-        """Удалить источник (deprecated — используй delete_source_with_guard).
-
-        FIX-B1: переброшен на delete_if_owned чтобы не вызывать
-        несуществующий ISourceRepository.delete().
-        """
-        async with self._uow:
-            deleted = await self._uow.sources.delete_if_owned(
-                project_id=project_id,
-                source_id=source_id,
-            )
-            if deleted is None:
-                raise SourceNotFoundError(
-                    f"Источник {source_id} не найден в проекте {project_id}"
-                )
-            await self._uow.commit()
-        storage_key = getattr(deleted, "storage_key", None)
-        if storage_key:
-            await self._storage.delete(storage_key)
-
     async def delete_source_with_guard(
         self,
         project_id: uuid.UUID,
@@ -301,6 +291,8 @@ class SourceService:
         FIX-1: Source не имеет колонки document_id — document_id-lock
         в роутере через _guard_no_active_job(document_id=None) — ранний return.
         Возвращает None (document_id недоступен из Source).
+
+        FIX-5: deprecated delete_source удалён — этот метод единственный путь удаления.
         """
         async with self._uow:
             deleted = await self._uow.sources.delete_if_owned(
