@@ -18,6 +18,8 @@ I-1: list_sources_for_documents — батч-загрузка document-scope и�
 OPT-S2: delete_source_with_guard — атомарное удаление без предварительного get_source();
         бросает SourceNotFoundError если источник не найден или принадлежит другому проекту.
         FIX-1: document_id не хранится на Source → возвращаем None (нет document-lock).
+FIX-B1: delete_source() (deprecated) переброшен на delete_if_owned чтобы не вызывать
+        несуществующий ISourceRepository.delete(). Поведение идентично.
 """
 from __future__ import annotations
 
@@ -238,12 +240,22 @@ class SourceService:
     async def delete_source(
         self, project_id: uuid.UUID, source_id: uuid.UUID
     ) -> None:
-        """Удалить источник. Устаревший метод — используй delete_source_with_guard."""
-        source = await self.get_source(project_id, source_id)
-        storage_key = getattr(source, "storage_key", None)
+        """Удалить источник (deprecated — используй delete_source_with_guard).
+
+        FIX-B1: переброшен на delete_if_owned чтобы не вызывать
+        несуществующий ISourceRepository.delete().
+        """
         async with self._uow:
-            await self._uow.sources.delete(source_id)
+            deleted = await self._uow.sources.delete_if_owned(
+                project_id=project_id,
+                source_id=source_id,
+            )
+            if deleted is None:
+                raise SourceNotFoundError(
+                    f"Источник {source_id} не найден в проекте {project_id}"
+                )
             await self._uow.commit()
+        storage_key = getattr(deleted, "storage_key", None)
         if storage_key:
             await self._storage.delete(storage_key)
 

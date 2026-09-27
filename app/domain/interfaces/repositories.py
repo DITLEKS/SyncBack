@@ -8,6 +8,10 @@ FIX-1: ISourceRepository.list_by_document_ids возвращает
   list[tuple[Source, uuid.UUID]] — кортеж (Source, document_id),
   чтобы сервисный слой мог группировать без обращения к несуществующей
   колонке Source.document_id (связь через M2M document_sources).
+FIX-B1: удалён @abstractmethod delete(source_id) — метод никогда не был
+  реализован в SourceRepository (единственный рабочий путь — delete_if_owned).
+  Наличие нереализованного abstractmethod приводило к TypeError при
+  инстанцировании SourceRepository.
 """
 from __future__ import annotations
 
@@ -97,10 +101,9 @@ class ISourceRepository(ABC):
         sources: "list[Source]",
     ) -> "list[Source]": ...
 
-    @abstractmethod
-    async def delete(
-        self, source_id: uuid.UUID
-    ) -> None: ...
+    # FIX-B1: delete(source_id) удалён — не реализован и не используется.
+    # Единственный актуальный путь удаления — delete_if_owned (атомарная
+    # проверка ownership + DELETE за один запрос, OPT-S2).
 
     @abstractmethod
     async def delete_if_owned(
