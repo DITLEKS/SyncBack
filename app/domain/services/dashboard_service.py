@@ -1,15 +1,13 @@
 """
 DashboardService — оркестрирует агрегаты для GET /dashboard,
-GET /documents/attention, GET /documents/recent и расширенной статистики.
+GET /documents/attention, GET /documents/recent.
 
 Архитектурные правила:
   - Зависит только от IDashboardQueryService (read-model порт).
   - Нет импортов из app.infrastructure.* при выполнении.
 
-OPT-D1: get_dashboard объединяет прежние get_dashboard + get_extended_stats
-  в один метод — фронт делает один round-trip вместо двух.
-  DashboardResponse расширен полями статистики (saved_hours, approved_percent и др.).
-
+OPT-D1: get_dashboard объединяет базовые агрегаты + расширенную статистику
+  в один вызов к query-service. get_extended_stats удалён.
 OPT-D8: track_open принимает project_id для проверки ownership.
 """
 from __future__ import annotations
@@ -23,7 +21,6 @@ from app.api.schemas.dashboard import (
 )
 from app.domain.interfaces.dashboard_query_service import IDashboardQueryService
 
-# Среднее время (в минутах) на ручное применение одной правки.
 _AVG_MINUTES_PER_SUGGESTION: float = 3.0
 
 
@@ -31,13 +28,11 @@ class DashboardService:
     def __init__(self, dashboard_qs: IDashboardQueryService) -> None:
         self._qs = dashboard_qs
 
-    # ── Dashboard агрегаты + статистика (OPT-D1) ─────────────────────
-
     async def get_dashboard(self, user_id: uuid.UUID) -> DashboardResponse:
-        """Единый метод для GET /dashboard.
+        """Единый метод GET /dashboard.
 
-        OPT-D1: объединяет прежние get_stats + get_extended_stats в один
-        запрос к query-service, чтобы фронт делал один HTTP round-trip.
+        Запрашивает get_all_dashboard_data — один вызов к query-service,
+        который параллельно выполняет все нужные SELECT-ы.
         """
         stats, activity_rows, extended = await self._qs.get_all_dashboard_data(user_id)
 
@@ -60,7 +55,6 @@ class DashboardService:
             activity_last_7_days=[
                 DayActivity(date=r["date"], opens=r["opens"]) for r in activity_rows
             ],
-            # расширенная статистика (бывший /dashboard/stats)
             saved_hours=saved_hours,
             approved_percent=approved_percent,
             documents_by_status=DocumentsByStatus(
@@ -75,21 +69,15 @@ class DashboardService:
             rejected_count=rejected,
         )
 
-    # ── Требуют внимания ─────────────────────────────────────────────
-
     async def get_attention_documents(
         self, user_id: uuid.UUID, limit: int = 4
     ) -> list[dict]:
         return await self._qs.get_attention_documents(user_id, limit=limit)
 
-    # ── Недавние документы ───────────────────────────────────────────
-
     async def get_recent_documents(
         self, user_id: uuid.UUID, limit: int = 5
     ) -> list[dict]:
         return await self._qs.get_recent_documents(user_id, limit=limit)
-
-    # ── Трекинг открытия (OPT-D8) ────────────────────────────────────
 
     async def track_open(
         self,
@@ -97,5 +85,4 @@ class DashboardService:
         document_id: uuid.UUID,
         project_id: uuid.UUID | None = None,
     ) -> None:
-        """OPT-D8: project_id передаётся для проверки ownership в query-service."""
         await self._qs.upsert_open(user_id, document_id, project_id=project_id)

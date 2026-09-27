@@ -4,7 +4,6 @@
 #1 — GET /dashboard
 #2 — GET /documents/attention
 #3 — GET /documents/recent
-#4 — GET /dashboard/stats  (расширенная статистика для виджетов)
 """
 import uuid
 from datetime import datetime
@@ -12,28 +11,15 @@ from datetime import datetime
 from pydantic import BaseModel
 
 
-# ── #1 Dashboard ──────────────────────────────────────────────────────────────
+# ── Вспомогательные типы ───────────────────────────────────────────────────────────
 
 class DayActivity(BaseModel):
-    date: str          # ISO 8601 date, e.g. "2026-09-14"
+    date: str          # ISO 8601 date, например "2026-09-14"
     opens: int         # кол-во уникальных открытий документов за день
 
 
-class DashboardResponse(BaseModel):
-    """Агрегаты для экрана «Рабочее пространство»."""
-    total_documents: int
-    awaiting_approval_count: int
-    ready_count: int
-    # актуальность базы = ready / total * 100 (0 если total=0)
-    relevance_percent: float
-    # мини-график активности за последние 7 дней
-    activity_last_7_days: list[DayActivity]
-
-
-# ── #4 Extended Stats ─────────────────────────────────────────────────────────
-
 class DocumentsByStatus(BaseModel):
-    """Количество документов по каждому статусу."""
+    """Количество документов по каждому статусу (для pie/bar-виджета)."""
     draft: int = 0
     in_progress: int = 0
     awaiting_approval: int = 0
@@ -41,32 +27,43 @@ class DocumentsByStatus(BaseModel):
     failed: int = 0
 
 
-class DashboardStatsResponse(BaseModel):
-    """Расширенная статистика для виджетов главной страницы.
+# ── #1 DashboardResponse ──────────────────────────────────────────────────────────
 
-    saved_hours         — оценочное время, сэкономленное благодаря авто-правкам
-                          (accepted_count * AVG_MINUTES_PER_SUGGESTION / 60).
-    approved_percent    — доля принятых правок от всех решённых (accepted+rejected).
-    documents_by_status — разбивка документов по статусам для pie/bar виджета.
-    total_suggestions   — суммарное кол-во правок по всем документам пользователя.
-    accepted_count      — принятых правок.
-    rejected_count      — отклонённых правок.
+class DashboardResponse(BaseModel):
+    """Полный ответ GET /dashboard.
+
+    Содержит базовые агрегаты рабочего пространства +
+    расширенную статистику виджетов (бывший /dashboard/stats, удалён).
+
+    Поля статистики:
+      saved_hours       — время (ч), сэкономленное авто-правками.
+                          Расчёт: accepted_count × 3 мин / 60.
+                          Показывается в виджете «Сэкономлено X часов».
+      approved_percent  — доля принятых правок от всех решённых (0–100).
     """
-    saved_hours: float
-    approved_percent: float        # 0.0 – 100.0
-    documents_by_status: DocumentsByStatus
-    total_suggestions: int
-    accepted_count: int
-    rejected_count: int
+    # — базовые агрегаты
+    total_documents: int
+    awaiting_approval_count: int
+    ready_count: int
+    relevance_percent: float          # ready / total × 100
+    activity_last_7_days: list[DayActivity]
+
+    # — статистика виджетов
+    saved_hours: float = 0.0
+    approved_percent: float = 0.0     # 0.0 – 100.0
+    documents_by_status: DocumentsByStatus = DocumentsByStatus()
+    total_suggestions: int = 0
+    accepted_count: int = 0
+    rejected_count: int = 0
 
 
-# ── #2 Attention ──────────────────────────────────────────────────────────────
+# ── #2 Attention ───────────────────────────────────────────────────────────────
 
 class AttentionDocumentItem(BaseModel):
     """Документы блока «Требует внимания».
 
     status не возвращается: все документы здесь по контракту
-    находятся в AWAITING_APPROVAL — фронту незачем его читать.
+    находятся в AWAITING_APPROVAL.
     """
     id: uuid.UUID
     title: str
@@ -76,7 +73,7 @@ class AttentionDocumentItem(BaseModel):
     updated_at: datetime
 
 
-# ── #3 Recent ─────────────────────────────────────────────────────────────────
+# ── #3 Recent ─────────────────────────────────────────────────────────────────────
 
 class RecentDocumentItem(BaseModel):
     id: uuid.UUID
@@ -85,6 +82,5 @@ class RecentDocumentItem(BaseModel):
     project_name: str
     status: str
     last_opened_at: datetime
-    # счётчики для колонки «Изменений» (прогресс-бар resolved/total)
     suggestions_total: int = 0
     suggestions_resolved: int = 0   # accepted + rejected

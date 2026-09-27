@@ -1,17 +1,12 @@
 """
 Дашборд / рабочее пространство.
 
-P0-#1  GET  /dashboard            — агрегаты + расширенная статистика (объединено)
-P0-#2  GET  /documents/attention  — топ-4 документа в awaiting_approval
-P0-#3  GET  /documents/recent     — 5 последних открытых
-P0-#3  POST /documents/{id}/open  — трекинг открытия документа
-ALIAS  GET  /dashboard/stats      — прежний endpoint, возвращает тот же DashboardResponse
-                                    (backward-compat, deprecated — удалить в следующем минорном)
+POST  GET  /dashboard            — агрегаты + статистика виджетов (единый endpoint)
+P0-#2 GET  /documents/attention  — топ-4 документа в awaiting_approval
+P0-#3 GET  /documents/recent     — 5 последних открытых
+P0-#3 POST /documents/{id}/open  — трекинг открытия документа
 
-OPT-D1: GET /dashboard и GET /dashboard/stats объединены в один ответ —
-        клиент больше не делает два round-trip при открытии дашборда.
-OPT-D8: track_document_open принимает Project через get_allowed_project —
-        ownership document→project проверяется на уровне dep-инъекции.
+GET /dashboard/stats удалён — его данные вошли в GET /dashboard (OPT-D1).
 """
 import uuid
 
@@ -36,25 +31,11 @@ async def get_dashboard(
     current_user: User = Depends(get_current_user),
     svc: DashboardService = Depends(get_dashboard_service),
 ) -> DashboardResponse:
-    """Агрегаты + расширенная статистика рабочего пространства.
+    """Агрегаты + статистика виджетов рабочего пространства.
 
-    OPT-D1: объединяет прежние /dashboard и /dashboard/stats в один запрос.
-    Фронт вызывает только этот endpoint при открытии дашборда.
+    Возвращает в одном ответе всё, что раньше было разнесено между
+    GET /dashboard и GET /dashboard/stats.
     """
-    return await svc.get_dashboard(current_user.id)
-
-
-@router.get(
-    "/dashboard/stats",
-    response_model=DashboardResponse,
-    deprecated=True,
-    summary="[Deprecated] Используй GET /dashboard",
-)
-async def get_dashboard_stats(
-    current_user: User = Depends(get_current_user),
-    svc: DashboardService = Depends(get_dashboard_service),
-) -> DashboardResponse:
-    """Backward-compat alias. Будет удалён в следующем минорном релизе."""
     return await svc.get_dashboard(current_user.id)
 
 
@@ -84,16 +65,11 @@ async def get_recent_documents(
 async def track_document_open(
     document_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    # OPT-D8: get_allowed_project проверяет membership и то, что проект существует;
-    # document→project ownership будет добавлена в get_allowed_project при наличии
-    # document_id в контексте. Пока достаточно убедиться, что пользователь
-    # имеет доступ к project_id из URL.
     project: Project = Depends(get_allowed_project),
     svc: DashboardService = Depends(get_dashboard_service),
 ) -> None:
-    """Трекинг открытия документа. Обновляет last_opened_at для пары (user_id, document_id).
+    """Трекинг открытия документа. Обновляет last_opened_at.
 
-    OPT-D8: project проверяется через get_allowed_project — нельзя трекать
-    документы из чужих проектов.
+    OPT-D8: проект проверяется через get_allowed_project.
     """
     await svc.track_open(current_user.id, document_id, project_id=project.id)
