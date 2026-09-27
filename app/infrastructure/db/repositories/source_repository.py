@@ -9,6 +9,8 @@ P2: метод create() (принимал text_content) удалён.
     create_with_id() теперь единственный путь для FILE-источников.
 R-4: uploaded_at удалён из модели Source; list_by_project теперь
     сортирует по created_at DESC (семантически эквивалентно).
+I-1: добавлен list_by_document_ids — батч-запрос document-scope источников
+    для нескольких документов одним SELECT.
 """
 from __future__ import annotations
 
@@ -74,6 +76,35 @@ class SourceRepository(ISourceRepository):
             select(func.count()).select_from(M).where(M.project_id == project_id)
         )
         return result.scalar_one()
+
+    async def list_by_document_ids(
+        self,
+        project_id: uuid.UUID,
+        document_ids: list[uuid.UUID],
+    ) -> "list[Source]":
+        """I-1: батч-запрос document-scope источников для нескольких документов.
+
+        Один SELECT вместо N запросов:
+            SELECT * FROM sources
+             WHERE project_id = :pid
+               AND document_id IN (:ids)
+               AND scope = 'document'
+             ORDER BY created_at DESC
+        """
+        if not document_ids:
+            return []
+        from app.infrastructure.db.models.enums import SourceScope
+        from app.infrastructure.db.models.source import Source as M
+        result = await self._session.execute(
+            select(M)
+            .where(
+                M.project_id == project_id,
+                M.document_id.in_(document_ids),
+                M.scope == SourceScope.DOCUMENT,
+            )
+            .order_by(M.created_at.desc())
+        )
+        return list(result.scalars().all())
 
     # ------------------------------------------------------------------
     # Write

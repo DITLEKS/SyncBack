@@ -13,10 +13,15 @@
   - Зависит только от IUnitOfWork (порт) и FileStorage (порт).
   - Нет импортов из app.infrastructure.* при выполнении.
   - app.core.config — допустимый non-infra импорт (документировано).
+
+I-1: добавлен list_sources_for_documents(project_id, document_ids) —
+  публичный метод сервиса, возвращает dict[UUID, list[Source]],
+  готовый для маппинга в DocumentListItem.sources.
 """
 from __future__ import annotations
 
 import uuid
+from collections import defaultdict
 from typing import TYPE_CHECKING
 
 from app.core.config import Settings, get_settings
@@ -70,11 +75,7 @@ class SourceService:
         text_content: str,
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
     ) -> "Source":
-        """Сохраняет текстовую заметку как .txt в MinIO.
-
-        Единый кодовый путь в пайплайне воркера:
-        воркер всегда идёт в MinIO по storage_key — никаких спецкейсов NOTE.
-        """
+        """Сохраняет текстовую заметку как .txt в MinIO."""
         if len(text_content.encode()) > self._settings.max_upload_size_bytes:
             raise FileTooLargeError(
                 f"Текст превышает лимит {self._settings.max_upload_size_mb} МБ"
@@ -126,7 +127,7 @@ class SourceService:
         return source
 
     # ------------------------------------------------------------------
-    # Create — file (без изменений)
+    # Create — file
     # ------------------------------------------------------------------
 
     async def create_file_source(
@@ -142,11 +143,9 @@ class SourceService:
             raise FileTooLargeError(
                 f"Файл превышает лимит {self._settings.max_upload_size_mb} МБ"
             )
-
         source_id = uuid.uuid4()
         storage_key = f"projects/{project.id}/sources/{source_id}/{filename}"
         await self._storage.upload(storage_key, content, content_type)
-
         try:
             async with self._uow:
                 source = await self._uow.sources.create_with_id(
@@ -194,6 +193,29 @@ class SourceService:
                 f"Источники не принадлежат проекту {project_id}: {foreign}"
             )
         return sources
+
+    async def list_sources_for_documents(
+        self,
+        project_id: uuid.UUID,
+        document_ids: list[uuid.UUID],
+    ) -> "dict[uuid.UUID, list[Source]]":
+        """I-1: батч-загрузка document-scope источников для списка документов.
+
+        Возвращает словарь {document_id: [Source, ...]}, готовый
+        для маппинга в DocumentListItem.sources без доп-запросов.
+        Пустой список для документов без источников не добавляется
+        в словарь — вызывающий использует .get(doc_id, []).
+        """
+        if not document_ids:
+            return {}
+        async with self._uow:
+            sources = await self._uow.sources.list_by_document_ids(
+                project_id, document_ids
+            )
+        result: dict[uuid.UUID, list["Source"]] = defaultdict(list)
+        for src in sources:
+            result[src.document_id].append(src)
+        return dict(result)
 
     # ------------------------------------------------------------------
     # Attach / detach
