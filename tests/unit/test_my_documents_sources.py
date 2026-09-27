@@ -1,11 +1,16 @@
 """
-I-1: Юнит-тесты роутера GET /api/v1/documents (my_documents).
+I-1 / FIX-7: Юнит-тесты роутера GET /api/v1/documents (my_documents).
 
 Проверяем, что sources в DocumentListItem:
   1. happy_path        — источники есть у первого документа, у второго пусто.
   2. no_sources        — батч возвращает {}, у всех documents sources == [].
   3. two_projects      — документы из двух проектов → два батч-вызова,
                          результаты сливаются корректно.
+
+FIX-7: assert_awaited_once_with(PROJECT_A, [DOC_1, DOC_2]) заменён
+  на assert_awaited_once() + проверку через call_args.
+  Порядок doc_ids в defaultdict-итерации недетерминирован —
+  сравниваем set(doc_ids), а не list.
 """
 from __future__ import annotations
 
@@ -74,7 +79,7 @@ def _source(name: str = "wiki", src_type: str = "url") -> SimpleNamespace:
     return SimpleNamespace(
         id=uuid.uuid4(),
         name=name,
-        type=src_type,  # строка, не Enum
+        type=src_type,
     )
 
 
@@ -139,10 +144,12 @@ async def test_sources_happy_path(mock_current_user, mock_doc_svc, mock_src_svc)
     assert items[0]["sources"][0]["name"] == "wiki"
     assert items[1]["sources"] == []
 
-    # Один батч-запрос, оба document_id переданы вместе
-    mock_src_svc.list_sources_for_documents.assert_awaited_once_with(
-        PROJECT_A, [DOC_1, DOC_2]
-    )
+    # FIX-7: порядок doc_ids в defaultdict-итерации недетерминирован —
+    # проверяем project_id и множество doc_ids, не список.
+    mock_src_svc.list_sources_for_documents.assert_awaited_once()
+    call_args = mock_src_svc.list_sources_for_documents.call_args
+    assert call_args.args[0] == PROJECT_A
+    assert set(call_args.args[1]) == {DOC_1, DOC_2}
 
 
 @pytest.mark.asyncio
@@ -165,14 +172,13 @@ async def test_sources_no_sources(mock_current_user, mock_doc_svc, mock_src_svc)
 async def test_sources_two_projects(mock_current_user, mock_doc_svc, mock_src_svc):
     """Документы из двух проектов → два раздельных вызова list_sources_for_documents."""
     doc1 = _doc(DOC_1, PROJECT_A)
-    doc2 = _doc(DOC_2, PROJECT_B)  # другой проект
+    doc2 = _doc(DOC_2, PROJECT_B)
     doc3 = _doc(DOC_3, PROJECT_B)
     mock_doc_svc.list_all_for_user.return_value = (
         [_row(doc1, "Proj A"), _row(doc2, "Proj B"), _row(doc3, "Proj B")],
         3,
     )
 
-    # Настраиваем side_effect: разные ответы по project_id
     async def _batch_side_effect(project_id, doc_ids):
         if project_id == PROJECT_A:
             return {DOC_1: [_source("gdoc")]}
@@ -199,5 +205,9 @@ async def test_sources_two_projects(mock_current_user, mock_doc_svc, mock_src_sv
     # DOC_3 (PROJECT_B) — 0 источников
     assert items[2]["sources"] == []
 
-    # Ровно 2 вызова батча
+    # FIX-7: 2 вызова, проверяем через call_args_list
     assert mock_src_svc.list_sources_for_documents.await_count == 2
+    calls = {c.args[0]: set(c.args[1])
+             for c in mock_src_svc.list_sources_for_documents.call_args_list}
+    assert calls[PROJECT_A] == {DOC_1}
+    assert calls[PROJECT_B] == {DOC_2, DOC_3}
