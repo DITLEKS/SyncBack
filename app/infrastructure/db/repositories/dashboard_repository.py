@@ -10,6 +10,9 @@ get_dashboard_service мог передать его как dashboard_qs= в Das
   - get_attention_documents   Топ-N AWAITING_APPROVAL по pending_suggestions DESC + status
   - get_recent_documents      5 последних открытых + счётчики правок (total/resolved)
   - upsert_open               ON CONFLICT DO UPDATE last_opened_at
+
+OPT-2: get_recent_documents переписан с коррелированных scalar_subquery()
+  на один LEFT JOIN + COUNT FILTER. Итог: N+1 запросов → 1 запрос.
 """
 from __future__ import annotations
 
@@ -162,29 +165,9 @@ class DashboardRepository(IDashboardQueryService):
     ) -> list[dict]:
         """N последних открытых документов пользователя.
 
-        UI-fix: добавлены suggestions_total и suggestions_resolved
-        для колонки «Изменений» (прогресс-бар) в блоке «Недавние документы».
-        Используем LEFT JOIN + COUNT FILTER по статусам в одном запросе.
+        OPT-2: коррелированные scalar_subquery() (N×2 отдельных COUNT-запроса)
+        заменены на LEFT JOIN + COUNT FILTER, итог: 1 запрос вместо N+1.
         """
-        total_suggestions = (
-            select(func.count(Suggestion.id))
-            .where(Suggestion.document_id == Document.id)
-            .correlate(Document)
-            .scalar_subquery()
-        )
-        resolved_suggestions = (
-            select(func.count(Suggestion.id))
-            .where(
-                Suggestion.document_id == Document.id,
-                Suggestion.status.in_([
-                    SuggestionStatus.ACCEPTED,
-                    SuggestionStatus.REJECTED,
-                ]),
-            )
-            .correlate(Document)
-            .scalar_subquery()
-        )
-
         q = (
             select(
                 Document.id,
@@ -193,12 +176,26 @@ class DashboardRepository(IDashboardQueryService):
                 Project.name.label("project_name"),
                 Document.status,
                 DocumentOpen.last_opened_at,
-                total_suggestions.label("suggestions_total"),
-                resolved_suggestions.label("suggestions_resolved"),
+                func.count(Suggestion.id).label("suggestions_total"),
+                func.count(Suggestion.id).filter(
+                    Suggestion.status.in_([
+                        SuggestionStatus.ACCEPTED,
+                        SuggestionStatus.REJECTED,
+                    ])
+                ).label("suggestions_resolved"),
             )
             .join(DocumentOpen, DocumentOpen.document_id == Document.id)
             .join(Project, Document.project_id == Project.id)
+            .outerjoin(Suggestion, Suggestion.document_id == Document.id)
             .where(DocumentOpen.user_id == user_id)
+            .group_by(
+                Document.id,
+                Document.name,
+                Document.project_id,
+                Project.name,
+                Document.status,
+                DocumentOpen.last_opened_at,
+            )
             .order_by(DocumentOpen.last_opened_at.desc())
             .limit(limit)
         )
