@@ -12,7 +12,7 @@ I-1: после list_all_for_user делается один батч-запро�
   sources=[...] — список бейджей.
   Данный эндпоинт всегда возвращает sources=[...] (никогда None),
   так как батч-запрос делается всегда. None используется будущими
-  лёгкими GET /me/documents?include_sources=false эндпоинтами.
+  лёгкими GET /documents?include_sources=false эндпоинтами.
 """
 import uuid
 from collections import defaultdict
@@ -34,7 +34,7 @@ from app.domain.services.source_service import SourceService
 from app.domain.value_objects import DocumentStatusVO, PaginationParams
 from app.infrastructure.db.models.user import User
 
-router = APIRouter(prefix="/me/documents", tags=["my-documents"])
+router = APIRouter(prefix="/documents", tags=["my-documents"])
 
 
 @router.get("", response_model=DocumentListPage)
@@ -65,12 +65,7 @@ async def list_my_documents(
     document_service: DocumentService = Depends(get_document_service),
     source_service: SourceService = Depends(get_source_service),
 ) -> DocumentListPage:
-    """Список всех документов текущего пользователя.
-
-    I-1: DocumentListItem.sources заполняется через батч-запрос
-    list_sources_for_documents. Возвращает sources=[...] (никогда None).
-    См. контракт sources в docstring модуля.
-    """
+    """Список всех документов текущего пользователя."""
     pagination = PaginationParams(limit=limit, offset=offset)
     rows, total = await document_service.list_all_for_user(
         current_user.id,
@@ -82,11 +77,6 @@ async def list_my_documents(
         pagination=pagination,
     )
 
-    # I-1: один батч-запрос для всех document-scope источников.
-    # Документы пользователя могут принадлежать разным проектам — группируем
-    # по project_id и делаем N запросов (обычно 1 для большинства пользователей).
-    # Будущий рефактор: если понадобится единый запрос без группировки —
-    # добавить list_by_document_ids_no_project в репозиторий.
     by_project: dict[uuid.UUID, list] = defaultdict(list)
     for row in rows:
         by_project[row["document"].project_id].append(row["document"])
@@ -117,13 +107,11 @@ async def list_my_documents(
                 accepted=row["suggestions_accepted"],
                 rejected=row["suggestions_rejected"],
             ),
-            # I-1: бейджи источников документа; никогда не None (батч всегда выполняется).
-            # [] — если у документа нет привязанных document-scope источников.
             sources=[
                 SourceBadge(
                     id=s.id,
                     name=s.name,
-                    type=s.type,  # field_validator normalises enum → str
+                    type=s.type,
                 )
                 for s in sources_by_doc.get(row["document"].id, [])
             ],

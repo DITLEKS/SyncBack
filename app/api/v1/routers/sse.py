@@ -2,7 +2,7 @@
 SSE-роутер — real-time обновления статусов документов без WebSocket
 и без перезагрузки страницы.
 
-GET /api/v1/me/events/documents
+GET /api/v1/events/documents
   Фронт подключается как EventSource и получает события:
 
   - document_status_changed   {document_id, status, pending_suggestions}
@@ -26,7 +26,7 @@ GET /api/v1/me/events/documents
 FIX-5: endpoint теперь возвращает HTTP 422 если передано > 50 document_ids,
   вместо молчаливого усечения. Клиент получает явную ошибку.
 FIX-4: get_redis_client() использует Redis.from_url() — конструктор без
-  сетевого вызова (соединение ленивое). Блокировки event loop нет — no-op.
+  сетевого вызова (соединение ленивое). Блокировок event loop нет — no-op.
 """
 from __future__ import annotations
 
@@ -46,15 +46,10 @@ from app.infrastructure.db.models.user import User
 
 logger = logging.getLogger("syncscribe.api.sse")
 
-router = APIRouter(prefix="/me/events", tags=["sse"])
+router = APIRouter(prefix="/events", tags=["sse"])
 
-PING_INTERVAL = 25  # секунд между keepalive-пингами
-DOCUMENT_IDS_MAX = 50  # максимум ID в фильтре
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Event model
-# ─────────────────────────────────────────────────────────────────────────────
+PING_INTERVAL = 25
+DOCUMENT_IDS_MAX = 50
 
 
 @dataclass
@@ -73,7 +68,6 @@ class SSEEvent:
         ).encode()
 
     def to_json(self) -> str:
-        """Сериализация для Redis Pub/Sub."""
         return json.dumps({
             "event": self.event,
             "data": self.data,
@@ -90,11 +84,6 @@ class SSEEvent:
             document_id=uuid.UUID(d["document_id"]) if d.get("document_id") else None,
             user_id=uuid.UUID(d["user_id"]) if d.get("user_id") else None,
         )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Broker interface
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 class ISSEBroker(ABC):
@@ -116,11 +105,6 @@ class ISSEBroker(ABC):
 
     @abstractmethod
     async def stop(self) -> None: ...
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# In-memory broker (single-instance fallback)
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 class InMemorySSEBroker(ISSEBroker):
@@ -171,21 +155,8 @@ class InMemorySSEBroker(ISSEBroker):
                 logger.warning("SSE queue full for %s, dropping", sub_id[:8])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Redis Pub/Sub broker (multi-instance)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 class RedisPubSubBroker(ISSEBroker):
-    """Redis Pub/Sub брокер — поддерживает мульти-инстанс деплой.
-
-    Publish: любой инстанс (API или Celery-воркер) публикует событие
-    в Redis-канал через self._redis.publish().
-
-    Subscribe: каждый инстанс API поднимает один фоновый asyncio.Task,
-    который читает из Redis pubsub и раскидывает события по локальным
-    asyncio.Queue подписчиков (аналогично InMemorySSEBroker).
-    """
+    """Redis Pub/Sub брокер — поддерживает мульти-инстанс деплой."""
 
     def __init__(self, redis_url: str, channel: str = "syncscribe:sse") -> None:
         self._redis_url = redis_url
@@ -222,7 +193,6 @@ class RedisPubSubBroker(ISSEBroker):
         self._meta.clear()
 
     async def _reader_loop(self) -> None:
-        """Читаем из Redis и раскидываем по локальным очередям."""
         try:
             async for message in self._pubsub.listen():
                 if message["type"] != "message":
@@ -270,7 +240,6 @@ class RedisPubSubBroker(ISSEBroker):
         self._meta.pop(sub_id, None)
 
     async def publish(self, event: SSEEvent) -> None:
-        """Публикуем в Redis — все подписанные инстансы получат через _reader_loop."""
         if self._redis is None:
             return
         try:
@@ -279,19 +248,11 @@ class RedisPubSubBroker(ISSEBroker):
             logger.warning("Redis publish failed: %s", exc)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Factory / singleton
-# ─────────────────────────────────────────────────────────────────────────────
-
 _broker: ISSEBroker | None = None
 
 
 async def init_sse_broker(redis_url: str | None = None, channel: str = "syncscribe:sse") -> ISSEBroker:
-    """Инициализировать брокер при старте приложения (вызывать из lifespan).
-
-    Если redis_url задан — использует RedisPubSubBroker (рекомендовано для prod).
-    Иначе — InMemorySSEBroker (только single-instance).
-    """
+    """Инициализировать брокер при старте приложения (вызывать из lifespan)."""
     global _broker
     if redis_url:
         try:
@@ -311,7 +272,6 @@ async def init_sse_broker(redis_url: str | None = None, channel: str = "syncscri
 
 
 async def shutdown_sse_broker() -> None:
-    """Вызывать из lifespan при остановке."""
     global _broker
     if _broker is not None:
         await _broker.stop()
@@ -319,16 +279,10 @@ async def shutdown_sse_broker() -> None:
 
 
 def get_sse_broker() -> ISSEBroker:
-    """FastAPI Depends / прямой вызов из сервисов."""
     global _broker
     if _broker is None:
-        _broker = InMemorySSEBroker()  # ленивая init
+        _broker = InMemorySSEBroker()
     return _broker
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Stream generator
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 async def _event_stream(
@@ -359,11 +313,6 @@ async def _event_stream(
         broker.unsubscribe(sub_id)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Endpoint
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 @router.get("/documents", summary="SSE: real-time статусы документов")
 async def document_events(
     request: Request,
@@ -378,8 +327,6 @@ async def document_events(
     if document_ids:
         raw_ids = [s.strip() for s in document_ids.split(",") if s.strip()]
 
-        # FIX-5: явный 422 при превышении лимита вместо молчаливого усечения.
-        # Клиент должен явно знать, что его запрос некорректен.
         if len(raw_ids) > DOCUMENT_IDS_MAX:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
