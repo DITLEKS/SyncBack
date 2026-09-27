@@ -22,6 +22,9 @@ CRIT-NEW-2: list_documents передаёт PaginationParams-объект, а н
 LOW: exc_info=True добавлен в logger.warning внутри delete_document.
 FEAT: list_documents принимает status_filter: DocumentStatusVO | None.
 M-BLOCK: добавлен delete_document_by_id — удаление без предварительного SELECT.
+SOURCE-CLEANUP: delete_document и delete_document_by_id вызывают
+  uow.documents.delete_document_scoped_sources() до коммита, чтобы
+  источники scope=DOCUMENT не оставались orphan-строками в таблице sources.
 """
 from __future__ import annotations
 
@@ -120,7 +123,6 @@ class DocumentService:
 
         try:
             async with self._uow:
-                # H-5: ORM-объект строится внутри репозитория — сервис не знает про Document ORM.
                 saved = await self._uow.documents.create(
                     id=document_id,
                     project_id=project_id,
@@ -210,14 +212,22 @@ class DocumentService:
         """
         HIGH-2: удаление документа.
 
-        Порядок: commit() сначала, MinIO-удаление потом.
-        Используется когда ORM-объект уже загружен (например, в attach_sources).
+        Порядок операций внутри транзакции:
+          1. delete_document_scoped_sources — удаляем orphan-источники scope=DOCUMENT
+             ДО flush document, пока document_sources ещё существуют (подзапрос их читает).
+          2. delete(document) — удаляем саму запись документа;
+             FK-каскад по document_sources срабатывает здесь.
+          3. commit() — единственный коммит на операцию.
+        После коммита — best-effort удаление файлов из MinIO.
+
+        Используется когда ORM-объект уже загружен.
         Для удаления только по ID без предварительного SELECT — см. delete_document_by_id.
         """
         storage_key = document.storage_key
         original_key: str | None = getattr(document, "original_storage_key", None)
 
         async with self._uow:
+            await self._uow.documents.delete_document_scoped_sources(document.id)
             await self._uow.documents.delete(document)
             await self._uow.commit()
 
@@ -239,14 +249,18 @@ class DocumentService:
     ) -> None:
         """M-BLOCK: удалить документ без предварительного SELECT.
 
-        Репозиторий выполняет:
-            DELETE FROM documents WHERE id = :id AND project_id = :project_id
-        и возвращает storage_key удалённой строки (или None если не найдено).
+        Порядок операций внутри транзакции:
+          1. delete_document_scoped_sources — удаляем orphan-источники scope=DOCUMENT
+             ДО flush документа, пока document_sources ещё существуют (подзапрос их читает).
+          2. delete_by_id — DELETE FROM documents RETURNING storage_key.
+             FK-каскад по document_sources срабатывает здесь.
+          3. commit() — единственный коммит на операцию.
+        После коммита — best-effort удаление файлов из MinIO.
 
         Если ни одна строка не удалена — бросает DocumentNotFoundError (404).
-        Файлы из MinIO удаляются бест-эффорт после коммита БД.
         """
         async with self._uow:
+            await self._uow.documents.delete_document_scoped_sources(document_id)
             deleted = await self._uow.documents.delete_by_id(
                 document_id=document_id,
                 project_id=project_id,

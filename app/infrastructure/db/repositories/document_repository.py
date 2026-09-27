@@ -180,7 +180,6 @@ class DocumentRepository(IDocumentRepository):
             .label("suggestions_rejected")
         )
 
-        # M-1: явный label "doc" вместо хрупкого "Document"
         base_q = (
             select(
                 M.id.label("doc_id"),
@@ -287,6 +286,49 @@ class DocumentRepository(IDocumentRepository):
         await self._session.flush()
         return updated
 
+    async def delete_document_scoped_sources(
+        self,
+        document_id: uuid.UUID,
+    ) -> int:
+        """Удалить источники scope=DOCUMENT, привязанные к данному документу.
+
+        Выполняется одним DELETE с подзапросом:
+
+            DELETE FROM sources
+             WHERE scope = 'document'
+               AND id IN (
+                   SELECT source_id FROM document_sources
+                    WHERE document_id = :document_id
+               )
+
+        Источники scope=PROJECT намеренно не трогаются — они принадлежат
+        проекту и переживают удаление документа.
+
+        Возвращает количество удалённых строк (для логирования/отладки).
+        Должен вызываться внутри той же транзакции, что и delete / delete_by_id,
+        ДО flush/commit, чтобы FK-каскад по document_sources не успел
+        удалить строки раньше подзапроса.
+        """
+        from app.infrastructure.db.models.document_source import document_sources as DS
+        from app.infrastructure.db.models.source import Source as S
+        from app.infrastructure.db.models.source_scope import SourceScope
+
+        subq = (
+            select(DS.c.source_id)
+            .where(DS.c.document_id == document_id)
+            .scalar_subquery()
+        )
+        stmt = (
+            delete(S)
+            .where(
+                S.scope == SourceScope.DOCUMENT,
+                S.id.in_(subq),
+            )
+        )
+        result = await self._session.execute(stmt)
+        await self._session.flush()
+        return result.rowcount
+
     async def delete(self, document: "Document") -> None:
         await self._session.delete(document)
         await self._session.flush()
@@ -306,6 +348,11 @@ class DocumentRepository(IDocumentRepository):
         Возвращает dict {'storage_key': ..., 'original_storage_key': ...}
         если строка удалена, или None если документ не найден /
         не принадлежит проекту.
+
+        Примечание: источники scope=DOCUMENT должны быть удалены
+        через delete_document_scoped_sources() ДО вызова этого метода
+        (в той же транзакции), иначе FK-каскад по document_sources
+        удалит join-строки раньше, чем подзапрос их прочитает.
         """
         from app.infrastructure.db.models.document import Document as M
 
