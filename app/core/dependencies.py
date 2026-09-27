@@ -18,6 +18,10 @@ CRIT-D4 (этот раунд):
   которая создаёт DashboardRepository(session) — конкретную реализацию
   IDashboardQueryService. get_dashboard_service теперь принимает
   dashboard_qs через Depends(get_dashboard_query_service).
+
+H-2:
+  JWTHandler вынесен в singleton-like фабрику _get_jwt_handler(),
+  чтобы не создавать новый объект на каждый запрос.
 """
 
 from functools import lru_cache
@@ -69,6 +73,11 @@ def _get_parser_registry() -> DocumentParserRegistry:
 @lru_cache
 def _get_exporter_registry() -> DocumentExporterRegistry:
     return DocumentExporterRegistry()
+
+
+@lru_cache
+def _get_jwt_handler() -> JWTHandler:
+    return JWTHandler(get_settings())
 
 
 # ---------------------------------------------------------------------------
@@ -212,14 +221,17 @@ def get_login_rate_limiter() -> LoginRateLimiter:
 async def get_auth_service(
     session: AsyncSession = Depends(get_db_session),
     rate_limiter: LoginRateLimiter = Depends(get_login_rate_limiter),
-    settings: Settings = Depends(get_settings),
 ) -> AuthService:
     return AuthService(
         UserRepository(session),
         PasswordHasher(),
-        JWTHandler(settings),
+        _get_jwt_handler(),
         rate_limiter,
     )
+
+
+def get_jwt_handler() -> JWTHandler:
+    return _get_jwt_handler()
 
 
 def get_llm_client_instance(

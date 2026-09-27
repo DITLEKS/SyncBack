@@ -22,6 +22,7 @@ from app.api.v1.routers.sse import init_sse_broker, shutdown_sse_broker
 from app.api.v1.routers.sse import router as sse_router
 from app.api.v1.routers.suggestions import router as suggestions_router
 from app.api.v1.routers.system import router as system_router
+from app.core.body_size_limit_middleware import BodySizeLimitMiddleware
 from app.core.config import get_settings
 from app.core.correlation_middleware import CorrelationIdMiddleware
 from app.core.limiter import limiter
@@ -93,7 +94,8 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
         expose_headers=["X-Request-ID"],
     )
-
+    # H-3: грубая защита от слишком больших request body до разбора multipart.
+    app.add_middleware(BodySizeLimitMiddleware)
     app.add_middleware(CorrelationIdMiddleware)
 
     # M-2: NotFound-подклассы DomainError → 404 (должны быть ПЕРЕД общим DomainError handler).

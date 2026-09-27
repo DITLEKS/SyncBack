@@ -12,13 +12,20 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from slowapi.errors import RateLimitExceeded  # noqa: F401  — re-exported для тестов
 
 from app.api.deps import get_current_user
-from app.api.schemas.auth import TokenResponse, UserLoginRequest, UserRegisterRequest, UserResponse
+from app.api.schemas.auth import (
+    RefreshTokenRequest,
+    TokenResponse,
+    UserLoginRequest,
+    UserRegisterRequest,
+    UserResponse,
+)
 from app.core.dependencies import get_auth_service
 from app.core.limiter import limiter
 from app.domain.exceptions import (
     AccountTemporarilyLockedError,
     EmailAlreadyRegisteredError,
     InvalidCredentialsError,
+    InvalidTokenError,
 )
 from app.domain.services.auth_service import AuthService
 from app.infrastructure.db.models.user import User
@@ -57,17 +64,38 @@ async def login(
     до достижения lockout на уровне сервиса (login_max_attempts).
     """
     try:
-        access_token, expires_in = await auth_service.authenticate(payload.email, payload.password)
+        access_token, refresh_token, expires_in, refresh_expires_in = await auth_service.authenticate(
+            payload.email, payload.password
+        )
     except AccountTemporarilyLockedError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=str(exc),
-            headers={"Retry-After": str(exc.retry_after_seconds)},
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
     except InvalidCredentialsError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_in=expires_in,
+        refresh_expires_in=refresh_expires_in,
+    )
 
-    return TokenResponse(access_token=access_token, expires_in=expires_in)
+
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh_tokens(
+    payload: RefreshTokenRequest,
+    auth_service: AuthService = Depends(get_auth_service),
+) -> TokenResponse:
+    try:
+        access_token, refresh_token, expires_in, refresh_expires_in = await auth_service.refresh_access_token(
+            payload.refresh_token
+        )
+    except (InvalidTokenError, InvalidCredentialsError) as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_in=expires_in,
+        refresh_expires_in=refresh_expires_in,
+    )
 
 
 @router.get("/me", response_model=UserResponse)

@@ -1,5 +1,5 @@
 """
-Выпуск и проверка JWT access-токенов.
+Выпуск и проверка JWT access/refresh-токенов.
 """
 
 import uuid
@@ -21,6 +21,20 @@ class JWTHandler:
         payload = {
             "sub": str(user_id),
             "role": role,
+            "type": "access",
+            "iat": now,
+            "exp": now + timedelta(seconds=expires_in),
+        }
+        token = jwt.encode(payload, self._settings.jwt_secret, algorithm=self._settings.jwt_algorithm)
+        return token, expires_in
+
+    def create_refresh_token(self, user_id: uuid.UUID, role: str) -> tuple[str, int]:
+        now = datetime.now(UTC)
+        expires_in = 30 * 24 * 60 * 60
+        payload = {
+            "sub": str(user_id),
+            "role": role,
+            "type": "refresh",
             "iat": now,
             "exp": now + timedelta(seconds=expires_in),
         }
@@ -34,3 +48,15 @@ class JWTHandler:
             raise InvalidTokenError("Токен истёк") from exc
         except jwt.InvalidTokenError as exc:
             raise InvalidTokenError("Невалидный токен") from exc
+
+    def decode_access_token(self, token: str) -> dict:
+        payload = self.decode_token(token)
+        if payload.get("type") != "access":
+            raise InvalidTokenError("Ожидался access token")
+        return payload
+
+    def decode_refresh_token(self, token: str) -> dict:
+        payload = self.decode_token(token)
+        if payload.get("type") != "refresh":
+            raise InvalidTokenError("Ожидался refresh token")
+        return payload
