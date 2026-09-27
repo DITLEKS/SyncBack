@@ -11,6 +11,9 @@ F-2: Contract-тесты роутеров projects и documents.
   PATCH /api/v1/projects/{id}/documents/{doc_id}      — 200
   DELETE /api/v1/projects/{id}/documents/{doc_id}     — 204
 
+P2: добавлен тест shape SourceBadge — проверяет, что каждый элемент
+    sources в DocumentListItem содержит поля id, name, type.
+
 Все тесты работают через мок — реальная БД не нужна.
 """
 from __future__ import annotations
@@ -29,9 +32,10 @@ from app.main import app
 # Общие фикстуры
 # ---------------------------------------------------------------------------
 
-USER_ID   = uuid.uuid4()
+USER_ID    = uuid.uuid4()
 PROJECT_ID = uuid.uuid4()
 DOC_ID     = uuid.uuid4()
+SOURCE_ID  = uuid.uuid4()
 
 
 def _make_user() -> SimpleNamespace:
@@ -245,3 +249,76 @@ async def test_delete_document_returns_204():
                 headers=AUTH_HEADERS,
             )
     assert r.status_code == 204
+
+
+# ---------------------------------------------------------------------------
+# P2: SourceBadge shape contract
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_my_documents_source_badge_shape():
+    """P2: каждый элемент sources в DocumentListItem содержит поля id, name, type.
+
+    Использует GET /api/v1/documents (my_documents router).
+    Мокает document_service и source_service.
+    """
+    from app.domain.services.document_service import DocumentService
+    from app.domain.services.source_service import SourceService
+
+    now = datetime.now(timezone.utc)
+    doc = SimpleNamespace(
+        id=DOC_ID,
+        project_id=PROJECT_ID,
+        name="spec.docx",
+        format="docx",
+        size_bytes=2048,
+        status="draft",
+        current_analysis_job_id=None,
+        created_at=now,
+        updated_at=now,
+    )
+    row = {
+        "document": doc,
+        "project_name": "My project",
+        "suggestions_total": 0,
+        "suggestions_pending": 0,
+        "suggestions_accepted": 0,
+        "suggestions_rejected": 0,
+    }
+    badge_source = SimpleNamespace(
+        id=SOURCE_ID,
+        name="Confluence Wiki",
+        type="url",
+        document_id=DOC_ID,
+        project_id=PROJECT_ID,
+    )
+
+    doc_svc = AsyncMock(spec=DocumentService)
+    doc_svc.list_all_for_user.return_value = ([row], 1)
+
+    src_svc = AsyncMock(spec=SourceService)
+    src_svc.list_sources_for_documents.return_value = {DOC_ID: [badge_source]}
+
+    with (
+        _patch_user(),
+        patch("app.core.dependencies.get_document_service", return_value=doc_svc),
+        patch("app.core.dependencies.get_source_service", return_value=src_svc),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            r = await ac.get("/api/v1/documents", headers=AUTH_HEADERS)
+
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert len(items) == 1
+
+    sources = items[0]["sources"]
+    assert len(sources) == 1
+
+    badge = sources[0]
+    # P2: контракт shape SourceBadge
+    assert "id" in badge,   "SourceBadge must have 'id'"
+    assert "name" in badge, "SourceBadge must have 'name'"
+    assert "type" in badge, "SourceBadge must have 'type'"
+    assert badge["id"] == str(SOURCE_ID)
+    assert badge["name"] == "Confluence Wiki"
+    assert badge["type"] == "url"
