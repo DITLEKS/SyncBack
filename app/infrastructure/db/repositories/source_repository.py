@@ -17,6 +17,8 @@ I-1: добавлен list_by_document_ids — батч-запрос document-sc
 FIX-1: list_by_document_ids и replace_document_sources переписаны
     через JOIN на document_sources — Source.document_id не существует.
 FIX-2: create_with_id и create_url: source_type= → type= (имя колонки).
+WARN-2: attach_to_document — идемпотентная M2M-вставка в document_sources
+    без полного replace. Используется при создании scope=DOCUMENT источника.
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.repositories import ISourceRepository
@@ -121,6 +124,28 @@ class SourceRepository(ISourceRepository):
     # ------------------------------------------------------------------
     # Write
     # ------------------------------------------------------------------
+
+    async def attach_to_document(
+        self,
+        source_id: uuid.UUID,
+        document_id: uuid.UUID,
+    ) -> None:
+        """WARN-2: идемпотентная M2M-вставка в document_sources.
+
+        INSERT INTO document_sources (document_id, source_id)
+        VALUES (:doc_id, :src_id)
+        ON CONFLICT DO NOTHING
+
+        Безопасно вызывать повторно — повторная пара игнорируется.
+        """
+        from app.infrastructure.db.models.document_source import document_sources as DS
+        stmt = (
+            pg_insert(DS)
+            .values(document_id=document_id, source_id=source_id)
+            .on_conflict_do_nothing()
+        )
+        await self._session.execute(stmt)
+        await self._session.flush()
 
     async def create_with_id(
         self,

@@ -11,6 +11,8 @@ OPT-S2: delete_source — убран лишний get_source() перед уда
 OPT-S3: _guard_no_active_job не вызывается при scope=project (document_id=None).
 OPT-S6: scope в upload_file_source — typed SourceScopeVO Form, автовалидация FastAPI.
 OPT-S7: source_id — uuid.UUID вместо str (автопарсинг FastAPI).
+WARN-2: create_url_source и create_note_source передают document_id=payload.document_id
+        в сервис — M2M-вставка при scope=document теперь корректна.
 """
 from __future__ import annotations
 
@@ -72,7 +74,11 @@ async def create_url_source(
     await _guard_no_active_job(project.id, doc_id, job_service)
     scope = SourceScopeVO(payload.scope)
     source = await source_service.create_url_source(
-        project, payload.name, payload.url, scope=scope
+        project,
+        payload.name,
+        payload.url,
+        scope=scope,
+        document_id=doc_id,  # WARN-2: передаём document_id для M2M-вставки
     )
     return SourceResponse.model_validate(source)
 
@@ -93,7 +99,11 @@ async def create_note_source(
     await _guard_no_active_job(project.id, doc_id, job_service)
     scope = SourceScopeVO(payload.scope)
     source = await source_service.create_note_source(
-        project, payload.name, payload.text_content, scope=scope
+        project,
+        payload.name,
+        payload.text_content,
+        scope=scope,
+        document_id=doc_id,  # WARN-2: передаём document_id для M2M-вставки
     )
     return SourceResponse.model_validate(source)
 
@@ -117,38 +127,24 @@ async def upload_file_source(
     job_service: AnalysisJobService = Depends(get_analysis_job_service),
     settings: Settings = Depends(get_settings),
 ) -> SourceResponse:
-    if not file.filename:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Имя файла обязательно"
-        )
-    if scope == SourceScopeVO.DOCUMENT and not document_id:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="document_id обязателен при scope=document",
-        )
-
-    parsed_doc_id = _uuid.UUID(document_id) if document_id else None
+    """Загрузить файловый источник."""
+    parsed_doc_id: _uuid.UUID | None = (
+        _uuid.UUID(document_id) if document_id else None
+    )
     await _guard_no_active_job(project.id, parsed_doc_id, job_service)
-
-    try:
-        content = await read_upload_within_limit(file, settings.max_upload_size_bytes)
-    except FileTooLargeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)
-        ) from exc
+    content = await read_upload_within_limit(file, settings.max_upload_size_bytes)
     try:
         source = await source_service.create_file_source(
             project,
-            name,
-            file.filename,
-            content,
-            file.content_type or "application/octet-stream",
+            name=name,
+            filename=file.filename or "upload",
+            content=content,
+            content_type=file.content_type or "application/octet-stream",
             scope=scope,
+            document_id=parsed_doc_id,  # WARN-2: передаём document_id для M2M-вставки
         )
     except FileTooLargeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc))
     return SourceResponse.model_validate(source)
 
 
@@ -158,16 +154,15 @@ async def upload_file_source(
 
 @router.get("", response_model=Page[SourceResponse])
 async def list_sources(
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
     project: Project = Depends(get_allowed_project),
     source_service: SourceService = Depends(get_source_service),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
 ) -> Page[SourceResponse]:
-    sources, total = await source_service.list_sources(
-        project.id, limit=limit, offset=offset
-    )
-    return Page[SourceResponse](
-        items=[SourceResponse.model_validate(s) for s in sources],
+    """Список источников проекта с пагинацией."""
+    items, total = await source_service.list_sources(project.id, limit=limit, offset=offset)
+    return Page(
+        items=[SourceResponse.model_validate(s) for s in items],
         total=total,
         limit=limit,
         offset=offset,
@@ -180,21 +175,22 @@ async def list_sources(
 
 @router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_source(
-    # OPT-S7: uuid.UUID вместо str — FastAPI парсит и валидирует автоматически
     source_id: _uuid.UUID,
     project: Project = Depends(get_allowed_project),
     source_service: SourceService = Depends(get_source_service),
     job_service: AnalysisJobService = Depends(get_analysis_job_service),
 ) -> None:
-    """OPT-S2: убран лишний get_source() перед удалением.
+    """Удалить источник.
 
-    delete_source_with_guard бросает SourceNotFoundError сам,
-    если источник не найден или не принадлежит проекту.
+    OPT-S2: источник не загружается предварительно — delete_source_with_guard
+    делает одну атомарную операцию (проверка + DELETE).
+    OPT-S3 / FIX-1: guard вызывается с document_id=None → ранний return.
     """
+    await _guard_no_active_job(project.id, None, job_service)
     try:
-        document_id = await source_service.delete_source_with_guard(
-            project.id, source_id
+        await source_service.delete_source_with_guard(
+            project_id=project.id,
+            source_id=source_id,
         )
     except SourceNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    await _guard_no_active_job(project.id, document_id, job_service)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))

@@ -20,6 +20,9 @@ OPT-S2: delete_source_with_guard — атомарное удаление без 
         FIX-1: document_id не хранится на Source → возвращаем None (нет document-lock).
 FIX-B1: delete_source() (deprecated) переброшен на delete_if_owned чтобы не вызывать
         несуществующий ISourceRepository.delete(). Поведение идентично.
+WARN-2: create_url_source / create_note_source / create_file_source принимают
+        document_id: uuid.UUID | None = None. При scope=DOCUMENT + document_id
+        вызывают uow.sources.attach_to_document(source.id, document_id) — M2M-вставка.
 """
 from __future__ import annotations
 
@@ -68,6 +71,24 @@ class SourceService:
             )
 
     # ------------------------------------------------------------------
+    # Internal: M2M attach helper
+    # ------------------------------------------------------------------
+
+    async def _attach_if_document_scope(
+        self,
+        source_id: uuid.UUID,
+        scope: SourceScopeVO,
+        document_id: uuid.UUID | None,
+    ) -> None:
+        """WARN-2: если scope=DOCUMENT и document_id задан — вставить M2M-запись.
+
+        Вызывается изнутри create_*_source после flush источника,
+        в рамках того же UoW (сессия ещё открыта).
+        """
+        if scope is SourceScopeVO.DOCUMENT and document_id is not None:
+            await self._uow.sources.attach_to_document(source_id, document_id)
+
+    # ------------------------------------------------------------------
     # Create — note (P2: текст → MinIO как .txt)
     # ------------------------------------------------------------------
 
@@ -77,8 +98,12 @@ class SourceService:
         name: str,
         text_content: str,
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
+        document_id: uuid.UUID | None = None,
     ) -> "Source":
-        """Сохраняет текстовую заметку как .txt в MinIO."""
+        """Сохраняет текстовую заметку как .txt в MinIO.
+
+        WARN-2: при scope=DOCUMENT + document_id вставляет M2M-запись.
+        """
         if len(text_content.encode()) > self._settings.max_upload_size_bytes:
             raise FileTooLargeError(
                 f"Текст превышает лимит {self._settings.max_upload_size_mb} МБ"
@@ -102,6 +127,7 @@ class SourceService:
                     storage_key=storage_key,
                     scope=scope,
                 )
+                await self._attach_if_document_scope(source.id, scope, document_id)
                 await self._uow.commit()
         except Exception:
             await self._storage.delete(storage_key)
@@ -118,7 +144,9 @@ class SourceService:
         name: str,
         url: str,
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
+        document_id: uuid.UUID | None = None,
     ) -> "Source":
+        """WARN-2: при scope=DOCUMENT + document_id вставляет M2M-запись."""
         async with self._uow:
             source = await self._uow.sources.create_url(
                 project_id=project.id,
@@ -126,6 +154,7 @@ class SourceService:
                 url=url,
                 scope=scope,
             )
+            await self._attach_if_document_scope(source.id, scope, document_id)
             await self._uow.commit()
         return source
 
@@ -141,7 +170,9 @@ class SourceService:
         content: bytes,
         content_type: str,
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
+        document_id: uuid.UUID | None = None,
     ) -> "Source":
+        """WARN-2: при scope=DOCUMENT + document_id вставляет M2M-запись."""
         if len(content) > self._settings.max_upload_size_bytes:
             raise FileTooLargeError(
                 f"Файл превышает лимит {self._settings.max_upload_size_mb} МБ"
@@ -159,6 +190,7 @@ class SourceService:
                     storage_key=storage_key,
                     scope=scope,
                 )
+                await self._attach_if_document_scope(source.id, scope, document_id)
                 await self._uow.commit()
         except Exception:
             await self._storage.delete(storage_key)

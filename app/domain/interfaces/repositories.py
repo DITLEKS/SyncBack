@@ -20,6 +20,8 @@ CRIT-2: count_for_user и update удалены — не реализованы 
   compare_and_increment_review_version (объявлены явно ниже).
 CRIT-3: delete принимает Document, а не UUID — приведён к реализации
   (session.delete(document)).
+WARN-2: ISourceRepository.attach_to_document добавлен — M2M-вставка
+  в document_sources при scope=DOCUMENT без полного replace.
 """
 from __future__ import annotations
 
@@ -173,6 +175,19 @@ class ISourceRepository(ABC):
 
         Возвращает list[(Source, document_id)] — кортежи для группировки
         в сервисном слое без обращения к несуществующей Source.document_id.
+        """
+        ...
+
+    @abstractmethod
+    async def attach_to_document(
+        self,
+        source_id: uuid.UUID,
+        document_id: uuid.UUID,
+    ) -> None:
+        """WARN-2: вставить запись в document_sources без полного replace.
+
+        Используется при создании источника с scope=DOCUMENT + document_id.
+        Идемпотентен: повторная вставка существующей пары — no-op (INSERT OR IGNORE).
         """
         ...
 
