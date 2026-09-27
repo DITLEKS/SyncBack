@@ -8,13 +8,17 @@ P2: убраны note/text_content. Теперь два типа:
 P3: UrlConnector реализован, поэтому type='url' полностью функционален.
 I-1: добавлен SourceBadge — лёгкое представление источника для карточек
      DocumentListItem.sources (id + name + type, без дат и лишних полей).
+FIX-3: SourceResponse.uploaded_at → created_at.
+     Поле uploaded_at было удалено из модели Source в R-4 (дублировало
+     created_at). Схема не была обновлена → ValidationError на всех
+     GET/POST /sources эндпоинтах.
 """
 
 import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 
 class SourceCreateRequest(BaseModel):
@@ -38,7 +42,8 @@ class SourceResponse(BaseModel):
     name: str
     type: str
     scope: str
-    uploaded_at: datetime
+    # FIX-3: uploaded_at удалён из модели Source в R-4 — используем created_at.
+    created_at: datetime
 
     model_config = {"from_attributes": True}
 

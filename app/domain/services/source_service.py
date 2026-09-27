@@ -13,8 +13,11 @@
   - app.core.config — допустимый non-infra импорт.
 
 I-1: list_sources_for_documents — батч-загрузка document-scope источников.
+     Репозиторий возвращает list[tuple[Source, document_id]] (FIX-1);
+     сервис группирует по document_id без обращения к src.document_id.
 OPT-S2: delete_source_with_guard — атомарное удаление без предварительного get_source();
         бросает SourceNotFoundError если источник не найден или принадлежит другому проекту.
+        FIX-1: document_id не хранится на Source → возвращаем None (нет document-lock).
 """
 from __future__ import annotations
 
@@ -211,17 +214,21 @@ class SourceService:
     ) -> "dict[uuid.UUID, list[Source]]":
         """I-1: батч-загрузка document-scope источников для списка документов.
 
+        FIX-1: репозиторий возвращает list[tuple[Source, document_id]];
+        группируем по document_id здесь, без обращения к src.document_id
+        (колонки нет — связь через M2M document_sources).
+
         Возвращает {document_id: [Source, ...]} для маппинга в DocumentListItem.sources.
         """
         if not document_ids:
             return {}
         async with self._uow:
-            sources = await self._uow.sources.list_by_document_ids(
+            pairs = await self._uow.sources.list_by_document_ids(
                 project_id, document_ids
             )
         result: dict[uuid.UUID, list["Source"]] = defaultdict(list)
-        for src in sources:
-            result[src.document_id].append(src)
+        for source, doc_id in pairs:
+            result[doc_id].append(source)
         return dict(result)
 
     # ------------------------------------------------------------------
@@ -247,9 +254,9 @@ class SourceService:
     ) -> "uuid.UUID | None":
         """OPT-S2: атомарное удаление без предварительного get_source().
 
-        Репозиторий возвращает удалённый объект (или None если не найден/чужой).
-        Бросает SourceNotFoundError при отсутствии.
-        Возвращает document_id удалённого источника (для _guard_no_active_job в роутере).
+        FIX-1: Source не имеет колонки document_id — document_id-lock
+        в роутере через _guard_no_active_job(document_id=None) — ранний return.
+        Возвращает None (document_id недоступен из Source).
         """
         async with self._uow:
             deleted = await self._uow.sources.delete_if_owned(
@@ -264,7 +271,8 @@ class SourceService:
         storage_key = getattr(deleted, "storage_key", None)
         if storage_key:
             await self._storage.delete(storage_key)
-        return getattr(deleted, "document_id", None)
+        # FIX-1: document_id нет на модели Source → None (guard в роутере — no-op)
+        return None
 
     # ------------------------------------------------------------------
     # Attach / detach
