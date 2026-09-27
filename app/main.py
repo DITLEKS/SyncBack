@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from app.api.v1.routers.analysis_jobs import router as analysis_jobs_router
 from app.api.v1.routers.analysis_jobs_bulk import router as analysis_jobs_bulk_router
@@ -22,6 +24,7 @@ from app.api.v1.routers.suggestions import router as suggestions_router
 from app.api.v1.routers.system import router as system_router
 from app.core.config import get_settings
 from app.core.correlation_middleware import CorrelationIdMiddleware
+from app.core.limiter import limiter
 from app.core.logging_setup import configure_logging
 from app.domain.exceptions import DomainError
 
@@ -37,9 +40,6 @@ async def lifespan(app: FastAPI):
         extra={"env": settings.env, "llm_provider": settings.llm_provider},
     )
 
-    # Инициализируем SSE-брокер при старте приложения.
-    # Redis Pub/Sub (multi-instance) если redis_url задан;
-    # иначе автоматический fallback на InMemorySSEBroker (single-instance).
     await init_sse_broker(
         redis_url=settings.redis_url,
         channel=settings.redis_sse_channel,
@@ -63,6 +63,12 @@ def create_app() -> FastAPI:
         debug=settings.debug,
         lifespan=lifespan,
     )
+
+    # M-block: подключаем slowapi limiter.
+    # Должно быть до регистрации роутеров, чтобы exception handler
+    # перехватывал RateLimitExceeded раньше дефолтного 500-обработчика.
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
     # CORS — первый middleware, до любых других.
     app.add_middleware(

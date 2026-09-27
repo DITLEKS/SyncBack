@@ -21,6 +21,7 @@
 CRIT-NEW-2: list_documents передаёт PaginationParams-объект, а не limit/offset позиционно.
 LOW: exc_info=True добавлен в logger.warning внутри delete_document.
 FEAT: list_documents принимает status_filter: DocumentStatusVO | None.
+M-BLOCK: добавлен delete_document_by_id — удаление без предварительного SELECT.
 """
 from __future__ import annotations
 
@@ -210,16 +211,16 @@ class DocumentService:
         HIGH-2: удаление документа.
 
         Порядок: commit() сначала, MinIO-удаление потом.
+        Используется когда ORM-объект уже загружен (например, в attach_sources).
+        Для удаления только по ID без предварительного SELECT — см. delete_document_by_id.
         """
         storage_key = document.storage_key
         original_key: str | None = getattr(document, "original_storage_key", None)
 
-        # 1. Удаляем запись из БД.
         async with self._uow:
             await self._uow.documents.delete(document)
             await self._uow.commit()
 
-        # 2. Удаляем файлы из MinIO (бест-эффорт).
         keys_to_delete = {k for k in [storage_key, original_key] if k}
         for key in keys_to_delete:
             try:
@@ -229,6 +230,44 @@ class DocumentService:
                     "Не удалось удалить файл из MinIO после удаления документа",
                     exc_info=True,
                     extra={"storage_key": key, "document_id": str(document.id)},
+                )
+
+    async def delete_document_by_id(
+        self,
+        project_id: uuid.UUID,
+        document_id: uuid.UUID,
+    ) -> None:
+        """M-BLOCK: удалить документ без предварительного SELECT.
+
+        Репозиторий выполняет:
+            DELETE FROM documents WHERE id = :id AND project_id = :project_id
+        и возвращает storage_key удалённой строки (или None если не найдено).
+
+        Если ни одна строка не удалена — бросает DocumentNotFoundError (404).
+        Файлы из MinIO удаляются бест-эффорт после коммита БД.
+        """
+        async with self._uow:
+            deleted = await self._uow.documents.delete_by_id(
+                document_id=document_id,
+                project_id=project_id,
+            )
+            if deleted is None:
+                raise DocumentNotFoundError(
+                    f"Документ {document_id} не найден в проекте {project_id}"
+                )
+            storage_key: str = deleted["storage_key"]
+            original_key: str | None = deleted.get("original_storage_key")
+            await self._uow.commit()
+
+        keys_to_delete = {k for k in [storage_key, original_key] if k}
+        for key in keys_to_delete:
+            try:
+                await self._storage.delete(key)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Не удалось удалить файл из MinIO (delete_by_id)",
+                    exc_info=True,
+                    extra={"storage_key": key, "document_id": str(document_id)},
                 )
 
     async def get_download_url(self, document: "Document") -> tuple[str, int]:
