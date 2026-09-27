@@ -22,6 +22,10 @@ SQLAlchemy-адаптер для Suggestion.
 - M-1 (issue #37): bulk_update_status scope-фильтр исправлен:
   decisions.document_id сравнивается с M.document_id (денормализованная
   колонка), а не с M.analysis_job_id.
+- NEW-1: delete_by_analysis_job — bulk DELETE всех правок job одним запросом;
+  вызывается в create_job при повторном анализе (ERROR/CANCELLED → DRAFT).
+- NEW-2: reset_to_pending_by_job — bulk UPDATE всех правок job → PENDING;
+  вызывался в reset_analysis() но отсутствовал в реализации.
 """
 from __future__ import annotations
 
@@ -29,7 +33,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Sequence
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.repositories import ISuggestionRepository
@@ -378,3 +382,54 @@ class SuggestionRepository(ISuggestionRepository):
             return None
         await self._session.refresh(suggestion)
         return suggestion
+
+    async def delete_by_analysis_job(
+        self,
+        analysis_job_id: uuid.UUID,
+    ) -> int:
+        """NEW-1: bulk DELETE всех правок job одним запросом.
+
+        DELETE FROM suggestions WHERE analysis_job_id = ?.
+        Возвращает rowcount — количество удалённых строк.
+
+        Идемпотентен: если правок нет — возвращает 0, не бросает исключений.
+        Вызывается в AnalysisJobService.create_job() при повторном запуске
+        анализа (статус документа ERROR или CANCELLED), до создания новой job.
+        """
+        from app.infrastructure.db.models.suggestion import Suggestion as M
+        stmt = delete(M).where(M.analysis_job_id == analysis_job_id)
+        result = await self._session.execute(stmt)
+        await self._session.flush()
+        return result.rowcount
+
+    async def reset_to_pending_by_job(
+        self,
+        analysis_job_id: uuid.UUID,
+    ) -> int:
+        """NEW-2: bulk UPDATE всех правок job обратно в PENDING.
+
+        UPDATE suggestions
+           SET status = 'pending', decided_by = NULL, decided_at = NULL
+         WHERE analysis_job_id = ? AND status != 'pending'.
+        Возвращает количество затронутых строк.
+
+        Идемпотентен: если все правки уже PENDING — возвращает 0.
+        Вызывается в AnalysisJobService.reset_analysis().
+        """
+        from app.infrastructure.db.models.enums import SuggestionStatus
+        from app.infrastructure.db.models.suggestion import Suggestion as M
+        stmt = (
+            update(M)
+            .where(
+                M.analysis_job_id == analysis_job_id,
+                M.status != SuggestionStatus.PENDING,
+            )
+            .values(
+                status=SuggestionStatus.PENDING,
+                decided_by=None,
+                decided_at=None,
+            )
+        )
+        result = await self._session.execute(stmt)
+        await self._session.flush()
+        return result.rowcount

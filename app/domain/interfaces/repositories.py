@@ -28,6 +28,12 @@ FIX-review-4: get_primary_document_id_for_source — M2M-запрос перво
   document_id для источника; используется в DELETE /sources/{id} guard.
 C-2 (issue #37): ISuggestionRepository дополнен абстрактными методами
   reset_status() и bulk_reject_all() — приведён к реализации.
+NEW-1: ISuggestionRepository.delete_by_analysis_job() — bulk DELETE всех
+  правок job одним запросом; вызывается в create_job при повторном анализе
+  (статус документа ERROR/CANCELLED) чтобы не оставлять мусор в БД.
+NEW-2: ISuggestionRepository.reset_to_pending_by_job() — bulk UPDATE
+  всех правок job обратно в PENDING; уже вызывался в reset_analysis(),
+  но отсутствовал в интерфейсе и реализации — критический пробел.
 """
 from __future__ import annotations
 
@@ -398,5 +404,43 @@ class ISuggestionRepository(ABC):
         Атомарный UPDATE WHERE status != PENDING AND id = ?.
         Возвращает обновлённый объект или None если правка уже PENDING
         (сбрасывать нечего — идемпотентно со стороны репозитория).
+        """
+        ...
+
+    @abstractmethod
+    async def delete_by_analysis_job(
+        self,
+        analysis_job_id: uuid.UUID,
+    ) -> int:
+        """NEW-1: bulk DELETE всех правок job одним запросом.
+
+        DELETE FROM suggestions WHERE analysis_job_id = ?.
+        Возвращает количество удалённых строк (rowcount).
+
+        Вызывается в AnalysisJobService.create_job() при повторном запуске
+        анализа (статус документа ERROR или CANCELLED — FIX-ANAL-1),
+        до создания новой job — чтобы старые правки предыдущего анализа
+        не оставались в БД.
+
+        Идемпотентен: если правок нет — возвращает 0, не бросает исключений.
+        """
+        ...
+
+    @abstractmethod
+    async def reset_to_pending_by_job(
+        self,
+        analysis_job_id: uuid.UUID,
+    ) -> int:
+        """NEW-2: bulk UPDATE всех правок job обратно в PENDING.
+
+        UPDATE suggestions
+           SET status = 'pending', decided_by = NULL, decided_at = NULL
+         WHERE analysis_job_id = ? AND status != 'pending'.
+        Возвращает количество затронутых строк.
+
+        Уже вызывался в AnalysisJobService.reset_analysis(), но отсутствовал
+        в интерфейсе и реализации — критический пробел.
+
+        Идемпотентен: если все правки уже PENDING — возвращает 0.
         """
         ...
