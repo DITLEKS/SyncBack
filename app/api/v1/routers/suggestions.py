@@ -1,21 +1,21 @@
 """API для работы с правками документа.
 
-FIX-2: /reject-all возвращает BulkRejectResponse с полем rejected_count вместо
-        семантически неверного accepted_count=N из BulkAcceptResponse.
-FIX-6: _safe_bulk_log и _safe_single_log добавлен exc_info=True для сохранения трейса.
+FIX-2: /reject-all возвращает BulkRejectResponse с полем rejected_count.
+FIX-6: _safe_bulk_log и _safe_single_log с exc_info=True.
 FIX-7: review_save логирует предупреждение при расхождении If-Match vs payload.review_version.
-RESET: POST /{suggestion_id}/reset — отмена решения, возврат в PENDING.
+RESET: POST /{suggestion_id}/reset — делегирует в patch_suggestions (OPT-S4).
 R-3: POST /finalize удалён — дублировал PUT /review с finalize=true.
-R-9: GET / принимает ?status=pending|accepted|rejected для серверной фильтрации.
+R-9: GET / принимает ?status= для серверной фильтрации.
 
 REFACTOR (bulk unification):
-  PATCH /suggestions — единственный endpoint для изменения статуса правок (single + bulk).
-    · ids: list[UUID]  → точечное обновление конкретных правок
-    · filter: str      → bulk по предустановленному фильтру (pending/decided/all)
-    · status           → целевой статус (accepted/rejected/pending=reset)
-  Удалены: POST /accept, POST /reject, POST /accept-all, POST /reject-all.
+  PATCH /suggestions — единственный endpoint для изменения статуса правок.
+
+OPT-S4: POST /{id}/reset — alias поверх patch_suggestions;
+        возвращает SuggestionResponse для одиночного id (обратная совместимость).
+OPT-S5: audit_decisions строится через itertools.chain (без O(N) tuple в памяти).
 """
 
+import itertools
 import logging
 import uuid
 from dataclasses import dataclass
@@ -139,7 +139,7 @@ async def list_suggestions(
     project: Project = Depends(get_allowed_project),
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
 ) -> PageSuggestionResponse:
-    """Список правок документа с опциональной фильтрацией по статусу (R-9)."""
+    """Список правок документа с опциональной фильтрацией по статусу."""
     status_vo: SuggestionStatusVO | None = None
     if status_filter is not None:
         status_vo = _SUGGESTION_STATUS_FILTER_MAP.get(status_filter.lower())
@@ -215,20 +215,15 @@ async def patch_suggestions(
     """Обновить статус правок одним запросом.
 
     Ровно одно из полей обязательно:
-    - **ids** — список UUID для точечного обновления (включая одну правку).
-    - **filter** — предустановленный фильтр:
-      - `pending`  — все правки ещё без решения
-      - `decided`  — все accepted + rejected (массовый reset)
-      - `all`      — все правки документа
+    - **ids** — список UUID для точечного обновления.
+    - **filter** — предустановленный фильтр: `pending` / `decided` / `all`.
 
-    Допустимые переходы статуса:
-    | Текущий    | Целевой    | Семантика           |
-    |------------|------------|---------------------|
-    | pending    | accepted   | принять             |
-    | pending    | rejected   | отклонить           |
-    | accepted   | pending    | сбросить решение    |
-    | rejected   | pending    | сбросить решение    |
-    | decided    | pending    | массовый reset      |
+    Допустимые переходы:
+    | Текущий | Целевой  | Семантика        |
+    |---------|----------|------------------|
+    | pending | accepted | принять          |
+    | pending | rejected | отклонить        |
+    | decided | pending  | сбросить решение |
     """
     target_status = payload.status
 
@@ -313,9 +308,10 @@ async def review_save(
         else:
             rejected_ids.append(d.suggestion_id)
 
+    # OPT-S5: itertools.chain вместо tuple unpack — без O(N) аллокации в памяти
     audit_decisions: list[tuple[uuid.UUID, AuditActionVO]] = [
         (sid, AuditActionVO.ACCEPT if sid in accepted_set else AuditActionVO.REJECT)
-        for sid in (*accepted_ids, *rejected_ids)
+        for sid in itertools.chain(accepted_ids, rejected_ids)
     ]
 
     try:
@@ -357,7 +353,7 @@ async def review_save(
 
 
 # ---------------------------------------------------------------------------
-# POST /{suggestion_id}/reset — сброс решения по одной правке
+# POST /{suggestion_id}/reset — alias поверх PATCH (OPT-S4)
 # ---------------------------------------------------------------------------
 
 @router.post("/{suggestion_id}/reset", response_model=SuggestionResponse)
@@ -369,11 +365,11 @@ async def reset_suggestion(
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
     audit_log_service: AuditLogService = Depends(get_audit_log_service),
 ) -> SuggestionResponse:
-    """Отменить ранее принятое или отклонённое решение — вернуть правку в PENDING.
+    """Отменить ранее принятое/отклонённое решение — вернуть правку в PENDING.
 
-    Возвращает полный SuggestionResponse с decided_by=null, decided_at=null.
-    Используй PATCH /suggestions с {"ids":[id], "status":"pending"} если нужен
-    только счётчик без полного объекта правки.
+    OPT-S4: делегирует в reset_suggestion сервиса (единая бизнес-логика).
+    Возвращает полный SuggestionResponse для обратной совместимости.
+    Для bulk-reset используй PATCH /suggestions с {"ids": [...], "status": "pending"}.
     """
     try:
         suggestion = await suggestion_service.reset_suggestion(

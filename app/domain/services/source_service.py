@@ -3,20 +3,18 @@
 
 После P2:
   - create_text_source (хранил text_content в БД) удалён.
-  - create_note_source: кодирует текст в UTF-8, загружает в MinIO
-    как «<source_id>.txt», сохраняет storage_key. Единый путь
-    с файловым источником — воркер всегда идёт в MinIO.
+  - create_note_source: кодирует текст в UTF-8, загружает в MinIO.
   - create_url_source: сохраняет url в БД (без файла в MinIO).
   - create_file_source: без изменений.
 
 Архитектурные правила:
   - Зависит только от IUnitOfWork (порт) и FileStorage (порт).
   - Нет импортов из app.infrastructure.* при выполнении.
-  - app.core.config — допустимый non-infra импорт (документировано).
+  - app.core.config — допустимый non-infra импорт.
 
-I-1: добавлен list_sources_for_documents(project_id, document_ids) —
-  публичный метод сервиса, возвращает dict[UUID, list[Source]],
-  готовый для маппинга в DocumentListItem.sources.
+I-1: list_sources_for_documents — батч-загрузка document-scope источников.
+OPT-S2: delete_source_with_guard — атомарное удаление без предварительного get_source();
+        бросает SourceNotFoundError если источник не найден или принадлежит другому проекту.
 """
 from __future__ import annotations
 
@@ -176,6 +174,18 @@ class SourceService:
             total = await self._uow.sources.count_by_project(project_id)
         return items, total
 
+    async def get_source(
+        self, project_id: uuid.UUID, source_id: uuid.UUID
+    ) -> "Source":
+        """Получить источник. Бросает SourceNotFoundError если не найден."""
+        async with self._uow:
+            source = await self._uow.sources.get_by_id(source_id)
+        if source is None or source.project_id != project_id:
+            raise SourceNotFoundError(
+                f"Источник {source_id} не найден в проекте {project_id}"
+            )
+        return source
+
     async def get_sources_for_project(
         self, project_id: uuid.UUID, source_ids: list[uuid.UUID]
     ) -> "list[Source]":
@@ -201,10 +211,7 @@ class SourceService:
     ) -> "dict[uuid.UUID, list[Source]]":
         """I-1: батч-загрузка document-scope источников для списка документов.
 
-        Возвращает словарь {document_id: [Source, ...]}, готовый
-        для маппинга в DocumentListItem.sources без доп-запросов.
-        Пустой список для документов без источников не добавляется
-        в словарь — вызывающий использует .get(doc_id, []).
+        Возвращает {document_id: [Source, ...]} для маппинга в DocumentListItem.sources.
         """
         if not document_ids:
             return {}
@@ -216,6 +223,48 @@ class SourceService:
         for src in sources:
             result[src.document_id].append(src)
         return dict(result)
+
+    # ------------------------------------------------------------------
+    # Delete
+    # ------------------------------------------------------------------
+
+    async def delete_source(
+        self, project_id: uuid.UUID, source_id: uuid.UUID
+    ) -> None:
+        """Удалить источник. Устаревший метод — используй delete_source_with_guard."""
+        source = await self.get_source(project_id, source_id)
+        storage_key = getattr(source, "storage_key", None)
+        async with self._uow:
+            await self._uow.sources.delete(source_id)
+            await self._uow.commit()
+        if storage_key:
+            await self._storage.delete(storage_key)
+
+    async def delete_source_with_guard(
+        self,
+        project_id: uuid.UUID,
+        source_id: uuid.UUID,
+    ) -> "uuid.UUID | None":
+        """OPT-S2: атомарное удаление без предварительного get_source().
+
+        Репозиторий возвращает удалённый объект (или None если не найден/чужой).
+        Бросает SourceNotFoundError при отсутствии.
+        Возвращает document_id удалённого источника (для _guard_no_active_job в роутере).
+        """
+        async with self._uow:
+            deleted = await self._uow.sources.delete_if_owned(
+                project_id=project_id,
+                source_id=source_id,
+            )
+            if deleted is None:
+                raise SourceNotFoundError(
+                    f"Источник {source_id} не найден в проекте {project_id}"
+                )
+            await self._uow.commit()
+        storage_key = getattr(deleted, "storage_key", None)
+        if storage_key:
+            await self._storage.delete(storage_key)
+        return getattr(deleted, "document_id", None)
 
     # ------------------------------------------------------------------
     # Attach / detach

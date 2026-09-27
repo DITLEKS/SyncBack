@@ -1,19 +1,16 @@
 """
 DashboardService — оркестрирует агрегаты для GET /dashboard,
-GET /documents/attention, GET /documents/recent и GET /dashboard/stats.
+GET /documents/attention, GET /documents/recent и расширенной статистики.
 
 Архитектурные правила:
-  - Зависит только от IDashboardQueryService (read-model порт) для агрегатов.
-  - track_open делегируется через тот же IDashboardQueryService (он содержит upsert_open).
+  - Зависит только от IDashboardQueryService (read-model порт).
   - Нет импортов из app.infrastructure.* при выполнении.
 
-CRIT-D1 (этот раунд):
-  DashboardService переключён с IUnitOfWork на IDashboardQueryService.
+OPT-D1: get_dashboard объединяет прежние get_dashboard + get_extended_stats
+  в один метод — фронт делает один round-trip вместо двух.
+  DashboardResponse расширен полями статистики (saved_hours, approved_percent и др.).
 
-STATS: get_extended_stats добавлен для GET /dashboard/stats.
-  Оценка saved_hours: каждая принятая правка экономит AVG_MINUTES_PER_SUGGESTION минут;
-  константа намеренно вынесена в сервис — продакт может скорректировать без
-  изменения репозитория.
+OPT-D8: track_open принимает project_id для проверки ownership.
 """
 from __future__ import annotations
 
@@ -21,14 +18,12 @@ import uuid
 
 from app.api.schemas.dashboard import (
     DashboardResponse,
-    DashboardStatsResponse,
     DayActivity,
     DocumentsByStatus,
 )
 from app.domain.interfaces.dashboard_query_service import IDashboardQueryService
 
 # Среднее время (в минутах) на ручное применение одной правки.
-# Используется для оценки «сэкономленных часов» на дашборде.
 _AVG_MINUTES_PER_SUGGESTION: float = 3.0
 
 
@@ -36,17 +31,26 @@ class DashboardService:
     def __init__(self, dashboard_qs: IDashboardQueryService) -> None:
         self._qs = dashboard_qs
 
-    # ── Dashboard агрегаты ────────────────────────────────────────────
+    # ── Dashboard агрегаты + статистика (OPT-D1) ─────────────────────
 
     async def get_dashboard(self, user_id: uuid.UUID) -> DashboardResponse:
-        """CRIT-D1: используем IDashboardQueryService, не uow.dashboard."""
-        stats = await self._qs.get_stats(user_id)
-        activity_rows = await self._qs.get_activity_last_7_days(user_id)
+        """Единый метод для GET /dashboard.
 
-        total = stats["total"]
-        awaiting = stats["awaiting"]
-        ready = stats["ready"]
+        OPT-D1: объединяет прежние get_stats + get_extended_stats в один
+        запрос к query-service, чтобы фронт делал один HTTP round-trip.
+        """
+        stats, activity_rows, extended = await self._qs.get_all_dashboard_data(user_id)
+
+        total: int = stats["total"]
+        awaiting: int = stats["awaiting"]
+        ready: int = stats["ready"]
         relevance_percent = round(ready / total * 100) if total else 0
+
+        accepted: int = extended.get("accepted_count", 0)
+        rejected: int = extended.get("rejected_count", 0)
+        decided = accepted + rejected
+        approved_percent = round(accepted / decided * 100, 1) if decided else 0.0
+        saved_hours = round(accepted * _AVG_MINUTES_PER_SUGGESTION / 60, 1)
 
         return DashboardResponse(
             total_documents=total,
@@ -56,35 +60,17 @@ class DashboardService:
             activity_last_7_days=[
                 DayActivity(date=r["date"], opens=r["opens"]) for r in activity_rows
             ],
-        )
-
-    # ── Расширенная статистика (виджеты) ─────────────────────────────
-
-    async def get_extended_stats(self, user_id: uuid.UUID) -> DashboardStatsResponse:
-        """GET /dashboard/stats — данные для виджетов главной страницы.
-
-        saved_hours рассчитывается по формуле:
-          accepted_count * _AVG_MINUTES_PER_SUGGESTION / 60
-        """
-        raw = await self._qs.get_extended_stats(user_id)
-
-        accepted: int = raw.get("accepted_count", 0)
-        rejected: int = raw.get("rejected_count", 0)
-        decided = accepted + rejected
-        approved_percent = round(accepted / decided * 100, 1) if decided else 0.0
-        saved_hours = round(accepted * _AVG_MINUTES_PER_SUGGESTION / 60, 1)
-
-        return DashboardStatsResponse(
+            # расширенная статистика (бывший /dashboard/stats)
             saved_hours=saved_hours,
             approved_percent=approved_percent,
             documents_by_status=DocumentsByStatus(
-                draft=raw.get("draft", 0),
-                in_progress=raw.get("in_progress", 0),
-                awaiting_approval=raw.get("awaiting_approval", 0),
-                ready=raw.get("ready", 0),
-                failed=raw.get("failed", 0),
+                draft=extended.get("draft", 0),
+                in_progress=extended.get("in_progress", 0),
+                awaiting_approval=extended.get("awaiting_approval", 0),
+                ready=extended.get("ready", 0),
+                failed=extended.get("failed", 0),
             ),
-            total_suggestions=raw.get("total_suggestions", 0),
+            total_suggestions=extended.get("total_suggestions", 0),
             accepted_count=accepted,
             rejected_count=rejected,
         )
@@ -103,10 +89,13 @@ class DashboardService:
     ) -> list[dict]:
         return await self._qs.get_recent_documents(user_id, limit=limit)
 
-    # ── Трекинг открытия ─────────────────────────────────────────────
+    # ── Трекинг открытия (OPT-D8) ────────────────────────────────────
 
     async def track_open(
-        self, user_id: uuid.UUID, document_id: uuid.UUID
+        self,
+        user_id: uuid.UUID,
+        document_id: uuid.UUID,
+        project_id: uuid.UUID | None = None,
     ) -> None:
-        """CRIT-D1: upsert_open живёт в IDashboardQueryService, не в UoW."""
-        await self._qs.upsert_open(user_id, document_id)
+        """OPT-D8: project_id передаётся для проверки ownership в query-service."""
+        await self._qs.upsert_open(user_id, document_id, project_id=project_id)
