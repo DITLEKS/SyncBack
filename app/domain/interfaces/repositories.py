@@ -10,7 +10,7 @@ FIX-1: ISourceRepository.list_by_document_ids возвращает
   колонке Source.document_id (связь через M2M document_sources).
 FIX-B1: удалён @abstractmethod delete(source_id) — метод никогда не был
   реализован в SourceRepository (единственный рабочий путь — delete_if_owned).
-FIX-2 (ревью): IDocumentRepository.list_all_for_user сигнатура обновлена под
+FIX-2 (ревю): IDocumentRepository.list_all_for_user сигнатура обновлена под
   реальный возвращаемый тип tuple[list[DocumentRow], int].
   DocumentRow — TypedDict с явным контрактом ключей.
 CRIT-1: list_all_for_user расширен параметрами status/outdated/search/sort_by/sort_dir
@@ -24,6 +24,8 @@ WARN-2: ISourceRepository.attach_to_document добавлен — M2M-встав
   в document_sources при scope=DOCUMENT без полного replace.
 R-5: ISourceRepository.list_by_project — добавлен опциональный параметр
   scope: SourceScopeVO | None = None для фильтрации по scope.
+FIX-review-4: get_primary_document_id_for_source — M2M-запрос первого
+  document_id для источника; используется в DELETE /sources/{id} guard.
 """
 from __future__ import annotations
 
@@ -43,7 +45,7 @@ class DocumentRow(TypedDict):
 
     Каждый dict в списке содержит объект Document + агрегаты
     из SQL-запроса (LEFT JOIN на projects и COUNT правок).
-    Поле sources НЕ включено сюда намеренно — оно инжектируется отдельным
+    Поле sources НЕ включено сюда намеренно — оно инъектируется отдельным
     батч-запросом в роутере через SourceService.list_sources_for_documents.
     """
     document: "Document"
@@ -193,6 +195,21 @@ class ISourceRepository(ABC):
         ...
 
     @abstractmethod
+    async def get_primary_document_id_for_source(
+        self,
+        source_id: uuid.UUID,
+    ) -> "uuid.UUID | None":
+        """FIX-review-4: вернуть первый document_id из M2M-таблицы document_sources.
+
+        Source не хранит document_id напрямую — связь через M2M.
+        None означает что источник project-scope (document_sources пуст: нет связей).
+
+        Используется в SourceService.get_primary_document_id() →
+        DELETE /sources/{id} шаг 2 — перед guard активных jobив.
+        """
+        ...
+
+    @abstractmethod
     async def attach_to_document(
         self,
         source_id: uuid.UUID,
@@ -200,7 +217,6 @@ class ISourceRepository(ABC):
     ) -> None:
         """WARN-2: вставить запись в document_sources без полного replace.
 
-        Используется при создании источника с scope=DOCUMENT + document_id.
         Идемпотентен: повторная вставка существующей пары — no-op (INSERT OR IGNORE).
         """
         ...

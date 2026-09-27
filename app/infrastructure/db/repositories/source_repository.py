@@ -11,8 +11,8 @@ R-4: uploaded_at удалён из модели Source; list_by_project тепе
     сортирует по created_at DESC (семантически эквивалентно).
 I-1: добавлен list_by_document_ids — батч-запрос document-scope источников
     для нескольких документов через JOIN на document_sources (M2M).
-    Возвращает list[tuple[Source, document_id]] чтобы сервис мог
-    строить dict без обращения к несуществующей Source.document_id.
+    Возвращает list[tuple[Source, document_id]] чтобы сервис
+    мог строить dict без обращения к несуществующей Source.document_id.
 
 FIX-1: list_by_document_ids и replace_document_sources переписаны
     через JOIN на document_sources — Source.document_id не существует.
@@ -26,6 +26,9 @@ WARN-2: attach_to_document — идемпотентная M2M-вставка в 
 R-5: list_by_project принимает опциональный параметр scope: SourceScopeVO | None.
     None (по умолчанию) — без фильтра. Передача конкретного scope ограничивает
     результат источниками нужного scope (используется для PROJECT-only эндпоинта).
+FIX-review-4: get_primary_document_id_for_source — один SELECT из
+    document_sources WHERE source_id = :id LIMIT 1. Закрывает открытый
+    контракт из коммита 7d92cb0.
 """
 from __future__ import annotations
 
@@ -147,6 +150,30 @@ class SourceRepository(ISourceRepository):
         )
         result = await self._session.execute(stmt)
         return [(row.Source, row.document_id) for row in result]
+
+    async def get_primary_document_id_for_source(
+        self,
+        source_id: uuid.UUID,
+    ) -> "uuid.UUID | None":
+        """FIX-review-4: первый document_id из M2M-таблицы document_sources.
+
+        Один SELECT без JOIN на sources — нет необходимости в полном
+        объекте Source, нужен только связь.
+
+        SQL:
+            SELECT document_id
+              FROM document_sources
+             WHERE source_id = :source_id
+             LIMIT 1
+        """
+        from app.infrastructure.db.models.document_source import document_sources as DS
+        result = await self._session.execute(
+            select(DS.c.document_id)
+            .where(DS.c.source_id == source_id)
+            .limit(1)
+        )
+        row = result.one_or_none()
+        return row[0] if row is not None else None
 
     # ------------------------------------------------------------------
     # Write
