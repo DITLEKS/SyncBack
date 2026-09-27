@@ -5,6 +5,12 @@ Value-объекты доменного слоя — иммутабельные 
   - Никаких импортов из infrastructure.*
   - Никаких импортов из FastAPI / SQLAlchemy
   - Все поля frozen=True (или StrEnum)
+
+FIX-VO-1: DocumentStatusVO дополнен значениями ERROR и CANCELLED,
+    которые присутствуют в enums.DocumentStatus (инфра) и записываются
+    в БД analysis_job_service при завершении job с ошибкой или отменой.
+    Без этих значений DocumentStatusVO(document.status) бросал ValueError
+    при status in ('error', 'cancelled').
 """
 from __future__ import annotations
 
@@ -23,6 +29,12 @@ class DocumentStatusVO(StrEnum):
     IN_PROGRESS       = "in_progress"
     AWAITING_APPROVAL = "awaiting_approval"
     READY             = "ready"
+    # FIX-VO-1: синхронизировано с enums.DocumentStatus (infrastructure).
+    # Требует миграции (уже выполнена в FIX-review-7):
+    #   ALTER TYPE document_status ADD VALUE IF NOT EXISTS 'error';
+    #   ALTER TYPE document_status ADD VALUE IF NOT EXISTS 'cancelled';
+    ERROR             = "error"
+    CANCELLED         = "cancelled"
 
 
 class SuggestionStatusVO(StrEnum):
