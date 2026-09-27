@@ -106,6 +106,25 @@ class IDocumentRepository(ABC):
     @abstractmethod
     async def delete(self, document: DocumentProtocol) -> None: ...
 
+    @abstractmethod
+    async def delete_by_id(
+        self,
+        document_id: uuid.UUID,
+        project_id: uuid.UUID,
+    ) -> dict[str, str | None] | None:
+        """Удалить документ по ID без предварительного SELECT.
+
+        Возвращает dict с ключами ``storage_key`` и ``original_storage_key``
+        если строка удалена, или ``None`` если документ не найден
+        (document_id не существует или не принадлежит project_id).
+
+        Реализация через:
+            DELETE FROM documents
+             WHERE id = :document_id AND project_id = :project_id
+             RETURNING storage_key, original_storage_key
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Suggestion

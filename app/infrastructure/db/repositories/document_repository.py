@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import exists, func, select, text, tuple_, update
+from sqlalchemy import delete, exists, func, select, text, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.repositories import IDocumentRepository
@@ -167,7 +167,6 @@ class DocumentRepository(IDocumentRepository):
         if sort_by not in _SORT_COLUMNS:
             sort_by = "updated_at"
 
-        # N-1: счётчики suggestions считаем напрямую через S.document_id — без JOIN через AJ.
         suggestions_total = func.count(S.id).label("suggestions_total")
         suggestions_pending = (
             func.count(S.id)
@@ -195,7 +194,6 @@ class DocumentRepository(IDocumentRepository):
                 suggestions_rejected,
             )
             .join(P, M.project_id == P.id)
-            # N-1: прямой JOIN Suggestion.document_id == M.id, AJ больше не нужен.
             .outerjoin(S, S.document_id == M.id)
             .where(P.owner_id == user_id)
             .group_by(M.id, P.name)
@@ -216,9 +214,6 @@ class DocumentRepository(IDocumentRepository):
         if search:
             safe_search = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             base_q = base_q.where(M.name.ilike(f"%{safe_search}%", escape="\\"))
-
-        sort_col = getattr(M, sort_by)
-        order_expr = sort_col.asc() if sort_dir == "asc" else sort_col.desc()
 
         cte = base_q.cte("docs_cte")
         paged_q = (
@@ -270,7 +265,6 @@ class DocumentRepository(IDocumentRepository):
         document: "Document",
         export_key: str,
     ) -> None:
-        # N-2: поле exported_storage_key добавлено в модель Document.
         document.exported_storage_key = export_key
         await self._session.flush()
 
@@ -299,3 +293,39 @@ class DocumentRepository(IDocumentRepository):
     async def delete(self, document: "Document") -> None:
         await self._session.delete(document)
         await self._session.flush()
+
+    async def delete_by_id(
+        self,
+        document_id: uuid.UUID,
+        project_id: uuid.UUID,
+    ) -> dict[str, str | None] | None:
+        """M-BLOCK: удалить документ без предварительного SELECT.
+
+        Выполняет:
+            DELETE FROM documents
+             WHERE id = :document_id AND project_id = :project_id
+             RETURNING storage_key, original_storage_key
+
+        Возвращает dict {'storage_key': ..., 'original_storage_key': ...}
+        если строка удалена, или None если документ не найден /
+        не принадлежит проекту.
+        """
+        from app.infrastructure.db.models.document import Document as M
+
+        stmt = (
+            delete(M)
+            .where(
+                M.id == document_id,
+                M.project_id == project_id,
+            )
+            .returning(M.storage_key, M.original_storage_key)
+        )
+        result = await self._session.execute(stmt)
+        row = result.one_or_none()
+        if row is None:
+            return None
+        await self._session.flush()
+        return {
+            "storage_key": row.storage_key,
+            "original_storage_key": row.original_storage_key,
+        }
