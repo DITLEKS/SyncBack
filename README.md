@@ -29,6 +29,7 @@ app/
 - **API**: FastAPI + Pydantic v2, Uvicorn/Gunicorn
 - **БД**: PostgreSQL + SQLAlchemy (async) + Alembic
 - **Очереди**: Celery + Redis (брокер и result backend)
+- **Real-time**: SSE (Server-Sent Events) через Redis Pub/Sub (fallback: in-memory)
 - **Файловое хранилище**: Minio (S3-совместимое, приватный бакет)
 - **Аутентификация**: JWT (PyJWT) + bcrypt (passlib)
 - **Парсинг документов**: python-docx (docx), нативная обработка (txt/markdown)
@@ -115,6 +116,7 @@ CI (`.github/workflows/ci.yml`) запускает оба набора авто�
 |---|---|---|
 | БД | `DATABASE_URL` | Строка подключения PostgreSQL (async, `postgresql+asyncpg://`) |
 | Redis | `REDIS_URL` | Брокер и result backend Celery, кэш rate limiting |
+| Redis SSE | `REDIS_SSE_PUBSUB_CHANNEL` | Канал Redis Pub/Sub для SSE (опционально; при отсутствии — in-memory fallback) |
 | Minio | `MINIO_ENDPOINT`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `MINIO_BUCKET`, `MINIO_SECURE`, `MINIO_PRESIGNED_URL_EXPIRE_SECONDS` | Файловое хранилище документов и источников |
 | JWT | `JWT_SECRET`, `JWT_ALGORITHM`, `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | Подпись и срок жизни токенов доступа. **`JWT_SECRET` должен быть ≥ 32 байт** для HS256 |
 | Логин | `LOGIN_MAX_ATTEMPTS`, `LOGIN_LOCKOUT_SECONDS` | Защита от брутфорса (счётчик в Redis) |
@@ -132,9 +134,11 @@ CI (`.github/workflows/ci.yml`) запускает оба набора авто�
 | `sources` | Источники истины (file/note/link), переиспользуемые; поле `scope` — UI-метка (не ограничение) | M:N с `documents` через `document_sources` |
 | `document_sources` | Связка документ↔источник | — |
 | `document_blocks` | Структурные блоки документа (абзацы/заголовки) | 1:N `suggestions` через `block_id` (anchor) |
+| `document_opens` | Трекинг последнего открытия документа пользователем; PK составной `(user_id, document_id)` | FK → `users`, `documents`; upsert `ON CONFLICT DO UPDATE SET last_opened_at` |
 | `analysis_jobs` | Запуски анализа (pending/processing/success/partial_success/failed/cancelled) | 1:N `suggestions`; `idempotency_key` |
 | `suggestions` | Точечные правки (add/modify/delete) | `block_id` (anchor), `source_reference`, `confidence_score`, `explanation` |
-| `audit_logs` | Журнал действий (accept/reject/download/finalize) | `suggestion_id` или `document_id` (CHECK-constraint `ck_audit_logs_target`) |
+| `audit_logs` | Журнал действий (accept/reject/reset/download/finalize) | `suggestion_id` или `document_id` (CHECK-constraint `ck_audit_logs_target`) |
+| `dashboard_snapshots` | Ежедневный снэпшот метрик пользователя; PK составной `(owner_id, snapshot_date)` | FK → `users`; поля `total_count`, `awaiting_count`, `relevance_percent`; `ON CONFLICT DO UPDATE` |
 
 ### Поле `sources.scope`
 
@@ -150,51 +154,88 @@ POST   /auth/login
 GET    /auth/me
 
 POST   /projects
-GET    /projects                                                  (пагинация: ?limit=&offset=)
+GET    /projects                                                   (пагинация: ?limit=&offset=)
 GET    /projects/{project_id}
+DELETE /projects/{project_id}
 
-POST   /projects/{project_id}/documents                          (multipart, upload)
-GET    /projects/{project_id}/documents                          (пагинация: ?limit=&offset=)
+POST   /projects/{project_id}/documents                           (multipart, upload)
+GET    /projects/{project_id}/documents                           (пагинация: ?limit=&offset=)
 GET    /projects/{project_id}/documents/{document_id}
-GET    /projects/{project_id}/documents/{document_id}/download   (presigned URL)
-GET    /projects/{project_id}/documents/{document_id}/export     (финальный файл с правками)
-POST   /projects/{project_id}/documents/{document_id}/sources    (привязка источников)
+DELETE /projects/{project_id}/documents/{document_id}
+GET    /projects/{project_id}/documents/{document_id}/download    (presigned URL)
+GET    /projects/{project_id}/documents/{document_id}/export      (финальный файл с правками)
+POST   /projects/{project_id}/documents/{document_id}/sources     (привязка источников)
 
-POST   /projects/{project_id}/sources                            (note/link)
-POST   /projects/{project_id}/sources/file                       (multipart, upload)
-GET    /projects/{project_id}/sources                            (пагинация: ?limit=&offset=)
+POST   /documents                                                  (multipart; project_id в form-data — загрузка из «Мои документы»)
+GET    /documents                                                   (пагинация; фильтры: ?status=&outdated=&search=&sort_by=&sort_dir=)
+
+POST   /projects/{project_id}/sources                             (note/link)
+POST   /projects/{project_id}/sources/file                        (multipart, upload)
+GET    /projects/{project_id}/sources                             (пагинация: ?limit=&offset=)
+DELETE /projects/{project_id}/sources/{source_id}
 
 POST   /projects/{project_id}/documents/{document_id}/analysis-jobs
 GET    /projects/{project_id}/documents/{document_id}/analysis-jobs/{job_id}
 POST   /projects/{project_id}/documents/{document_id}/analysis-jobs/{job_id}/cancel
+POST   /projects/{project_id}/documents/analysis-jobs/bulk        (групповой запуск; опционально ?document_ids=[])
 
-GET    /projects/{project_id}/documents/{document_id}/suggestions                        (пагинация: ?limit=&offset=)
-PUT    /projects/{project_id}/documents/{document_id}/suggestions/review                 (bulk: If-Match / optimistic lock)
-POST   /projects/{project_id}/documents/{document_id}/suggestions/{suggestion_id}/accept
-POST   /projects/{project_id}/documents/{document_id}/suggestions/{suggestion_id}/reject
-POST   /projects/{project_id}/documents/{document_id}/suggestions/bulk-accept
-POST   /projects/{project_id}/documents/{document_id}/suggestions/finalize
+GET    /projects/{project_id}/documents/{document_id}/suggestions              (пагинация; ?status= фильтр)
+GET    /projects/{project_id}/documents/{document_id}/suggestions/{suggestion_id}
+PATCH  /projects/{project_id}/documents/{document_id}/suggestions              (единый endpoint: single/bulk accept/reject/reset)
+PUT    /projects/{project_id}/documents/{document_id}/suggestions/review       (batch: If-Match / optimistic lock)
+POST   /projects/{project_id}/documents/{document_id}/suggestions/{suggestion_id}/reset
 
-GET    /workspace/dashboard                                       (статистика рабочего пространства)
-GET    /system/llm-health                                         (диагностика провайдера)
-GET    /health                                                    (без префикса /api/v1)
+GET    /projects/{project_id}/documents/{document_id}/editor                   (агрегат редактора; ?suggestions_limit=&suggestions_offset=)
+POST   /projects/{project_id}/documents/{document_id}/editor/reset             (сброс анализа → AWAITING_APPROVAL)
+
+GET    /events/documents                                           (SSE: real-time статусы; ?document_ids=uuid1,uuid2,..., макс 50)
+
+GET    /workspace/dashboard                                        (статистика рабочего пространства)
+GET    /system/llm-health                                          (диагностика провайдера)
+GET    /health                                                      (без префикса /api/v1)
 ```
 
 **Пагинация**: все list-эндпоинты принимают `limit` (по умолчанию 50, максимум 200) и `offset` (по умолчанию 0), возвращают `{"items": [...], "total": N, "limit": L, "offset": O}` (схема `Page[T]`). Срезка выполняется на уровне SQL.
 
+**PATCH /suggestions** — единственный endpoint изменения статуса правок. Принимает ровно одно из полей-селекторов:
+- `ids` — список UUID для точечного обновления;
+- `filter` — предустановленный фильтр: `pending` / `decided` / `all`.
+
+Допустимые переходы: `pending → accepted`, `pending → rejected`, `decided → pending` (сброс).
+
 **Оптимистичный лок review**: `PUT /suggestions/review` поддерживает заголовок `If-Match: <review_version>` — при конфликте версий возвращает `412 Precondition Failed`; без заголовка (legacy) — `409 Conflict`.
+
+**SSE (`GET /events/documents`)**: клиент подключается как `EventSource` и получает события:
+- `document_status_changed` — `{document_id, status, pending_suggestions}`
+- `attention_count_changed` — `{count}` (кол-во AWAITING_APPROVAL)
+- `dashboard_stats_changed` — `{total, awaiting, ready, relevance_percent}`
+- `ping` — keepalive каждые 25 с
+
+По умолчанию используется `RedisPubSubBroker` — события от воркеров доставляются всем подключённым клиентам независимо от инстанса. При недоступности Redis — автоматический fallback на `InMemorySSEBroker` (single-instance). Передача `?document_ids=` свыше 50 ID возвращает `422`.
+
+**Bulk analysis jobs** (`POST /projects/{project_id}/documents/analysis-jobs/bulk`):
+- Тело (опционально): `{"document_ids": ["uuid1", "uuid2"]}`. Без тела или при `document_ids=null` — запускает анализ для всех analyzable документов проекта.
+- `201 Created` если `started > 0`; `200 OK` если все пропущены.
+
+**Editor aggregate** (`GET /editor`): возвращает мета-данные документа, контент, original_content (для статусов AWAITING_APPROVAL / READY), пагинированные правки, счётчики и объект `permissions`:
+- `can_analyze` — доступно из `draft`, `ready`, `error`, `cancelled` (повторный запуск после сбоя/отмены).
+- `can_review` — только `awaiting_approval`.
+- `can_export` — только `ready`.
+- `can_delete` — всё кроме `in_progress`.
+- `sources_is_editable` — недоступно только при `in_progress` и `awaiting_approval`.
 
 **OpenAPI-схема**: `response_model` для list-эндпоинтов указывает на конкретный алиас `PageSuggestionResponse = Page[SuggestionResponse]`, разрешённый при определении класса — FastAPI корректно строит схему без runtime-introspection generic alias.
 
 ## Жизненный цикл документа
 
-Документ имеет четыре пользовательских статуса: `draft` → `in_progress` → `awaiting_approval` / `ready`.
+Документ имеет шесть статусов: `draft` → `in_progress` → `awaiting_approval` / `ready` / `error` / `cancelled`.
 
 - После загрузки — `draft`.
 - После успешной постановки задачи в Celery — `in_progress`.
 - Успешный анализ с правками — `awaiting_approval`; без правок — `ready`.
-- Ошибка или отмена — обратно в `draft`.
-- Из `awaiting_approval` в `ready` — только через `POST .../suggestions/finalize` при отсутствии `pending`-правок.
+- Ошибка — `error`; отмена — `cancelled`. Оба статуса позволяют **повторный запуск анализа** (как `draft`).
+- Из `awaiting_approval` в `ready` — только через `PUT /suggestions/review` с `finalize=true` или `PATCH /suggestions` при отсутствии `pending`-правок.
+- Из `awaiting_approval` / `ready` — откат через `POST /editor/reset` (возвращает в `awaiting_approval`).
 
 Для одного документа разрешена только одна активная задача (`pending` или `processing`). Ограничение обеспечено сервисом и частичным уникальным индексом PostgreSQL.
 
@@ -205,11 +246,11 @@ GET    /health                                                    (без пре
 3. Каждая под-задача читает `plain_text` из Redis-кэша (при cache miss — деградирует до прямого скачивания из MinIO), получает текст источника через `SourceConnector`, вызывает `LLMClient.generate_suggestions()` и сохраняет правки.
 4. **Retry / dead-letter — по каждому источнику отдельно**: при сбое LLM/парсинга под-задача ретраится с экспоненциальной задержкой (`LLM_TIMEOUT_SECONDS × 2^retries`) до `LLM_MAX_RETRIES` раз; после исчерпания — запись уходит в Redis-список `syncscribe:analysis:dead_letter`.
 5. `finalize_analysis_job` агрегирует результат: `SUCCESS` если все источники дали правки; `PARTIAL_SUCCESS` если часть; `FAILED` с кодом `ALL_SOURCES_FAILED` или `NO_SOURCES_ATTACHED` иначе. Кэш `plain_text` очищается в `finally`.
-6. **chord on_error**: при падении Celery backend (недоступен result store) `_chord_error_handler` форсирует финализацию с пустым списком результатов — документ переходит в `FAILED/draft` вместо вечного `in_progress`.
-7. **Recovery при ошибке коммита финализации**: компенсирующая транзакция переводит job → `FAILED`, документ → `draft`. Если recovery-коммит тоже падает — вторичное исключение пробрасывается с `__cause__`, чтобы Celery применил retry/dead-letter (не поглощает ошибку).
+6. **chord on_error**: при падении Celery backend (недоступен result store) `_chord_error_handler` форсирует финализацию с пустым списком результатов — документ переходит в `FAILED/error` вместо вечного `in_progress`.
+7. **Recovery при ошибке коммита финализации**: компенсирующая транзакция переводит job → `FAILED`, документ → `error`. Если recovery-коммит тоже падает — вторичное исключение пробрасывается с `__cause__`, чтобы Celery применил retry/dead-letter (не поглощает ошибку).
 8. **None-guard'ы**: все три этапа проверяют job/document/source на `None`. Различаются `JOB_NOT_FOUND` («не существует в БД» — `logger.error`) от «job уже в финальном статусе» («race» — `logger.info`).
 
-### Зависимости воркера (M-8)
+### Зависимости воркера
 
 `_get_storage()`, `_get_connector()`, `_get_llm_client()`, `_get_parser_registry()` — `@functools.cache` provider-функции вместо module-level синглтонов. Runtime-семантика не изменилась (один объект на процесс). В тестах:
 
@@ -227,12 +268,13 @@ t._get_llm_client = lambda: FakeLLMClient()
 | Исключение | HTTP | Когда |
 |---|---|---|
 | `DocumentNotFoundError` | 404 | Документ не существует или не в проекте |
-| `SuggestionNotFoundError` | 404 | Правка не найдена в БД вообще |
+| `SuggestionNotFoundError` | 404 | Правка не найдена в БД |
 | `StaleSuggestionJobError` | 404 | Правка существует, но принадлежит устаревшему job (документ переанализирован) |
 | `JobNotFoundError` | — | job_id в воркере не найден в БД (не «завершён», а «отсутствует») |
 | `SuggestionAlreadyDecidedError` | 409 | Race condition: правка уже обработана другим запросом |
+| `SuggestionResetNotAllowedError` | 409 | Сброс правки невозможен в текущем состоянии |
 | `InvalidDocumentStatusError` | 409 | Операция недопустима для текущего статуса документа |
-| `ReviewVersionConflictError` | 409 / 412 | Optimistic lock: `review_version` изменился параллельным запросом |
+| `OptimisticLockError` / `ReviewVersionConflictError` | 409 / 412 | Optimistic lock: `review_version` изменился параллельным запросом |
 | `AnalysisAlreadyRunningError` | 409 | Для документа уже есть активный analysis job |
 | `ReviewNotCompleteError` | 422 | Финализация невозможна: остались `pending`-правки или экспорт не удался |
 
@@ -245,6 +287,7 @@ t._get_llm_client = lambda: FakeLLMClient()
 | `DocumentParserProtocol` | `TxtParser`, `MarkdownParser`, `DocxParser` | Новые форматы документов |
 | `DocumentExporterProtocol` | `TextExporter`, `DocxExporter` | Новые форматы на экспорт |
 | `FileStorageProtocol` | `MinioStorage` | Смена хранилища файлов |
+| `ISSEBroker` | `RedisPubSubBroker`, `InMemorySSEBroker` | Смена транспорта real-time уведомлений |
 | `DocumentProtocol` / `SuggestionProtocol` | ORM-модели (через `Protocol`) | Сервисный слой не зависит от SQLAlchemy напрямую |
 
 `HttpLLMClient` — generic-клиент для любого внешнего HTTP-провайдера, настраиваемый только через `.env`. `OnPremLLMClient` реализован независимо (у on-prem может быть иной контракт запроса/ответа), общая между ними только retry-логика (`HttpConnectionRetryMixin`). Контракт в `infrastructure/llm/schemas.py` — **условный плейсхолдер** до выбора реального провайдера.
@@ -273,6 +316,7 @@ t._get_llm_client = lambda: FakeLLMClient()
 - **`DocumentRepository.attach_sources`** — чтение-мёрж-запись без атомарности; при параллельных вызовах возможен lost update. Низкий риск, зафиксирован как тех.долг.
 - **Движок СУБД в Celery-воркере**: `isolated_uow()` создаёт новый `AsyncEngine` на каждый вызов под-задачи — корректно для event loop, но TCP/TLS handshake на каждый источник; при росте нагрузки стоит рассмотреть пул на уровне воркер-процесса.
 - **`audit_logs` хранятся в основной PostgreSQL**: таблица растёт только вширь (записи не удаляются) и имеет иной профиль доступа, чем бизнес-данные (редкое чтение диапазонами vs. частое точечное чтение). На текущем масштабе это приемлемо. При росте нагрузки или появлении требований к retention-политике стоит рассмотреть вынос в отдельную схему, TimescaleDB или ClickHouse. До тех пор рекомендуется добавить партиционирование таблицы по `created_at`.
+- **SSE in-memory fallback**: `InMemorySSEBroker` работает только с single-instance деплоем; в multi-instance без Redis события между инстансами не доставляются.
 
 ## Структура репозитория
 
@@ -315,8 +359,21 @@ SyncBack/
     ├── api/
     │   ├── deps.py
     │   ├── upload_utils.py
-    │   ├── schemas/{auth,project,document,source,analysis_job,suggestion,review,pagination}.py
-    │   └── v1/routers/{auth,projects,documents,sources,analysis_jobs,suggestions,system,workspace}.py
+    │   ├── schemas/{auth,project,document,source,analysis_job,suggestion,review,editor,pagination}.py
+    │   └── v1/routers/
+    │       ├── auth.py
+    │       ├── projects.py
+    │       ├── documents.py
+    │       ├── documents_global.py      ← POST /documents (загрузка из «Мои документы»)
+    │       ├── my_documents.py          ← GET /documents (список всех документов пользователя)
+    │       ├── sources.py
+    │       ├── analysis_jobs.py
+    │       ├── analysis_jobs_bulk.py    ← POST /documents/analysis-jobs/bulk
+    │       ├── suggestions.py
+    │       ├── editor.py                ← GET+POST /editor (агрегат + сброс)
+    │       ├── sse.py                   ← GET /events/documents (SSE)
+    │       ├── dashboard.py
+    │       └── system.py
     ├── domain/
     │   ├── exceptions.py
     │   ├── value_objects.py
