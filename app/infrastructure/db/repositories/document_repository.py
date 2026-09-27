@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import exists, func, select, tuple_, update
+from sqlalchemy import exists, func, select, text, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.repositories import IDocumentRepository
@@ -149,6 +149,14 @@ class DocumentRepository(IDocumentRepository):
         sort_by: str = "updated_at",
         sort_dir: str = "desc",
     ) -> tuple[list[dict[str, Any]], int]:
+        """OPT-3: CTE + window COUNT() OVER () — 1 round-trip вместо 2.
+
+        OPT-5: поиск по name использует ilike('%...%'), который не использует
+        B-tree индекс. Для ускорения поиска применить GIN-индекс (pg_trgm).
+        Миграция: CREATE EXTENSION IF NOT EXISTS pg_trgm;
+                    CREATE INDEX ix_documents_name_trgm
+                      ON documents USING gin (name gin_trgm_ops);
+        """
         from app.infrastructure.db.models.analysis_job import AnalysisJob as AJ
         from app.infrastructure.db.models.document import Document as M
         from app.infrastructure.db.models.enums import SuggestionStatus
@@ -210,31 +218,52 @@ class DocumentRepository(IDocumentRepository):
             base_q = base_q.where(pending_exists)
 
         if search:
+            # OPT-5: ilike('%...%') без GIN-индекса — seq-scan.
+            # Применить миграцию ix_documents_name_trgm (см. докстринг метода).
             safe_search = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             base_q = base_q.where(M.name.ilike(f"%{safe_search}%", escape="\\"))
 
         sort_col = getattr(M, sort_by)
         order_expr = sort_col.asc() if sort_dir == "asc" else sort_col.desc()
-        items_q = base_q.order_by(order_expr, M.id.desc()).limit(limit).offset(offset)
 
-        count_q = select(func.count()).select_from(base_q.subquery())
+        # OPT-3: CTE + window COUNT() OVER () — один round-trip вместо двух.
+        # PostgreSQL вычисляет CTE один раз, потом page выбирает из него
+        # LIMIT/OFFSET + total через window-функцию без повторного subquery.
+        cte = base_q.cte("docs_cte")
+        paged_q = (
+            select(
+                cte,
+                func.count().over().label("_total"),
+            )
+            .order_by(
+                getattr(cte.c, sort_by).asc() if sort_dir == "asc"
+                else getattr(cte.c, sort_by).desc(),
+                cte.c.id.desc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
 
-        items_result = await self._session.execute(items_q)
-        count_result = await self._session.execute(count_q)
+        result = await self._session.execute(paged_q)
+        rows = result.all()
 
-        rows = items_result.all()
+        if not rows:
+            return [], 0
+
+        total: int = rows[0]._mapping["_total"]
+        doc_col_name = "Document"
         items: list[dict[str, Any]] = [
             {
-                "document": row.Document,
-                "project_name": row.project_name,
-                "suggestions_total": row.suggestions_total,
-                "suggestions_pending": row.suggestions_pending,
-                "suggestions_accepted": row.suggestions_accepted,
-                "suggestions_rejected": row.suggestions_rejected,
+                "document": row._mapping.get(doc_col_name) or row._mapping.get("document"),
+                "project_name": row._mapping["project_name"],
+                "suggestions_total": row._mapping["suggestions_total"],
+                "suggestions_pending": row._mapping["suggestions_pending"],
+                "suggestions_accepted": row._mapping["suggestions_accepted"],
+                "suggestions_rejected": row._mapping["suggestions_rejected"],
             }
             for row in rows
         ]
-        return items, count_result.scalar_one()
+        return items, total
 
     async def update_status(
         self,
