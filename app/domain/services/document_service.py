@@ -14,6 +14,9 @@
 - HIGH-2: delete_document сначала commit(), потом MinIO.
 - M-3: upload_document принимает project_id: UUID вместо ORM-объекта Project.
 - H-5: ORM-объект Document создаётся внутри репозитория через фабричный метод.
+- BUG-FIX-1: upload_document передаёт name=filename (было title=filename).
+- BUG-FIX-2: list_all_for_user принимает outdated: bool и пробрасывает в репозиторий.
+- BUG-FIX-3: тип возврата list_all_for_user — tuple[list[dict], int].
 
 CRIT-NEW-2: list_documents передаёт PaginationParams-объект, а не limit/offset позиционно.
 LOW: exc_info=True добавлен в logger.warning внутри delete_document.
@@ -25,7 +28,7 @@ import functools
 import logging
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from app.core.config import Settings, get_settings
 from app.domain.exceptions import (
@@ -103,6 +106,7 @@ class DocumentService:
         """Загрузить документ в MinIO и создать запись в БД.
 
         M-3: принимает project_id: UUID, а не ORM-объект Project.
+        BUG-FIX-1: передаёт name=filename (было title=filename).
         """
         if len(content) > self._settings.max_upload_size_bytes:
             raise FileTooLargeError(
@@ -119,7 +123,7 @@ class DocumentService:
                 saved = await self._uow.documents.create(
                     id=document_id,
                     project_id=project_id,
-                    title=filename,
+                    name=filename,
                     format=document_format,
                     storage_key=storage_key,
                 )
@@ -172,21 +176,24 @@ class DocumentService:
         owner_id: uuid.UUID,
         *,
         status: DocumentStatusVO | None = None,
+        outdated: bool = False,
         search: str | None = None,
-        sort_by: Literal["created_at", "updated_at", "title"] = "updated_at",
+        sort_by: Literal["created_at", "updated_at", "name"] = "updated_at",
         sort_dir: Literal["asc", "desc"] = "desc",
         pagination: PaginationParams | None = None,
-    ) -> tuple[list["Document"], int]:
+    ) -> tuple[list[dict[str, Any]], int]:
         """Список всех документов пользователя с агрегированными счётчиками правок.
 
-        M-NEW-3: тип возврата выровнен с IDocumentRepository.list_all_for_user
-        — tuple[list[Document], int], не tuple[list[dict], int].
+        BUG-FIX-2: принимает outdated: bool, пробрасывает в репозиторий.
+        BUG-FIX-3: возвращает tuple[list[dict], int] — репозиторий формирует dict
+        с ключами document / project_name / suggestions_*.
         """
         _pagination = pagination or PaginationParams(limit=50, offset=0)
         async with self._uow:
             return await self._uow.documents.list_all_for_user(
                 owner_id,
                 status=status,
+                outdated=outdated,
                 search=search,
                 sort_by=sort_by,
                 sort_dir=sort_dir,
