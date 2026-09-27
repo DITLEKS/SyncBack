@@ -21,6 +21,50 @@ from app.api.schemas.dashboard import (
 from app.domain.interfaces.dashboard_query_service import IDashboardQueryService
 
 
+def _interpolate(
+    dates: list[date],
+    snap_by_date: dict[date, float],
+    fallback: float,
+) -> list[TrendPoint]:
+    """Строит 7 точек sparkline с линейной интерполяцией пропусков.
+
+    Правила:
+      - Известный день       → точное значение из снэпшота.
+      - Пропуск между двумя  → линейная интерполяция.
+      - Пропуск до первого   → значение первого известного снэпшота.
+      - Пропуск после последнего → значение последнего известного снэпшота.
+      - Нет снэпшотов вообще → flat-линия = fallback (текущее live-значение).
+    """
+    if not snap_by_date:
+        return [TrendPoint(date=d.isoformat(), value=fallback) for d in dates]
+
+    known_dates = sorted(snap_by_date.keys())
+    first_known = known_dates[0]
+    last_known = known_dates[-1]
+
+    result: list[TrendPoint] = []
+    for d in dates:
+        if d in snap_by_date:
+            result.append(TrendPoint(date=d.isoformat(), value=snap_by_date[d]))
+        elif d < first_known:
+            # leading gap — тянем от первого известного
+            result.append(TrendPoint(date=d.isoformat(), value=snap_by_date[first_known]))
+        elif d > last_known:
+            # trailing gap — тянем от последнего известного
+            result.append(TrendPoint(date=d.isoformat(), value=snap_by_date[last_known]))
+        else:
+            # пропуск между двумя известными — линейная интерполяция
+            before = max(kd for kd in known_dates if kd < d)
+            after = min(kd for kd in known_dates if kd > d)
+            v0, v1 = snap_by_date[before], snap_by_date[after]
+            span = (after - before).days          # всегда > 0
+            step = (d - before).days
+            value = v0 + (v1 - v0) * step / span
+            result.append(TrendPoint(date=d.isoformat(), value=round(value, 2)))
+
+    return result
+
+
 class DashboardService:
     def __init__(self, dashboard_qs: IDashboardQueryService) -> None:
         self._qs = dashboard_qs
@@ -31,38 +75,27 @@ class DashboardService:
 
         total: int = stats["total"]
         ready: int = stats["ready"]
-        relevance_percent = round(ready / total * 100) if total else 0
-
-        # — индекс снэпшотов по дате
-        snap_by_date: dict[date, dict] = {
-            s["snapshot_date"]: s for s in snapshots
-        }
+        relevance_percent = round(ready / total * 100) if total else 0.0
 
         today = dt.now(tz=timezone.utc).date()
         dates = [today - timedelta(days=i) for i in range(6, -1, -1)]
 
-        def _fill(key: str, current: float) -> list[TrendPoint]:
-            """7 точек; дни без снэпшота — текущее значение."""
-            return [
-                TrendPoint(
-                    date=d.isoformat(),
-                    value=snap_by_date[d][key] if d in snap_by_date else current,
-                )
-                for d in dates
-            ]
+        total_map:     dict[date, float] = {s["snapshot_date"]: float(s["total_count"])       for s in snapshots}
+        awaiting_map:  dict[date, float] = {s["snapshot_date"]: float(s["awaiting_count"])    for s in snapshots}
+        relevance_map: dict[date, float] = {s["snapshot_date"]: s["relevance_percent"]        for s in snapshots}
 
         return DashboardResponse(
             total_documents=total,
             awaiting_approval_count=stats["awaiting"],
             ready_count=ready,
             relevance_percent=relevance_percent,
-            total_trend=_fill("total_count", float(total)),
-            awaiting_trend=_fill("awaiting_count", float(stats["awaiting"])),
-            relevance_trend=_fill("relevance_percent", float(relevance_percent)),
+            total_trend=_interpolate(dates, total_map,     float(total)),
+            awaiting_trend=_interpolate(dates, awaiting_map,  float(stats["awaiting"])),
+            relevance_trend=_interpolate(dates, relevance_map, float(relevance_percent)),
         )
 
     async def _fetch(self, user_id: uuid.UUID) -> tuple[dict, list[dict]]:
-        """stats и snapshots одновременно."""
+        """stats и snapshots параллельно."""
         import asyncio
         stats, snapshots = await asyncio.gather(
             self._qs.get_stats(user_id),
