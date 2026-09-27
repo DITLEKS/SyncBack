@@ -176,7 +176,7 @@ DELETE /projects/{project_id}/sources/{source_id}
 
 POST   /projects/{project_id}/documents/{document_id}/analysis-jobs
 GET    /projects/{project_id}/documents/{document_id}/analysis-jobs/{job_id}
-POST   /projects/{project_id}/documents/{document_id}/analysis-jobs/{job_id}/cancel
+DELETE /projects/{project_id}/documents/{document_id}/analysis-jobs/{job_id}   (отмена; 200 + AnalysisJobResponse)
 POST   /projects/{project_id}/documents/analysis-jobs/bulk        (групповой запуск; опционально ?document_ids=[])
 
 GET    /projects/{project_id}/documents/{document_id}/suggestions              (пагинация; ?status= фильтр)
@@ -190,7 +190,11 @@ POST   /projects/{project_id}/documents/{document_id}/editor/reset             (
 
 GET    /events/documents                                           (SSE: real-time статусы; ?document_ids=uuid1,uuid2,..., макс 50)
 
-GET    /workspace/dashboard                                        (статистика рабочего пространства)
+GET    /dashboard                                                  (статистика рабочего пространства + метрики виджетов)
+GET    /documents/attention                                        (топ-4 документа awaiting_approval по кол-ву pending-правок)
+GET    /documents/recent                                           (5 последних открытых документов текущего пользователя)
+POST   /projects/{project_id}/documents/{document_id}/open        (трекинг открытия документа; 204 No Content)
+
 GET    /system/llm-health                                          (диагностика провайдера)
 GET    /health                                                      (без префикса /api/v1)
 ```
@@ -204,6 +208,8 @@ GET    /health                                                      (без пр
 Допустимые переходы: `pending → accepted`, `pending → rejected`, `decided → pending` (сброс).
 
 **Оптимистичный лок review**: `PUT /suggestions/review` поддерживает заголовок `If-Match: <review_version>` — при конфликте версий возвращает `412 Precondition Failed`; без заголовка (legacy) — `409 Conflict`.
+
+**Отмена задачи анализа**: `DELETE /analysis-jobs/{job_id}` — REST-правильный способ отмены (C-1). Возвращает `200 OK` + `AnalysisJobResponse` со статусом `cancelled`. Устаревший `POST .../cancel` удалён.
 
 **SSE (`GET /events/documents`)**: клиент подключается как `EventSource` и получает события:
 - `document_status_changed` — `{document_id, status, pending_suggestions}`
@@ -242,6 +248,11 @@ Query-параметры пагинации правок:
 }
 ```
 Фронт обновляет стор без дополнительного `GET /editor`.
+
+**Dashboard** (`GET /dashboard`): возвращает агрегаты рабочего пространства + статистику виджетов в одном ответе (ранее был разделён на `/dashboard` и `/dashboard/stats` — объединён в OPT-D1). Дополнительные эндпоинты:
+- `GET /documents/attention` — топ-4 документа со статусом `awaiting_approval`, отсортированные по кол-ву `pending`-правок.
+- `GET /documents/recent` — 5 последних открытых текущим пользователем документов (по `last_opened_at` из таблицы `document_opens`).
+- `POST /projects/{project_id}/documents/{document_id}/open` — трекинг открытия; upsert в `document_opens`; возвращает `204 No Content`.
 
 **OpenAPI-схема**: `response_model` для list-эндпоинтов указывает на конкретный алиас `PageSuggestionResponse = Page[SuggestionResponse]`, разрешённый при определении класса — FastAPI корректно строит схему без runtime-introspection generic alias.
 
@@ -391,7 +402,7 @@ SyncBack/
     │       ├── suggestions.py
     │       ├── editor.py                ← GET+POST /editor (агрегат + сброс)
     │       ├── sse.py                   ← GET /events/documents (SSE)
-    │       ├── dashboard.py
+    │       ├── dashboard.py             ← GET /dashboard, /documents/attention, /documents/recent, POST .../open
     │       └── system.py
     ├── domain/
     │   ├── exceptions.py
