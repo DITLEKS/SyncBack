@@ -8,12 +8,17 @@ UI-fix: добавлено поле size_bytes в DocumentListItem (карточ
 R-1: добавлен AttachSourcesResponse — возвращается вместо голого DocumentResponse
      после POST /{id}/sources; содержит document + sources, устраняя лишний
      GET /sources на фронте.
+I-1: DocumentListItem.sources: list[SourceBadge] — источники документа
+     (document-scope) для отображения бейджей без доп-запроса.
+     None = поле не было запрошено/загружено; [] = загружено, источников нет.
 """
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
 from pydantic import BaseModel
+
+from app.api.schemas.source import SourceBadge
 
 if TYPE_CHECKING:
     from app.api.schemas.source import SourceResponse
@@ -85,8 +90,6 @@ class DocumentListItem(BaseModel):
     id: uuid.UUID
     name: str
     format: str
-    # UI-fix: размер файла — есть в Document ORM как size_bytes,
-    # только забыли добавить в схему.
     size_bytes: int
     status: str
     current_analysis_job_id: uuid.UUID | None = None
@@ -94,6 +97,11 @@ class DocumentListItem(BaseModel):
     updated_at: datetime
     project: DocumentListProject
     suggestions: SuggestionCounters
+    # I-1: бейджи источников документа (document-scope).
+    # None  = поле не запрашивалось (например, в лёгком листинге).
+    # []    = запрашивалось, источников нет.
+    # [...]  = список бейджей для иконок на карточке.
+    sources: list[SourceBadge] | None = None
 
 
 class DocumentListPage(BaseModel):

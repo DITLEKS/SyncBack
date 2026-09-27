@@ -1,11 +1,23 @@
 """
 Схемы проектов.
+
+I-4: GET /projects/{id}?include=documents,sources расширяет ProjectResponse
+     дополнительными связанными данными без нового эндпоинта:
+       include=sources   → project-scope источники (SourceResponse[])
+       include=documents → документы проекта (DocumentListItem[] с SourceBadge)
+     None = поле не было запрошено; [] = запрошено, данных нет.
+     Лёгкий ответ для GET /projects (список карточек) не изменился.
 """
 
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from app.api.schemas.document import DocumentListItem
+    from app.api.schemas.source import SourceResponse
 
 # Допустимые цвета карточки проекта (hex без #, 6 символов).
 # Фронт использует их для визуального различения карточек (#11).
@@ -61,5 +73,12 @@ class ProjectResponse(BaseModel):
     # P0-#11: визуальные атрибуты карточки
     color: str | None = None
     icon: str | None = None
+
+    # I-4: расширенные данные через ?include=sources,documents.
+    # Заполняются только при явном запросе — не влияют на GET /projects (список).
+    # None  = не запрошено (поле отсутствует в ответе при сериализации exclude_none).
+    # []    = запрошено, данных нет.
+    sources: list["SourceResponse"] | None = None
+    documents: list["DocumentListItem"] | None = None
 
     model_config = {"from_attributes": True}

@@ -6,6 +6,8 @@ P2: убраны note/text_content. Теперь два типа:
   - url:  передаётся через SourceCreateRequest с type='url'.
 
 P3: UrlConnector реализован, поэтому type='url' полностью функционален.
+I-1: добавлен SourceBadge — лёгкое представление источника для карточек
+     DocumentListItem.sources (id + name + type, без дат и лишних полей).
 """
 
 import uuid
@@ -37,5 +39,21 @@ class SourceResponse(BaseModel):
     type: str
     scope: str
     uploaded_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# I-1: лёгкое представление источника для карточек документов.
+# Используется в DocumentListItem.sources — фронт получает иконки/бейджи
+# источников без отдельного GET /sources.
+class SourceBadge(BaseModel):
+    """Минимальное представление источника для отображения в карточке документа.
+
+    Содержит только данные, нужные для бейджей: идентификатор, читаемое имя
+    и тип (url | file | note) для выбора иконки на фронте.
+    """
+    id: uuid.UUID
+    name: str
+    type: str  # "url" | "file" | "note"
 
     model_config = {"from_attributes": True}
