@@ -7,6 +7,11 @@ P2: _build_source_ref больше не передаёт text_content (поле 
 P3: _get_connector() заменена на _get_connector_for(source_kind) —
     роутинг FILE → ManualUploadConnector, URL → UrlConnector.
     Импорты ManualUploadConnector и UrlConnector ленивые (functools.cache).
+
+C-3: _run_async упрощён до asyncio.run().
+    Celery-воркеры всегда запускаются в синхронном контексте (prefork/solo),
+    поэтому проверки is_running/is_closed и ThreadPoolExecutor были излишними
+    и потенциально создавали nested event loop в отдельном потоке.
 """
 from __future__ import annotations
 
@@ -45,19 +50,14 @@ _PARSED_DOC_KEY_PREFIX = "parsed_doc:"
 # ---------------------------------------------------------------------------
 
 def _run_async(coro):
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(asyncio.run, coro)
-                return future.result()
-        elif loop.is_closed():
-            return asyncio.run(coro)
-        else:
-            return loop.run_until_complete(coro)
-    except RuntimeError:
-        return asyncio.run(coro)
+    """Запускает корутину из синхронного Celery-таска.
+
+    C-3: используем только asyncio.run() — он сам создаёт новый event loop,
+    выполняет корутину и закрывает loop. Celery-воркеры (prefork/solo)
+    всегда работают вне asyncio, поэтому проверки is_running/is_closed
+    и запуск в ThreadPoolExecutor были излишними.
+    """
+    return asyncio.run(coro)
 
 
 # ---------------------------------------------------------------------------

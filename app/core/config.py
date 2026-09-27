@@ -50,7 +50,12 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: Literal["json", "text"] = "json"
 
-    cors_allowed_origins: list[str] = ["*"]
+    # C-1: дефолт ["*"] убран — поле обязательно.
+    # Без явного CORS_ALLOWED_ORIGINS в окружении приложение не запустится,
+    # что исключает случайный деплой с открытым CORS в staging/production.
+    # Для локальной разработки добавьте в .env:
+    #   CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173
+    cors_allowed_origins: list[str]
 
     @field_validator("cors_allowed_origins", mode="before")
     @classmethod
