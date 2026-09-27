@@ -44,12 +44,11 @@ class Document(Base):
         default=DocumentStatus.DRAFT,
         server_default=DocumentStatus.DRAFT.value,
     )
-    # SET NULL: удаление job не должно каскадно удалять документ.
-    current_analysis_job_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("analysis_jobs.id", ondelete="SET NULL"),
-        nullable=True,
-    )
+    # R-1: current_analysis_job_id удалён — это была круговая FK
+    # (documents → analysis_jobs → documents), нигде не читалась в запросах.
+    # Текущий job получается через:
+    #   SELECT * FROM analysis_jobs WHERE document_id = ? ORDER BY created_at DESC LIMIT 1
+    # с частичным индексом ix_analysis_jobs_doc_latest (см. миграцию 0017).
     review_version = Column(Integer, nullable=False, default=0, server_default="0")
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(

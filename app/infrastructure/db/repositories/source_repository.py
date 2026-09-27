@@ -7,6 +7,8 @@ SQLAlchemy-адаптер для Source.
 P2: метод create() (принимал text_content) удалён.
     Добавлен create_url() — для источников типа URL (только url, без storage_key).
     create_with_id() теперь единственный путь для FILE-источников.
+R-4: uploaded_at удалён из модели Source; list_by_project теперь
+    сортирует по created_at DESC (семантически эквивалентно).
 """
 from __future__ import annotations
 
@@ -56,10 +58,11 @@ class SourceRepository(ISourceRepository):
         self, project_id: uuid.UUID, limit: int, offset: int
     ) -> "list[Source]":
         from app.infrastructure.db.models.source import Source as M
+        # R-4: сортировка по created_at вместо удалённого uploaded_at.
         result = await self._session.execute(
             select(M)
             .where(M.project_id == project_id)
-            .order_by(M.uploaded_at.desc())
+            .order_by(M.created_at.desc())
             .limit(limit)
             .offset(offset)
         )

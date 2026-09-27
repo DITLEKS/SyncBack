@@ -40,7 +40,8 @@ class Source(Base):
     storage_key = Column(String(1024), nullable=True)
     text_content = Column(Text, nullable=True)
     url = Column(String(2048), nullable=True)
-    uploaded_at = Column(DateTime(timezone=True), nullable=True)
+    # R-4: uploaded_at удалён — дублировал created_at (server_default=func.now()).
+    # list_by_project теперь сортирует по created_at DESC.
     scope = Column(
         Enum(SourceScope, name="source_scope", values_callable=lambda e: [m.value for m in e]),
         nullable=False,

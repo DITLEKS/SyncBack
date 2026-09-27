@@ -46,9 +46,11 @@ class DocumentBlock(Base):
     block_ref: Mapped[str] = mapped_column(String(255), nullable=False)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     block_type: Mapped[BlockType] = mapped_column(
-        SAEnum(BlockType, name="block_type_enum", values_callable=lambda e: [m.value for m in e]),
+        SAEnum(BlockType, name="block_type_enum", values_callable=lambda e: [m.value for e in e]),
         nullable=False,
     )
+    # R-3: raw_markdown удалён — дублировал content для markdown-документов.
+    # Формат источника определяется через Document.format; повторное хранение
+    # исходника в блоке давало ~50 % лишнего объёма таблицы для md-документов.
     content: Mapped[str] = mapped_column(Text, nullable=False)
     heading_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    raw_markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
