@@ -26,6 +26,10 @@ FIX-6: create_note_source — storage.upload перенесён внутрь asy
 WARN-2: create_url_source / create_note_source / create_file_source принимают
         document_id: uuid.UUID | None = None. При scope=DOCUMENT + document_id
         вызывают uow.sources.attach_to_document(source.id, document_id) — M2M-вставка.
+FIX-review-4: get_primary_document_id — M2M-запрос первого document_id для
+        источника. Нужен в DELETE /sources/{id} guard чтобы проверить active job.
+        Возвращает UUID | None; None означает что источник не привязан к документу
+        (project-scope) → guard → ранний return → разрешено удалять.
 """
 from __future__ import annotations
 
@@ -234,6 +238,24 @@ class SourceService:
                 f"Источник {source_id} не найден в проекте {project_id}"
             )
         return source
+
+    async def get_primary_document_id(
+        self, source: "Source"
+    ) -> "uuid.UUID | None":
+        """FIX-review-4: вернуть первый document_id из M2M-таблицы document_sources.
+
+        Source не имеет прямой колонки document_id — связь хранится в M2M.
+        Возвращает первый document_id из document_sources WHERE source_id = source.id,
+        или None если источник не привязан ни к одному документу (project-scope).
+
+        Используется в DELETE /sources/{id} для получения document_id
+        перед вызовом _guard_no_active_job — гарантирует что активный
+        analysis job заблокирует удаление с HTTP 423.
+        """
+        async with self._uow:
+            return await self._uow.sources.get_primary_document_id_for_source(
+                source.id
+            )
 
     async def get_sources_for_project(
         self, project_id: uuid.UUID, source_ids: list[uuid.UUID]
