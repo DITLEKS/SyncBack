@@ -1,9 +1,8 @@
-"""Агрегированный endpoint редактора документа + export + reset + cancel-all-suggestions.
+"""Агрегированный endpoint редактора документа + export + reset.
 
 GET    /projects/{project_id}/documents/{document_id}/editor
 POST   /projects/{project_id}/documents/{document_id}/editor/export?format=docx
 POST   /projects/{project_id}/documents/{document_id}/editor/reset
-DELETE /projects/{project_id}/documents/{document_id}/editor/suggestions
 
 #7: возвращаем view_mode и original_content (исходный plain_text без правок)
 #8: возвращаем sources_is_editable=False при in_progress / awaiting_approval
@@ -21,8 +20,9 @@ C-3 (аудит): counters.total = suggestions_total (полный счётчи�
   counters.pending/accepted/rejected берутся из агрегатного запроса O(1),
   а не из O(n) прохода по текущей странице.
 
-NEW: DELETE /editor/suggestions — отменить все правки документа сразу.
-  Переводит все pending-правки в rejected, возвращает число отменённых.
+REFACTOR: DELETE /editor/suggestions удалён — операция перенесена в
+  PATCH /projects/{project_id}/documents/{document_id}/suggestions
+  с телом {"filter":"pending","status":"rejected"}.
 """
 import logging
 import uuid
@@ -34,7 +34,6 @@ from fastapi.responses import Response
 from app.api.deps import get_allowed_project, get_current_user
 from app.api.schemas.document import DocumentSectionResponse, SuggestionCounters
 from app.api.schemas.editor import (
-    CancelAllSuggestionsResponse,
     EditorAggregateResponse,
     EditorContent,
     EditorDocumentMeta,
@@ -64,13 +63,11 @@ router = APIRouter(
     tags=["editor"],
 )
 
-# Статусы, при которых контент документа уже содержит применённые правки
 _STATUSES_WITH_APPLIED_CHANGES = frozenset({
     DocumentStatusVO.AWAITING_APPROVAL,
     DocumentStatusVO.READY,
 })
 
-# Маппинг статуса → view_mode (#7)
 _STATUS_VIEW_MODE: dict[DocumentStatusVO, str] = {
     DocumentStatusVO.DRAFT: "original",
     DocumentStatusVO.IN_PROGRESS: "original",
@@ -80,7 +77,6 @@ _STATUS_VIEW_MODE: dict[DocumentStatusVO, str] = {
     DocumentStatusVO.CANCELLED: "original",
 }
 
-# Поддерживаемые форматы экспорта → (расширение, media_type)
 _EXPORT_FORMAT_META: dict[str, tuple[str, str]] = {
     "docx": (
         ".docx",
@@ -90,7 +86,6 @@ _EXPORT_FORMAT_META: dict[str, tuple[str, str]] = {
     "txt": (".txt", "text/plain; charset=utf-8"),
 }
 
-# API-1: максимальный размер страницы правок в агрегате редактора
 _SUGGESTIONS_MAX_LIMIT = 200
 
 
@@ -101,7 +96,6 @@ async def get_editor_aggregate(
     current_user: User = Depends(get_current_user),
     document_service: DocumentService = Depends(get_document_service),
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
-    # API-1: параметры пагинации правок
     suggestions_limit: int = Query(
         default=50,
         ge=1,
@@ -117,23 +111,14 @@ async def get_editor_aggregate(
         description="Смещение для пагинации правок.",
     ),
 ) -> EditorAggregateResponse:
-    """Полный агрегат данных для экрана редактора.
-
-    API-1: поддерживает пагинацию правок через suggestions_limit / suggestions_offset.
-    Поле suggestions_total в ответе — полный счётчик всех правок документа;
-    counters.total — тоже полный счётчик (= suggestions_total), не длина страницы.
-
-    C-3: counters.pending/accepted/rejected берутся из агрегатного запроса O(1),
-    а не из O(n) прохода по текущей странице.
-    """
-    # --- 1. Документ ---
+    """Полный агрегат данных для экрана редактора."""
     try:
         document = await document_service.get_document(project.id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     review_version = getattr(document, "review_version", 0) or 0
-    view_mode = _STATUS_VIEW_MODE.get(document.status, "original")  # #7
+    view_mode = _STATUS_VIEW_MODE.get(document.status, "original")
 
     meta = EditorDocumentMeta(
         id=document.id,
@@ -147,8 +132,7 @@ async def get_editor_aggregate(
         view_mode=view_mode,
     )
 
-    # --- 2. Контент (graceful degradation) ---
-    editor_content: EditorContent | None = None
+    editor_content = None
     try:
         parsed = await document_service.get_document_content(document)
         editor_content = EditorContent(
@@ -168,8 +152,7 @@ async def get_editor_aggregate(
             extra={"document_id": str(document_id)},
         )
 
-    # --- 2b. original_content (#7) ---
-    original_content: EditorContent | None = None
+    original_content = None
     if document.status in _STATUSES_WITH_APPLIED_CHANGES:
         try:
             orig_parsed = await document_service.get_original_content(document)
@@ -194,7 +177,6 @@ async def get_editor_aggregate(
     else:
         original_content = editor_content
 
-    # --- 3. Правки (API-1: пагинируемый запрос) ---
     suggestions_raw, suggestions_total = await suggestion_service.list_suggestions_for_document(
         project.id,
         document_id,
@@ -202,9 +184,6 @@ async def get_editor_aggregate(
     )
     suggestions = [SuggestionResponse.model_validate(s) for s in suggestions_raw]
 
-    # --- 4. Счётчики (C-3: агрегатный запрос O(1) вместо O(n) по странице) ---
-    # counters.total = suggestions_total (полный счётчик документа, не длина страницы).
-    # pending/accepted/rejected — из отдельного COUNT-запроса по статусам.
     try:
         status_counts = await suggestion_service.count_by_document_and_status(
             project.id, document_id
@@ -213,8 +192,6 @@ async def get_editor_aggregate(
         accepted = status_counts.get("accepted", 0)
         rejected = status_counts.get("rejected", 0)
     except (AttributeError, NotImplementedError):
-        # Graceful degradation: если метод ещё не реализован в сервисе,
-        # считаем по текущей странице (старое поведение).
         pending = accepted = rejected = 0
         for s in suggestions:
             if s.status == "pending":
@@ -224,14 +201,14 @@ async def get_editor_aggregate(
             elif s.status == "rejected":
                 rejected += 1
 
+    from app.api.schemas.document import SuggestionCounters
     counters = SuggestionCounters(
-        total=suggestions_total,  # C-3: полный счётчик документа
+        total=suggestions_total,
         pending=pending,
         accepted=accepted,
         rejected=rejected,
     )
 
-    # --- 5. Права ---
     locked = document.status in (DocumentStatusVO.IN_PROGRESS,)
     sources_is_editable = document.status not in (
         DocumentStatusVO.IN_PROGRESS,
@@ -250,20 +227,16 @@ async def get_editor_aggregate(
         content=editor_content,
         original_content=original_content,
         suggestions=suggestions,
-        suggestions_total=suggestions_total,  # API-1
+        suggestions_total=suggestions_total,
         counters=counters,
         permissions=permissions,
     )
 
 
-# ---------------------------------------------------------------------------
-# POST /editor/export?format=docx|md|txt
-# ---------------------------------------------------------------------------
-
 @router.post("/export", summary="Экспорт документа с принятыми правками")
 async def export_document(
     document_id: uuid.UUID,
-    format: Literal["docx", "md", "txt"] = Query(  # noqa: A002
+    format: Literal["docx", "md", "txt"] = Query(
         "docx",
         description="Формат экспорта: docx (по умолчанию), md, txt",
     ),
@@ -272,11 +245,7 @@ async def export_document(
     document_service: DocumentService = Depends(get_document_service),
     export_service: DocumentExportService = Depends(get_document_export_service),
 ) -> Response:
-    """Скачать финальный документ с применёнными принятыми правками.
-
-    Поддерживаемые форматы: docx, md, txt.
-    Документ должен быть в статусе READY; при других статусах — 422.
-    """
+    """Скачать финальный документ с применёнными принятыми правками."""
     try:
         document = await document_service.get_document(project.id, document_id)
     except DocumentNotFoundError as exc:
@@ -311,11 +280,6 @@ async def export_document(
     )
 
 
-# ---------------------------------------------------------------------------
-# POST /editor/reset
-# API-5: возвращает 200 + ResetResponse вместо 204
-# ---------------------------------------------------------------------------
-
 @router.post(
     "/reset",
     response_model=ResetResponse,
@@ -331,12 +295,6 @@ async def reset_analysis(
 ) -> ResetResponse:
     """Сбросить все правки текущего анализа: статус suggestions → pending,
     документ → AWAITING_APPROVAL.
-
-    Допустимо только когда документ в статусе AWAITING_APPROVAL или READY.
-
-    API-5: возвращает 200 + ResetResponse вместо 204, чтобы фронт мог
-    обновить стор (document_status, review_version, счётчик сброшенных правок)
-    без дополнительного GET /editor.
     """
     try:
         document = await document_service.get_document(project.id, document_id)
@@ -376,61 +334,4 @@ async def reset_analysis(
         document_status=new_status,
         review_version=new_review_version,
         suggestions_reset_count=suggestions_reset_count,
-    )
-
-
-# ---------------------------------------------------------------------------
-# DELETE /editor/suggestions — отменить ВСЕ правки документа сразу
-# ---------------------------------------------------------------------------
-
-@router.delete(
-    "/suggestions",
-    response_model=CancelAllSuggestionsResponse,
-    status_code=status.HTTP_200_OK,
-    responses={
-        200: {
-            "model": CancelAllSuggestionsResponse,
-            "description": "Все pending-правки переведены в rejected",
-        },
-        404: {"description": "Документ не найден"},
-        422: {"description": "Документ не в статусе AWAITING_APPROVAL"},
-    },
-    summary="Отменить все правки документа",
-)
-async def cancel_all_suggestions(
-    document_id: uuid.UUID,
-    project: Project = Depends(get_allowed_project),
-    current_user: User = Depends(get_current_user),
-    document_service: DocumentService = Depends(get_document_service),
-    suggestion_service: SuggestionService = Depends(get_suggestion_service),
-) -> CancelAllSuggestionsResponse:
-    """Отменить все pending-правки документа одним запросом.
-
-    Переводит все правки со статусом pending в rejected.
-    Допустимо только в статусе AWAITING_APPROVAL.
-
-    Используй POST /editor/reset, если хочешь вернуть правки в pending (undoable).
-    DELETE /editor/suggestions — деструктивная операция (non-undoable).
-    """
-    try:
-        document = await document_service.get_document(project.id, document_id)
-    except DocumentNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-
-    if document.status != DocumentStatusVO.AWAITING_APPROVAL:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                "Отмена всех правок доступна только для документов в статусе "
-                f"AWAITING_APPROVAL. Текущий статус: {document.status.value}"
-            ),
-        )
-
-    cancelled_count = await suggestion_service.cancel_all_pending(
-        project.id, document_id, user_id=current_user.id
-    )
-
-    return CancelAllSuggestionsResponse(
-        document_id=document_id,
-        cancelled_count=cancelled_count,
     )
