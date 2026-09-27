@@ -38,7 +38,8 @@ async def test_document_create_and_fetch() -> None:
     """Полный CRUD-цикл документа через реальный репозиторий и asyncpg."""
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-    from app.domain.value_objects import DocumentFormatVO, DocumentStatusVO
+    from app.domain.value_objects import DocumentStatusVO
+    from app.infrastructure.db.models.enums import DocumentFormat, DocumentStatus
     from app.infrastructure.db.repositories.document_repository import DocumentRepository
 
     engine = create_async_engine(os.environ["DATABASE_URL"], echo=False)
@@ -52,18 +53,20 @@ async def test_document_create_and_fetch() -> None:
         repo = DocumentRepository(session)
 
         # --- Create ---
+        # format принимает ORM-enum DocumentFormat, а не domain VO
         doc = await repo.create(
             id=doc_id,
             project_id=project_id,
             name="Integration Test Document",
-            format=DocumentFormatVO.DOCX,
+            format=DocumentFormat.DOCX,
             storage_key=storage_key,
         )
         await session.commit()
 
         assert doc.id == doc_id
         assert doc.name == "Integration Test Document"
-        assert doc.status == DocumentStatusVO.DRAFT
+        # repo.create() устанавливает DocumentStatus (ORM enum), не DocumentStatusVO
+        assert doc.status == DocumentStatus.DRAFT
 
         # --- Fetch ---
         fetched = await repo.get_by_id(doc_id)
@@ -72,9 +75,10 @@ async def test_document_create_and_fetch() -> None:
         assert fetched.storage_key == storage_key
 
         # --- Update status ---
+        # update_status принимает DocumentStatusVO и конвертирует внутри
         updated = await repo.update_status(fetched, DocumentStatusVO.IN_PROGRESS)
         await session.commit()
-        assert updated.status == DocumentStatusVO.IN_PROGRESS
+        assert updated.status == DocumentStatus.IN_PROGRESS
 
         # --- Delete ---
         await repo.delete(updated)
@@ -93,7 +97,8 @@ async def test_document_list_for_project() -> None:
     """list_for_project возвращает только документы нужного проекта."""
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-    from app.domain.value_objects import DocumentFormatVO, PaginationParams
+    from app.domain.value_objects import PaginationParams
+    from app.infrastructure.db.models.enums import DocumentFormat
     from app.infrastructure.db.repositories.document_repository import DocumentRepository
 
     engine = create_async_engine(os.environ["DATABASE_URL"], echo=False)
@@ -111,7 +116,7 @@ async def test_document_list_for_project() -> None:
                 id=doc_id,
                 project_id=project_id,
                 name=f"Doc {doc_id}",
-                format=DocumentFormatVO.DOCX,
+                format=DocumentFormat.DOCX,
                 storage_key=f"test/{doc_id}.docx",
             )
         # Документ в другом проекте — не должен попасть в результат
@@ -120,7 +125,7 @@ async def test_document_list_for_project() -> None:
             id=other_id,
             project_id=other_project_id,
             name="Other project doc",
-            format=DocumentFormatVO.DOCX,
+            format=DocumentFormat.DOCX,
             storage_key=f"test/{other_id}.docx",
         )
         await session.commit()
