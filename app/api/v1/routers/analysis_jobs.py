@@ -19,6 +19,12 @@ N-4 (ревью): убран импорт DocumentStatus (ORM-enum из инфр
 FIX-1: suppress(Exception) заменён на явный try/except с logger.warning + exc_info.
 FIX-3: идемпотентный запрос проверяет document_id — если ключ совпадает,
         но document_id другой — возвращаем 409, а не чужой job.
+
+C-1 (аудит): POST /{job_id}/cancel → DELETE /{job_id}.
+  Отмена — изменение состояния ресурса на cancelled.
+  DELETE /{job_id} → 200 + AnalysisJobResponse(status=cancelled).
+  Старый маршрут POST /{job_id}/cancel оставлен как deprecated redirect (307)
+  для плавной миграции фронта — удалить после обновления клиента.
 """
 
 import logging
@@ -26,7 +32,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.api.deps import get_allowed_project
 from app.api.schemas.analysis_job import (
@@ -84,7 +90,6 @@ async def start_analysis_job(
 ) -> JSONResponse:
     # P0-7: идемпотентный повторный запрос
     # FIX-3: проверяем, что найденный job принадлежит именно этому document_id.
-    # Один и тот же Idempotency-Key с другим document_id — ошибка клиента (409).
     if idempotency_key:
         existing = await service.find_job_by_idempotency_key(
             project.id, document_id, idempotency_key
@@ -101,15 +106,12 @@ async def start_analysis_job(
             return _job_response(existing, status.HTTP_200_OK)  # #9
 
     # P0-9: повторный анализ документа в статусе READY без force.
-    # N-5: проверка статуса выполняется внутри сессии сервиса (get_document_for_job),
-    #      роутер получает только bool — никакого доступа к ORM-атрибутам за пределами сессии.
     try:
         is_ready = await service.check_document_is_ready(project.id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     if is_ready and not body.force:
-        # #4 model_dump() вместо jsonable_encoder на ещё несериализованном Pydantic-объекте
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=AnalysisJobConflictResponse(
@@ -152,13 +154,35 @@ async def get_analysis_job(
     return AnalysisJobResponse.model_validate(job)
 
 
-@router.post("/{job_id}/cancel", response_model=AnalysisJobResponse)
+# ---------------------------------------------------------------------------
+# C-1: DELETE /{job_id} — REST-семантика отмены задачи
+# Отмена = изменение состояния ресурса на cancelled.
+# Возвращает 200 + AnalysisJobResponse(status=cancelled).
+# ---------------------------------------------------------------------------
+
+@router.delete(
+    "/{job_id}",
+    response_model=AnalysisJobResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"model": AnalysisJobResponse, "description": "Задача отменена"},
+        404: {"description": "Задача или документ не найдены"},
+        409: {"description": "Задача не может быть отменена в текущем статусе"},
+    },
+    summary="Отменить задачу анализа",
+)
 async def cancel_analysis_job(
     document_id: uuid.UUID,
     job_id: uuid.UUID,
     project: Project = Depends(get_allowed_project),
     service: AnalysisJobService = Depends(get_analysis_job_service),
 ) -> AnalysisJobResponse:
+    """Отменить задачу анализа.
+
+    C-1: REST-правильный способ — DELETE /{job_id} (отменить = уничтожить намерение).
+    Возвращает 200 + AnalysisJobResponse с status=cancelled, чтобы фронт
+    обновил стор без дополнительного GET.
+    """
     try:
         job = await service.cancel_job(project.id, document_id, job_id)
     except DocumentNotFoundError as exc:
@@ -167,8 +191,7 @@ async def cancel_analysis_job(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     # N-2: revoke делегирован в сервис — роутер не знает о celery_app напрямую.
-    # FIX-1: suppress(Exception) заменён на явный try/except с логированием,
-    #         чтобы revoke-failures были видны в prod-логах.
+    # FIX-1: suppress(Exception) заменён на явный try/except с логированием.
     if job.celery_task_id:
         try:
             await service.revoke_celery_task(job.celery_task_id)
@@ -180,3 +203,24 @@ async def cancel_analysis_job(
             )
 
     return AnalysisJobResponse.model_validate(job)
+
+
+# ---------------------------------------------------------------------------
+# Deprecated alias: POST /{job_id}/cancel → 307 → DELETE /{job_id}
+# Оставлен для плавной миграции фронта. Удалить после обновления клиента.
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/{job_id}/cancel",
+    include_in_schema=False,  # скрыт из OpenAPI — фронт должен перейти на DELETE
+    deprecated=True,
+)
+async def cancel_analysis_job_deprecated(
+    document_id: uuid.UUID,
+    job_id: uuid.UUID,
+) -> RedirectResponse:
+    """Deprecated. Используйте DELETE /{job_id}."""
+    return RedirectResponse(
+        url=f"../{job_id}",
+        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+    )

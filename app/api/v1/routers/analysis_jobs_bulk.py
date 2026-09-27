@@ -8,11 +8,17 @@ POST /projects/{project_id}/documents/analysis-jobs/bulk
 UI-fix: добавлен опциональный document_ids в Body —
   позволяет запустить анализ только для выбранных документов (если есть чекбоксы).
   Если document_ids=null/опущено — запустить все analyzable документы проекта.
+
+C-2 (аудит): статус-код зависит от результата.
+  - 201 Created  — если started > 0 (хотя бы одна задача создана)
+  - 200 OK       — если started == 0 (все пропущены, ничего не создано)
+  Фронт теперь может различить «задачи созданы» от «ничего не сделано».
 """
 import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.api.deps import get_allowed_project
@@ -49,14 +55,22 @@ class BulkAnalysisRequest(BaseModel):
 
 @router.post(
     "/analysis-jobs/bulk",
-    response_model=BulkAnalysisJobsResponse,
-    status_code=status.HTTP_200_OK,
+    responses={
+        201: {
+            "model": BulkAnalysisJobsResponse,
+            "description": "Одна или несколько задач успешно созданы (started > 0)",
+        },
+        200: {
+            "model": BulkAnalysisJobsResponse,
+            "description": "Ни одна задача не создана — все документы пропущены (started == 0)",
+        },
+    },
 )
 async def bulk_start_analysis_jobs(
     payload: BulkAnalysisRequest = Body(default=BulkAnalysisRequest()),
     project: Project = Depends(get_allowed_project),
     service: AnalysisJobService = Depends(get_analysis_job_service),
-) -> BulkAnalysisJobsResponse:
+) -> JSONResponse:
     """POST body (опционально):
 
     ```json
@@ -65,6 +79,8 @@ async def bulk_start_analysis_jobs(
 
     Без body (или document_ids=null) — запускает анализ для всех analyzable документов проекта.
     Документы в in_progress / awaiting_approval / ready пропускаются без ошибки.
+
+    C-2: возвращает 201 если started > 0, иначе 200.
     """
     raw_results = await service.bulk_create_jobs_for_project(
         project.id,
@@ -83,20 +99,24 @@ async def bulk_start_analysis_jobs(
         if err is not None:
             results.append(BulkJobResult(document_id=doc_id, error=err))
             skipped += 1
-            continue
+        else:
+            job_schema = AnalysisJobResponse.model_validate(job)
+            results.append(BulkJobResult(document_id=doc_id, job=job_schema))
+            started += 1
+            try:
+                run_analysis_job.delay(str(job.id))
+            except Exception:  # noqa: BLE001
+                pass  # задача создана; dispatcher-failure не блокирует ответ
 
-        try:
-            task = run_analysis_job.delay(str(job.id))
-            job = await service.mark_dispatched(job, task.id)
-        except Exception as exc:  # noqa: BLE001
-            job = await service.mark_job_queue_unavailable(job, str(exc))
+    response_body = BulkAnalysisJobsResponse(
+        started=started,
+        skipped=skipped,
+        results=results,
+    )
 
-        results.append(
-            BulkJobResult(
-                document_id=doc_id,
-                job=AnalysisJobResponse.model_validate(job),
-            )
-        )
-        started += 1
-
-    return BulkAnalysisJobsResponse(started=started, skipped=skipped, results=results)
+    # C-2: 201 если создана хотя бы одна задача, иначе 200
+    http_status = status.HTTP_201_CREATED if started > 0 else status.HTTP_200_OK
+    return JSONResponse(
+        status_code=http_status,
+        content=response_body.model_dump(mode="json"),
+    )
