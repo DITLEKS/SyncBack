@@ -1,38 +1,3 @@
-"""
-Глобальный список документов пользователя (P0-4).
-
-GET /api/v1/documents — возвращает ВСЕ документы текущего пользователя
-поперёк всех проектов, независимо от их статуса, с агрегированными
-счётчиками правок.
-
-Статусная модель документа (DocumentStatusVO):
-  draft              — документ создан, анализ ещё не запускался
-  in_progress        — анализ выполняется прямо сейчас
-  awaiting_approval  — анализ завершён, есть правки ожидающие подтверждения
-  ready              — все правки обработаны (приняты / отклонены)
-
-Параметры запроса:
-  status   — фильтр по одному из перечисленных статусов DocumentStatusVO.
-             Если не передан — возвращаются документы во всех статусах.
-  outdated — вспомогательный булев фильтр (НЕ является статусом документа).
-             Если true: возвращать только документы у которых есть хотя бы
-             одна правка в статусе pending (то есть документ требует внимания).
-             Источники истины (is_source_of_truth=True) исключаются.
-             Если false (по умолчанию): фильтрация по pending-правкам не применяется.
-  search   — поиск по названию (регистронезависимый, подстрока)
-  sort_by  — поле сортировки: updated_at (по умолчанию) | created_at | title
-  sort_dir — направление: desc (по умолчанию) | asc
-  limit    — кол-во элементов, 1..200, по умолчанию 50
-  offset   — смещение, по умолчанию 0
-
-Ответ (DocumentListPage):
-  items[]:
-    id, name, format, size_bytes, status, current_analysis_job_id,
-    created_at, updated_at,
-    project: { id, name },
-    suggestions: { total, pending, accepted, rejected }
-  total, limit, offset
-"""
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
@@ -65,15 +30,12 @@ async def list_my_documents(
     outdated: bool = Query(
         False,
         description=(
-            "Вспомогательный фильтр — НЕ является статусом документа. "
             "Если true: возвращать только документы у которых есть хотя бы одна "
-            "правка в статусе pending (документы требующие внимания). "
-            "Источники истины (is_source_of_truth=True) исключаются. "
-            "Можно комбинировать с параметром status."
+            "правка в статусе pending. Можно комбинировать с параметром status."
         ),
     ),
     search: str | None = Query(None, max_length=200, description="Поиск по названию (подстрока)"),
-    sort_by: Literal["created_at", "updated_at", "title"] = Query(
+    sort_by: Literal["created_at", "updated_at", "name"] = Query(
         "updated_at", description="Поле сортировки"
     ),
     sort_dir: Literal["asc", "desc"] = Query("desc", description="Направление сортировки"),
@@ -96,9 +58,9 @@ async def list_my_documents(
     items = [
         DocumentListItem(
             id=row["document"].id,
-            name=row["document"].name,           # P0-#12: было .title
+            name=row["document"].name,
             format=row["document"].format,
-            size_bytes=row["document"].size_bytes,  # UI-fix: размер файла
+            size_bytes=row["document"].size_bytes,
             status=row["document"].status,
             current_analysis_job_id=row["document"].current_analysis_job_id,
             created_at=row["document"].created_at,

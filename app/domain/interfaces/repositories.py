@@ -1,26 +1,3 @@
-"""
-Абстрактные репозитории — порты в терминологии DDD/Hexagonal.
-
-Domain-слой зависит ТОЛЬКО от этих интерфейсов и domain value-objects.
-Infrastructure-слой предоставляет конкретные адаптеры (SQLAlchemy-реализации).
-
-Правило именования:
-  - I<Name>Repository  — порт (этот файл)
-  - <Name>Repository   — адаптер (в app/infrastructure/db/repositories/)
-
-Правило импортов:
-  - Document и Suggestion — через DocumentProtocol/SuggestionProtocol (не ORM).
-  - AnalysisJob и AuditLog — document/entry через Protocol, возвращаемые значения под TYPE_CHECKING.
-  - Project, Source, User — всё ещё под TYPE_CHECKING.
-  - DocumentFormatVO — теперь из domain.value_objects.
-
-H-NEW-2: IDashboardRepository (реад-модель) не содержит write-методов.
-  upsert_open перенесён в IDocumentOpenRepository — отдельный write-порт.
-  Инжектируется через FastAPI Depends(get_document_open_repository).
-  UoW не содержит IDashboardRepository — реад-модель инжектируется напрямую.
-
-M-NEW-3: list_all_for_user возвращает tuple[list[DocumentProtocol], int] (раньше был tuple[list[dict], int]).
-"""
 from __future__ import annotations
 
 import uuid
@@ -63,7 +40,7 @@ class IDocumentRepository(ABC):
         *,
         id: uuid.UUID,
         project_id: uuid.UUID,
-        title: str,
+        name: str,
         format: DocumentFormatVO,
         storage_key: str,
     ) -> "Document": ...
@@ -76,16 +53,17 @@ class IDocumentRepository(ABC):
         self,
         project_id: uuid.UUID,
         pagination: KeysetPage | PaginationParams,
+        *,
+        status: DocumentStatusVO | None = None,
     ) -> list[DocumentProtocol]: ...
 
     @abstractmethod
-    async def count_for_project(self, project_id: uuid.UUID) -> int:
-        """
-        M-NEW-2: отдельный запрос подсчёта является ценой. Связка list_for_project + count_for_project
-        даёт два round-trip. Если в будущем потребуется оптимизация — добавить
-        list_for_project_with_total() с COUNT(*) OVER() (window function).
-        """
-        ...
+    async def count_for_project(
+        self,
+        project_id: uuid.UUID,
+        *,
+        status: DocumentStatusVO | None = None,
+    ) -> int: ...
 
     @abstractmethod
     async def list_analyzable_for_project(
@@ -119,15 +97,11 @@ class IDocumentRepository(ABC):
         limit: int,
         offset: int,
         status: DocumentStatusVO | None = None,
+        outdated: bool = False,
         search: str | None = None,
         sort_by: str = "updated_at",
         sort_dir: str = "desc",
-    ) -> tuple[list[DocumentProtocol], int]:
-        """
-        M-NEW-3: возвращает tuple[list[DocumentProtocol], int].
-        Тип выровнен с реализациями и document_service.list_all_for_user.
-        """
-        ...
+    ) -> tuple[list[dict[str, Any]], int]: ...
 
     @abstractmethod
     async def delete(self, document: DocumentProtocol) -> None: ...
@@ -408,7 +382,6 @@ class ISourceRepository(ABC):
 # ---------------------------------------------------------------------------
 
 class IUserRepository(ABC):
-    """HIGH: Порт для репозитория пользователей."""
 
     @abstractmethod
     async def get_by_id(self, user_id: uuid.UUID) -> "User | None": ...
@@ -441,10 +414,6 @@ class IUserRepository(ABC):
 # ---------------------------------------------------------------------------
 
 class IDashboardRepository(ABC):
-    """
-    H-NEW-2: реад-модель — только читающие методы.
-    Пись через отдельный IDocumentOpenRepository.
-    """
 
     @abstractmethod
     async def get_stats(self, user_id: uuid.UUID) -> dict: ...
@@ -470,13 +439,6 @@ class IDashboardRepository(ABC):
 # ---------------------------------------------------------------------------
 
 class IDocumentOpenRepository(ABC):
-    """
-    H-NEW-2: write-порт, вынесенный из IDashboardRepository.
-
-    Отслеживает последнее открытие документа пользователем.
-    Инжектируется напрямую через FastAPI Depends(get_document_open_repository)
-    без IUnitOfWork — это операция upsert без бизнес-транзакции.
-    """
 
     @abstractmethod
     async def upsert_open(
