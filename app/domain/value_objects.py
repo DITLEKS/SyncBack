@@ -6,11 +6,13 @@ Value-объекты доменного слоя — иммутабельные 
   - Никаких импортов из FastAPI / SQLAlchemy
   - Все поля frozen=True (или StrEnum)
 
-FIX-VO-1: DocumentStatusVO дополнен значениями ERROR и CANCELLED,
-    которые присутствуют в enums.DocumentStatus (инфра) и записываются
-    в БД analysis_job_service при завершении job с ошибкой или отменой.
-    Без этих значений DocumentStatusVO(document.status) бросал ValueError
-    при status in ('error', 'cancelled').
+4STATUS: DocumentStatusVO возвращён к 4 значениям (draft/in_progress/
+    awaiting_approval/ready). ERROR и CANCELLED удалены из публичного
+    статуса документа. Техническое состояние анализа теперь хранится
+    исключительно в AnalysisJobStatusVO и отдаётся фронту через
+    AnalysisStateResponse (см. app/api/schemas/document.py).
+    Миграция 0020 переводит существующие строки error/cancelled → draft
+    и удаляет эти значения из PostgreSQL enum document_status.
 """
 from __future__ import annotations
 
@@ -29,12 +31,8 @@ class DocumentStatusVO(StrEnum):
     IN_PROGRESS       = "in_progress"
     AWAITING_APPROVAL = "awaiting_approval"
     READY             = "ready"
-    # FIX-VO-1: синхронизировано с enums.DocumentStatus (infrastructure).
-    # Требует миграции (уже выполнена в FIX-review-7):
-    #   ALTER TYPE document_status ADD VALUE IF NOT EXISTS 'error';
-    #   ALTER TYPE document_status ADD VALUE IF NOT EXISTS 'cancelled';
-    ERROR             = "error"
-    CANCELLED         = "cancelled"
+    # ERROR и CANCELLED удалены из публичного статуса документа (4STATUS).
+    # Техническое состояние анализа хранится в AnalysisJobStatusVO.
 
 
 class SuggestionStatusVO(StrEnum):

@@ -12,6 +12,9 @@ C-3: _run_async упрощён до asyncio.run().
     Celery-воркеры всегда запускаются в синхронном контексте (prefork/solo),
     поэтому проверки is_running/is_closed и ThreadPoolExecutor были излишними
     и потенциально создавали nested event loop в отдельном потоке.
+
+4STATUS: _finalize при ошибке переводит документ в DRAFT (не в ERROR),
+    при отмене — тоже в DRAFT. ERROR/CANCELLED удалены из DocumentStatusVO.
 """
 from __future__ import annotations
 
@@ -263,13 +266,20 @@ async def _finalize(results: list[dict], job_id: str) -> None:
             return
 
         if cancelled:
+            # 4STATUS: отмена → документ возвращается в DRAFT
             job.status = AnalysisJobStatusVO.CANCELLED
             document.status = DocumentStatusVO.DRAFT
         elif failed:
+            # 4STATUS: ошибка → документ возвращается в DRAFT (не в ERROR)
             job.status = AnalysisJobStatusVO.FAILED
-            document.status = DocumentStatusVO.FAILED
+            document.status = DocumentStatusVO.DRAFT
         else:
-            job.status = AnalysisJobStatusVO.COMPLETED
-            document.status = DocumentStatusVO.AWAITING_APPROVAL
+            pending_suggestions = await uow.suggestions.count_pending(job.id)
+            if pending_suggestions > 0:
+                job.status = AnalysisJobStatusVO.SUCCESS
+                document.status = DocumentStatusVO.AWAITING_APPROVAL
+            else:
+                job.status = AnalysisJobStatusVO.SUCCESS
+                document.status = DocumentStatusVO.READY
 
         await uow.commit()
