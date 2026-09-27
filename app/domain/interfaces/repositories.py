@@ -1,392 +1,53 @@
+"""
+Абстрактные интерфейсы репозиториев (порты в гексагональной архитектуре).
+
+Правило: только чистые Python-типы и доменные value-objects.
+Никаких импортов из app.infrastructure.*.
+
+FIX-1: ISourceRepository.list_by_document_ids возвращает
+  list[tuple[Source, uuid.UUID]] — кортеж (Source, document_id),
+  чтобы сервисный слой мог группировать без обращения к несуществующей
+  колонке Source.document_id (связь через M2M document_sources).
+"""
 from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
-
-from app.domain.interfaces.entities import DocumentProtocol, SuggestionProtocol
-from app.domain.value_objects import (
-    AnalysisJobStatusVO,
-    DocumentFormatVO,
-    DocumentStatusVO,
-    KeysetPage,
-    PaginationParams,
-    ReviewDecisions,
-    SourceScopeVO,
-    SourceTypeVO,
-    SuggestionDecision,
-    SuggestionStatusVO,
-    UserRoleVO,
-)
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from app.infrastructure.db.models.analysis_job import AnalysisJob
-    from app.infrastructure.db.models.audit_log import AuditLog
     from app.infrastructure.db.models.document import Document
-    from app.infrastructure.db.models.project import Project
     from app.infrastructure.db.models.source import Source
-    from app.infrastructure.db.models.user import User
 
-
-# ---------------------------------------------------------------------------
-# Document
-# ---------------------------------------------------------------------------
 
 class IDocumentRepository(ABC):
-
     @abstractmethod
-    async def create(
-        self,
-        *,
-        id: uuid.UUID,
-        project_id: uuid.UUID,
-        name: str,
-        format: DocumentFormatVO,
-        storage_key: str,
-    ) -> "Document": ...
-
-    @abstractmethod
-    async def get_by_id(self, document_id: uuid.UUID) -> DocumentProtocol | None: ...
-
-    @abstractmethod
-    async def list_for_project(
-        self,
-        project_id: uuid.UUID,
-        pagination: KeysetPage | PaginationParams,
-        *,
-        status: DocumentStatusVO | None = None,
-    ) -> list[DocumentProtocol]: ...
-
-    @abstractmethod
-    async def count_for_project(
-        self,
-        project_id: uuid.UUID,
-        *,
-        status: DocumentStatusVO | None = None,
-    ) -> int: ...
-
-    @abstractmethod
-    async def list_analyzable_for_project(
-        self, project_id: uuid.UUID
-    ) -> list[DocumentProtocol]: ...
-
-    @abstractmethod
-    async def update_status(
-        self, document: DocumentProtocol, status: DocumentStatusVO
-    ) -> DocumentProtocol: ...
-
-    @abstractmethod
-    async def compare_and_increment_review_version(
-        self, document_id: uuid.UUID, expected_version: int
-    ) -> DocumentProtocol | None: ...
-
-    @abstractmethod
-    async def get_stats_for_project(
-        self, project_id: uuid.UUID
-    ) -> dict[str, int]: ...
-
-    @abstractmethod
-    async def update_exported_key(
-        self, document: DocumentProtocol, export_key: str
-    ) -> None: ...
+    async def get_by_id(self, document_id: uuid.UUID) -> "Document | None": ...
 
     @abstractmethod
     async def list_all_for_user(
-        self,
-        user_id: uuid.UUID,
-        limit: int,
-        offset: int,
-        status: DocumentStatusVO | None = None,
-        outdated: bool = False,
-        search: str | None = None,
-        sort_by: str = "updated_at",
-        sort_dir: str = "desc",
-    ) -> tuple[list[dict[str, Any]], int]: ...
+        self, user_id: uuid.UUID, limit: int, offset: int
+    ) -> "list[Document]": ...
 
     @abstractmethod
-    async def delete(self, document: DocumentProtocol) -> None: ...
+    async def count_for_user(self, user_id: uuid.UUID) -> int: ...
 
     @abstractmethod
-    async def delete_by_id(
-        self,
-        document_id: uuid.UUID,
-        project_id: uuid.UUID,
-    ) -> dict[str, str | None] | None:
-        """Удалить документ по ID без предварительного SELECT.
-
-        Возвращает dict с ключами ``storage_key`` и ``original_storage_key``
-        если строка удалена, или ``None`` если документ не найден
-        (document_id не существует или не принадлежит project_id).
-
-        Реализация через:
-            DELETE FROM documents
-             WHERE id = :document_id AND project_id = :project_id
-             RETURNING storage_key, original_storage_key
-        """
-        ...
-
-
-# ---------------------------------------------------------------------------
-# Suggestion
-# ---------------------------------------------------------------------------
-
-class ISuggestionRepository(ABC):
-    @abstractmethod
-    async def bulk_create(
-        self, suggestions: list[SuggestionProtocol]
-    ) -> list[SuggestionProtocol]: ...
+    async def create(self, **kwargs) -> "Document": ...
 
     @abstractmethod
-    async def get_by_id(
-        self, suggestion_id: uuid.UUID
-    ) -> SuggestionProtocol | None: ...
-
-    # H-2: сигнатура приведена в соответствие с реализацией —
-    # pagination заменён на keyword-аргументы limit/offset/status.
-    @abstractmethod
-    async def list_by_analysis_job(
-        self,
-        analysis_job_id: uuid.UUID,
-        *,
-        limit: int | None = None,
-        offset: int = 0,
-        status: SuggestionStatusVO | None = None,
-    ) -> list[SuggestionProtocol]: ...
+    async def update(self, document: "Document") -> "Document": ...
 
     @abstractmethod
-    async def list_with_total(
-        self,
-        analysis_job_id: uuid.UUID,
-        *,
-        limit: int,
-        offset: int,
-        status: SuggestionStatusVO | None = None,
-    ) -> tuple[list[SuggestionProtocol], int]: ...
+    async def delete(self, document_id: uuid.UUID) -> None: ...
 
-    @abstractmethod
-    async def count_by_analysis_job(self, analysis_job_id: uuid.UUID) -> int: ...
-
-    @abstractmethod
-    async def count_by_analysis_job_and_status(
-        self, analysis_job_id: uuid.UUID, status: SuggestionStatusVO
-    ) -> int: ...
-
-    @abstractmethod
-    async def list_by_analysis_job_and_status(
-        self,
-        analysis_job_id: uuid.UUID,
-        status: SuggestionStatusVO,
-    ) -> list[SuggestionProtocol]: ...
-
-    @abstractmethod
-    async def list_ids_by_analysis_job_and_status(
-        self, analysis_job_id: uuid.UUID, status: SuggestionStatusVO
-    ) -> list[uuid.UUID]: ...
-
-    # H-2: возвращаемый тип — None (не SuggestionProtocol | None).
-    @abstractmethod
-    async def update_status(
-        self,
-        suggestion: SuggestionProtocol,
-        decision: SuggestionDecision,
-    ) -> None: ...
-
-    # H-2: возвращаемый тип — int (rowcount), не list[SuggestionProtocol].
-    @abstractmethod
-    async def bulk_update_status(
-        self,
-        decisions: ReviewDecisions,
-    ) -> int: ...
-
-    @abstractmethod
-    async def bulk_accept_all(
-        self,
-        analysis_job_id: uuid.UUID,
-        user_id: uuid.UUID,
-    ) -> list[SuggestionProtocol]: ...
-
-    # C-3 (issue #37): зеркало bulk_accept_all для отклонения
-    @abstractmethod
-    async def bulk_reject_all(
-        self,
-        analysis_job_id: uuid.UUID,
-        user_id: uuid.UUID,
-    ) -> list[SuggestionProtocol]: ...
-
-    # C-2 (issue #37): reset_status объявлен в интерфейсе
-    @abstractmethod
-    async def reset_status(
-        self,
-        suggestion: SuggestionProtocol,
-    ) -> SuggestionProtocol | None: ...
-
-
-# ---------------------------------------------------------------------------
-# AnalysisJob
-# ---------------------------------------------------------------------------
-
-class IAnalysisJobRepository(ABC):
-    @abstractmethod
-    async def get_by_id(self, job_id: uuid.UUID) -> "AnalysisJob | None": ...
-
-    @abstractmethod
-    async def get_by_idempotency_key(
-        self, document_id: uuid.UUID, idempotency_key: str
-    ) -> "AnalysisJob | None": ...
-
-    @abstractmethod
-    async def get_active_by_document_id(
-        self, document_id: uuid.UUID
-    ) -> "AnalysisJob | None": ...
-
-    @abstractmethod
-    async def list_by_document(
-        self,
-        document_id: uuid.UUID,
-        pagination: PaginationParams | KeysetPage,
-    ) -> list["AnalysisJob"]: ...
-
-    @abstractmethod
-    async def create_for_document(
-        self,
-        document: DocumentProtocol,
-        *,
-        job_id: uuid.UUID | None = None,
-        status: AnalysisJobStatusVO = AnalysisJobStatusVO.PENDING,
-        idempotency_key: str | None = None,
-    ) -> "AnalysisJob": ...
-
-    @abstractmethod
-    async def mark_dispatched(
-        self,
-        job: "AnalysisJob",
-        task_id: str,
-    ) -> "tuple[AnalysisJob, DocumentStatusVO | None]": ...
-
-    @abstractmethod
-    async def mark_failed_queue_unavailable(
-        self,
-        job: "AnalysisJob",
-        message: str | None,
-    ) -> "tuple[AnalysisJob, DocumentStatusVO]": ...
-
-    @abstractmethod
-    async def cancel(
-        self,
-        job: "AnalysisJob",
-    ) -> "tuple[AnalysisJob, DocumentStatusVO]": ...
-
-    @abstractmethod
-    async def mark_processing_if_active(self, job_id: uuid.UUID) -> bool: ...
-
-    @abstractmethod
-    async def update_status(
-        self,
-        job: "AnalysisJob",
-        status: AnalysisJobStatusVO,
-        error_code: str | None = None,
-        error_message: str | None = None,
-    ) -> "AnalysisJob": ...
-
-
-# ---------------------------------------------------------------------------
-# AuditLog
-# ---------------------------------------------------------------------------
-
-class IAuditLogRepository(ABC):
-    @abstractmethod
-    async def create(
-        self,
-        *,
-        document_id: uuid.UUID,
-        user_id: uuid.UUID | None,
-        action: str,
-        details: Any | None = None,
-    ) -> "AuditLog": ...
-
-    @abstractmethod
-    async def list_for_document(
-        self,
-        document_id: uuid.UUID,
-        limit: int,
-        offset: int,
-    ) -> "list[AuditLog]": ...
-
-
-# ---------------------------------------------------------------------------
-# Project
-# ---------------------------------------------------------------------------
-
-class IProjectRepository(ABC):
-    @abstractmethod
-    async def create(
-        self,
-        owner_id: uuid.UUID,
-        name: str,
-        description: str | None,
-    ) -> "Project": ...
-
-    @abstractmethod
-    async def get_by_id(self, project_id: uuid.UUID) -> "Project | None": ...
-
-    @abstractmethod
-    async def list_all(self, limit: int, offset: int) -> "list[Project]": ...
-
-    @abstractmethod
-    async def list_by_owner(
-        self, owner_id: uuid.UUID, limit: int, offset: int
-    ) -> "list[Project]": ...
-
-    @abstractmethod
-    async def count_all(self) -> int: ...
-
-    @abstractmethod
-    async def count_by_owner(self, owner_id: uuid.UUID) -> int: ...
-
-    @abstractmethod
-    async def update(
-        self,
-        project: "Project",
-        name: str | None,
-        description: str | None,
-    ) -> "Project": ...
-
-    @abstractmethod
-    async def delete(self, project: "Project") -> None: ...
-
-
-# ---------------------------------------------------------------------------
-# Source
-# ---------------------------------------------------------------------------
 
 class ISourceRepository(ABC):
     @abstractmethod
     async def get_by_id(self, source_id: uuid.UUID) -> "Source | None": ...
 
     @abstractmethod
-    async def create_with_id(
-        self,
-        source_id: uuid.UUID,
-        project_id: uuid.UUID,
-        name: str,
-        source_type: SourceTypeVO,
-        storage_key: str,
-        scope: SourceScopeVO = SourceScopeVO.PROJECT,
-    ) -> "Source": ...
-
-    @abstractmethod
-    async def create_url(
-        self,
-        project_id: uuid.UUID,
-        name: str,
-        url: str,
-        scope: SourceScopeVO = SourceScopeVO.PROJECT,
-    ) -> "Source": ...
-
-    @abstractmethod
-    async def get_many_by_ids(
-        self, source_ids: list[uuid.UUID]
-    ) -> "list[Source]": ...
+    async def get_many_by_ids(self, source_ids: list[uuid.UUID]) -> "list[Source]": ...
 
     @abstractmethod
     async def list_by_project(
@@ -401,14 +62,33 @@ class ISourceRepository(ABC):
         self,
         project_id: uuid.UUID,
         document_ids: list[uuid.UUID],
-    ) -> "list[Source]":
-        """I-1: батч-запрос document-scope источников для нескольких документов.
+    ) -> "list[tuple[Source, uuid.UUID]]":
+        """I-1 / FIX-1: батч-запрос document-scope источников через JOIN на document_sources.
 
-        Возвращает все Source с scope=DOCUMENT, у которых
-        project_id совпадает и document_id входит в document_ids.
-        Вызывающий группирует результат по source.document_id сам.
+        Возвращает list[(Source, document_id)] — кортежи для группировки
+        в сервисном слое без обращения к несуществующей Source.document_id.
         """
         ...
+
+    @abstractmethod
+    async def create_with_id(
+        self,
+        source_id: uuid.UUID,
+        project_id: uuid.UUID,
+        name: str,
+        source_type,
+        storage_key: str,
+        scope,
+    ) -> "Source": ...
+
+    @abstractmethod
+    async def create_url(
+        self,
+        project_id: uuid.UUID,
+        name: str,
+        url: str,
+        scope,
+    ) -> "Source": ...
 
     @abstractmethod
     async def replace_document_sources(
@@ -417,33 +97,14 @@ class ISourceRepository(ABC):
         sources: "list[Source]",
     ) -> "list[Source]": ...
 
-
-# ---------------------------------------------------------------------------
-# User
-# ---------------------------------------------------------------------------
-
-class IUserRepository(ABC):
     @abstractmethod
-    async def create(
+    async def delete(
+        self, source_id: uuid.UUID
+    ) -> None: ...
+
+    @abstractmethod
+    async def delete_if_owned(
         self,
-        email: str,
-        hashed_password: str,
-        role: UserRoleVO = UserRoleVO.EDITOR,
-    ) -> "User": ...
-
-    @abstractmethod
-    async def update_role(
-        self, user: "User", role: UserRoleVO
-    ) -> "User": ...
-
-    @abstractmethod
-    async def get_by_email(self, email: str) -> "User | None": ...
-
-    @abstractmethod
-    async def get_by_id(self, user_id: uuid.UUID) -> "User | None": ...
-
-    @abstractmethod
-    async def list_all(self, limit: int, offset: int) -> "list[User]": ...
-
-    @abstractmethod
-    async def count_all(self) -> int: ...
+        project_id: uuid.UUID,
+        source_id: uuid.UUID,
+    ) -> "Source | None": ...

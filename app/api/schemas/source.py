@@ -9,9 +9,13 @@ P3: UrlConnector реализован, поэтому type='url' полност�
 I-1: добавлен SourceBadge — лёгкое представление источника для карточек
      DocumentListItem.sources (id + name + type, без дат и лишних полей).
 FIX-3: SourceResponse.uploaded_at → created_at.
-     Поле uploaded_at было удалено из модели Source в R-4 (дублировало
+     Поле uploaded_at удалено из модели Source в R-4 (дублировало
      created_at). Схема не была обновлена → ValidationError на всех
      GET/POST /sources эндпоинтах.
+FIX-9: SourceCreateRequest и NoteCreateRequest получили опциональное
+     поле document_id: uuid.UUID | None = None.
+     При scope='document' без document_id источник создавался без
+     привязки к документу — M2M-запись в document_sources не вставлялась.
 """
 
 import uuid
@@ -22,18 +26,29 @@ from pydantic import BaseModel, Field
 
 
 class SourceCreateRequest(BaseModel):
-    """Создание URL-источника. Файлы и текстовые заметки — через отдельные эндпоинты."""
+    """Создание URL-источника.
+
+    FIX-9: добавлено document_id — при scope='document' необходимо
+    указать документ, к которому привязывается источник.
+    Если scope='project', document_id игнорируется (должен быть None).
+    """
     name: str = Field(min_length=1, max_length=255)
     type: Literal["url"]
     url: str = Field(min_length=1, max_length=2048)
     scope: Literal["project", "document"] = "project"
+    document_id: uuid.UUID | None = None
 
 
 class NoteCreateRequest(BaseModel):
-    """Создание текстовой заметки (P2: сохраняется как .txt в MinIO)."""
+    """Создание текстовой заметки (P2: сохраняется как .txt в MinIO).
+
+    FIX-9: добавлено document_id — при scope='document' необходимо
+    указать документ, к которому привязывается источник.
+    """
     name: str = Field(min_length=1, max_length=255)
     text_content: str = Field(min_length=1, max_length=200_000)
     scope: Literal["project", "document"] = "project"
+    document_id: uuid.UUID | None = None
 
 
 class SourceResponse(BaseModel):

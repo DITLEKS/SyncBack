@@ -1,16 +1,25 @@
-"""I-1: composite partial index on sources(project_id, document_id) for document-scope batch-query.
+"""I-1 / FIX-4: индексы на document_sources для батч-запроса list_by_document_ids.
 
 Revision ID: 0021
 Revises: 0020
 Create Date: 2026-09-27
 
-P0-fix: ранее индекс создавался только по document_id.
-Теперь составной (project_id, document_id) WHERE scope = 'document',
-что соответствует запросу list_by_document_ids(project_id, doc_ids).
+FIX-4: предыдущая версия создавала индекс на sources(project_id, document_id),
+но колонки document_id в таблице sources нет — связь documents<->sources
+идёт через M2M-таблицу document_sources.
+
+Заменяем на два индекса по document_sources:
+  1. ix_document_sources_document_id
+       — ускоряет WHERE ds.document_id IN (:ids) при батч-выборке.
+  2. ix_document_sources_source_id
+       — ускоряет обратный JOIN (source_id -> sources.id).
+
+Частичный WHERE scope='document' убран: document_sources содержит
+только document-scope связи по определению (project-scope источники
+не вносятся в эту таблицу).
 """
 from __future__ import annotations
 
-import sqlalchemy as sa
 from alembic import op
 
 revision = "0021"
@@ -20,16 +29,20 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Составной частичный индекс: покрывает батч-запрос
-    #   WHERE project_id = :pid AND document_id IN (...) AND scope = 'document'
-    # Partial WHERE убирает project-scope строки из индекса.
+    # Индекс 1: основной — батч-фильтр по document_id
     op.create_index(
-        "ix_sources_project_document_scope",
-        "sources",
-        ["project_id", "document_id"],
-        postgresql_where=sa.text("scope = 'document'"),
+        "ix_document_sources_document_id",
+        "document_sources",
+        ["document_id"],
+    )
+    # Индекс 2: покрывающий JOIN document_sources -> sources
+    op.create_index(
+        "ix_document_sources_source_id",
+        "document_sources",
+        ["source_id"],
     )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_sources_project_document_scope", table_name="sources")
+    op.drop_index("ix_document_sources_source_id", table_name="document_sources")
+    op.drop_index("ix_document_sources_document_id", table_name="document_sources")
