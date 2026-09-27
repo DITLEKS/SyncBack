@@ -129,12 +129,16 @@ CI (`.github/workflows/ci.yml`) запускает оба набора авто�
 | `users` | Пользователи, глобальная роль `admin`/`user` | 1:N `projects` (через `owner_id`) |
 | `projects` | Проекты — единица группировки | владелец через `owner_id`, опциональное `description` |
 | `documents` | Целевые документы (doc/docx/txt/markdown) | M:N с `sources`, ссылка на последний `analysis_job`; поля `review_version`, `opens_count`, `original_storage_key` |
-| `sources` | Источники истины (file/note/link), переиспользуемые; поле `scope` | M:N с `documents` через `document_sources` |
+| `sources` | Источники истины (file/note/link), переиспользуемые; поле `scope` — UI-метка (не ограничение) | M:N с `documents` через `document_sources` |
 | `document_sources` | Связка документ↔источник | — |
 | `document_blocks` | Структурные блоки документа (абзацы/заголовки) | 1:N `suggestions` через `block_id` (anchor) |
 | `analysis_jobs` | Запуски анализа (pending/processing/success/partial_success/failed/cancelled) | 1:N `suggestions`; `idempotency_key` |
 | `suggestions` | Точечные правки (add/modify/delete) | `block_id` (anchor), `source_reference`, `confidence_score`, `explanation` |
 | `audit_logs` | Журнал действий (accept/reject/download/finalize) | `suggestion_id` или `document_id` (CHECK-constraint `ck_audit_logs_target`) |
+
+### Поле `sources.scope`
+
+`scope` (`project` / `document`) — **UI-метка**, не инвариант. Она подсказывает, в каком контексте создан источник, но не ограничивает привязку: любой источник может быть подключён к произвольному числу документов одного проекта через `document_sources`. Реальный набор источников документа определяется исключительно записями в `document_sources`.
 
 Роли: `admin` (видит всё) и `user` (только свои проекты). Точка расширения — `project_members`.
 
@@ -268,6 +272,7 @@ t._get_llm_client = lambda: FakeLLMClient()
 - **LLM-контракт** — плейсхолдер до выбора провайдера; сейчас `StubLLMClient` (фиктивная правка).
 - **`DocumentRepository.attach_sources`** — чтение-мёрж-запись без атомарности; при параллельных вызовах возможен lost update. Низкий риск, зафиксирован как тех.долг.
 - **Движок СУБД в Celery-воркере**: `isolated_uow()` создаёт новый `AsyncEngine` на каждый вызов под-задачи — корректно для event loop, но TCP/TLS handshake на каждый источник; при росте нагрузки стоит рассмотреть пул на уровне воркер-процесса.
+- **`audit_logs` хранятся в основной PostgreSQL**: таблица растёт только вширь (записи не удаляются) и имеет иной профиль доступа, чем бизнес-данные (редкое чтение диапазонами vs. частое точечное чтение). На текущем масштабе это приемлемо. При росте нагрузки или появлении требований к retention-политике стоит рассмотреть вынос в отдельную схему, TimescaleDB или ClickHouse. До тех пор рекомендуется добавить партиционирование таблицы по `created_at`.
 
 ## Структура репозитория
 
