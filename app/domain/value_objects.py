@@ -78,6 +78,7 @@ class AuditActionVO(StrEnum):
     BULK_ACCEPT = "bulk_accept"
     FINALIZE    = "finalize"
     REOPEN      = "reopen"
+    RESET       = "reset"   # отмена ранее принятого/отклонённого решения
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ FIX-2: /reject-all возвращает BulkRejectResponse с полем rejecte
         семантически неверного accepted_count=N из BulkAcceptResponse.
 FIX-6: _safe_bulk_log и _safe_single_log добавлен exc_info=True для сохранения трейса.
 FIX-7: review_save логирует предупреждение при расхождении If-Match vs payload.review_version.
+RESET: POST /{suggestion_id}/reset — отмена решения, возврат в PENDING.
 """
 
 import logging
@@ -28,6 +29,7 @@ from app.domain.exceptions import (
     StaleSuggestionJobError,
     SuggestionAlreadyDecidedError,
     SuggestionNotFoundError,
+    SuggestionResetNotAllowedError,
 )
 from app.domain.services.audit_log_service import AuditLogService
 from app.domain.services.suggestion_service import SuggestionService
@@ -183,14 +185,9 @@ async def get_suggestion(
     project: Project = Depends(get_allowed_project),
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
 ) -> SuggestionResponse:
-    """Получить одну правку по ID.
-
-    Используется редактором при навигации между правками:
-    после accept/reject одной правки фронт может запросить следующую по ID.
-    Возвращает 404 если правка не найдена или принадлежит устаревшему job.
-    """
+    """Получить одну правку по ID."""
     try:
-        suggestion = await suggestion_service.get_suggestion_by_id(
+        suggestion = await suggestion_service.get_suggestion_for_document(
             project.id, document_id, suggestion_id
         )
     except (DocumentNotFoundError, SuggestionNotFoundError, StaleSuggestionJobError) as exc:
@@ -211,7 +208,6 @@ async def review_save(
     client_version = _parse_if_match(if_match)
 
     # FIX-7: предупреждаем при расхождении If-Match и payload.review_version.
-    # Побеждает If-Match (HTTP-семантика), но клиент должен знать о конфликте намерений.
     if (
         client_version is not None
         and payload.review_version is not None
@@ -288,12 +284,7 @@ async def bulk_accept_suggestions(
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
     audit_log_service: AuditLogService = Depends(get_audit_log_service),
 ) -> BulkAcceptResponse:
-    """Принять все PENDING-правки одним запросом (кнопка «Принять все» в Editor).
-
-    Один UPDATE без загрузки UUID в память.
-    После операции возвращает статус документа и review_version
-    чтобы фронт не делал лишний GET /editor.
-    """
+    """Принять все PENDING-правки одним запросом (кнопка «Принять все» в Editor)."""
     try:
         result = await suggestion_service.bulk_accept(
             project.id, document_id, current_user.id
@@ -325,11 +316,9 @@ async def bulk_reject_suggestions(
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
     audit_log_service: AuditLogService = Depends(get_audit_log_service),
 ) -> BulkRejectResponse:
-    """Отклонить все PENDING-правки одним запросом (кнопка «Отклонить все» в Editor).
+    """Отклонить все PENDING-правки одним запросом.
 
-    FIX-2: возвращает BulkRejectResponse с полем rejected_count вместо
-    семантически неверного accepted_count. OpenAPI-схема теперь отражает
-    реальную семантику операции.
+    FIX-2: возвращает BulkRejectResponse с полем rejected_count.
     """
     try:
         result = await suggestion_service.bulk_reject(
@@ -392,6 +381,41 @@ async def reject_suggestion(
         suggestion_service=suggestion_service,
         audit_log_service=audit_log_service,
     ))
+
+
+@router.post("/{suggestion_id}/reset", response_model=SuggestionResponse)
+async def reset_suggestion(
+    document_id: uuid.UUID,
+    suggestion_id: uuid.UUID,
+    project: Project = Depends(get_allowed_project),
+    current_user: User = Depends(get_current_user),
+    suggestion_service: SuggestionService = Depends(get_suggestion_service),
+    audit_log_service: AuditLogService = Depends(get_audit_log_service),
+) -> SuggestionResponse:
+    """Отменить ранее принятое или отклонённое решение — вернуть правку в PENDING.
+
+    Доступно только пока документ в статусе `awaiting_approval`.
+    Идемпотентно в части «параллельного сброса» — если параллельный запрос
+    уже вернул правку в PENDING, возвращается 409 с понятным сообщением.
+
+    Ответы:
+      200  — правка возвращена в PENDING; decided_by и decided_at = null.
+      404  — документ или правка не найдены / правка устарела.
+      409  — документ не в awaiting_approval, или правка уже PENDING.
+    """
+    try:
+        suggestion = await suggestion_service.reset_suggestion(
+            project.id, document_id, suggestion_id, current_user.id
+        )
+    except (DocumentNotFoundError, SuggestionNotFoundError, StaleSuggestionJobError) as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (InvalidDocumentStatusError, SuggestionResetNotAllowedError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    await _safe_single_log(
+        audit_log_service, current_user.id, suggestion.id, AuditActionVO.RESET
+    )
+    return SuggestionResponse.model_validate(suggestion)
 
 
 @router.post("/finalize", response_model=DocumentResponse)

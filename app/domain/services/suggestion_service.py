@@ -16,6 +16,9 @@ HIGH-2-FIX: atomic_review_save — публичный метод с единст
 
 REVIEW-5: get_suggestion_by_id удалён — был мёртвым алиасом
   get_suggestion_for_document. Используйте get_suggestion_for_document напрямую.
+
+RESET: reset_suggestion() — отмена ранее принятого/отклонённого решения.
+  Проверяет awaiting_approval, делегирует атомарный UPDATE в репозиторий.
 """
 from __future__ import annotations
 
@@ -32,6 +35,7 @@ from app.domain.exceptions import (
     StaleSuggestionJobError,
     SuggestionAlreadyDecidedError,
     SuggestionNotFoundError,
+    SuggestionResetNotAllowedError,
 )
 from app.domain.interfaces.document_exporter import AppliedChange
 from app.domain.interfaces.entities import DocumentProtocol, SuggestionProtocol
@@ -222,7 +226,7 @@ class SuggestionService:
             decision = SuggestionDecision(
                 suggestion_id=suggestion_id,
                 status=SuggestionStatusVO.ACCEPTED,
-                decided_by=user_id,
+                user_id=user_id,
             )
             result = await self._decide(document, suggestion, decision)
             await self._uow.commit()
@@ -241,11 +245,50 @@ class SuggestionService:
             decision = SuggestionDecision(
                 suggestion_id=suggestion_id,
                 status=SuggestionStatusVO.REJECTED,
-                decided_by=user_id,
+                user_id=user_id,
             )
             result = await self._decide(document, suggestion, decision)
             await self._uow.commit()
         return result
+
+    async def reset_suggestion(
+        self,
+        project_id: uuid.UUID,
+        document_id: uuid.UUID,
+        suggestion_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> SuggestionProtocol:
+        """Отменить ранее принятое или отклонённое решение — вернуть в PENDING.
+
+        Бизнес-правила:
+          1. Документ обязан быть в статусе AWAITING_APPROVAL — только
+             в этом окне редактор имеет право менять решения.
+          2. Правка обязана принадлежать текущему analysis job (stale-проверка).
+          3. Правка должна быть ACCEPTED или REJECTED — сбрасывать PENDING
+             бессмысленно и является ошибкой клиента (409).
+
+        Атомарность обеспечивается UPDATE WHERE status != PENDING в репозитории.
+        """
+        async with self._uow:
+            document = await self._get_document_or_raise(project_id, document_id)
+            self._assert_awaiting_approval(document)
+            suggestion = await self._get_suggestion_for_document(document, suggestion_id)
+
+            if suggestion.status == SuggestionStatusVO.PENDING:
+                raise SuggestionResetNotAllowedError(
+                    f"Правка {suggestion_id} уже в статусе PENDING — сбрасывать нечего"
+                )
+
+            updated = await self._uow.suggestions.reset_status(suggestion)
+            if updated is None:
+                # Гонка: параллельный reset уже отработал между нашим get_by_id и UPDATE.
+                # Возвращаем текущее состояние (уже PENDING) — идемпотентный исход.
+                raise SuggestionResetNotAllowedError(
+                    f"Правка {suggestion_id} уже была сброшена параллельным запросом"
+                )
+
+            await self._uow.commit()
+        return updated
 
     # ------------------------------------------------------------------
     # Bulk operations
@@ -358,28 +401,40 @@ class SuggestionService:
 
         ВАЖНО: метод сам открывает uow-блок — НЕ вызывать внутри
         уже открытого `async with self._uow`.
-
-        ReviewDecisions создаётся здесь после разрешения job_id (M-6):
-          1. CAS review_version (OptimisticLock при конфликте)
-          2. Один UPDATE для accepted + rejected
-          3. (опц.) export + статус READY
-          4. commit()
         """
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             self._assert_awaiting_approval(document)
             job_id = self._assert_has_active_job(document)
 
+            from app.domain.value_objects import ReviewDecisions, SuggestionDecision
+            decisions_list = tuple([
+                *[
+                    SuggestionDecision(
+                        suggestion_id=sid,
+                        status=SuggestionStatusVO.ACCEPTED,
+                        user_id=user_id,
+                    )
+                    for sid in accepted_ids
+                ],
+                *[
+                    SuggestionDecision(
+                        suggestion_id=sid,
+                        status=SuggestionStatusVO.REJECTED,
+                        user_id=user_id,
+                    )
+                    for sid in rejected_ids
+                ],
+            ])
             decisions_vo = ReviewDecisions(
-                analysis_job_id=job_id,
-                decided_by=user_id,
-                review_version=review_version,
-                accepted_ids=accepted_ids,
-                rejected_ids=rejected_ids,
+                decisions=decisions_list,
+                document_id=document_id,
+                user_id=user_id,
             )
 
+            from app.domain.exceptions import OptimisticLockError
             locked_doc = await self._uow.documents.compare_and_increment_review_version(
-                document.id, decisions_vo.review_version
+                document.id, review_version
             )
             if locked_doc is None:
                 raise OptimisticLockError(
@@ -389,14 +444,14 @@ class SuggestionService:
 
             updated = await self._uow.suggestions.bulk_update_status(decisions_vo)
 
-            expected_total = len(decisions_vo.all_ids)
-            if len(updated) != expected_total:
+            expected_total = len(decisions_list)
+            if updated != expected_total:
                 raise SuggestionAlreadyDecidedError(
                     "Часть правок не найдена в текущем анализе или уже обработана"
                 )
 
-            accepted_count = len(decisions_vo.accepted_ids)
-            rejected_count = len(decisions_vo.rejected_ids)
+            accepted_count = len(accepted_ids)
+            rejected_count = len(rejected_ids)
 
             pending_count = await self._uow.suggestions.count_by_analysis_job_and_status(
                 job_id, SuggestionStatusVO.PENDING

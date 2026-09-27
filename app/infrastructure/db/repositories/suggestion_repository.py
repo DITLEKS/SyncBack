@@ -15,6 +15,9 @@ SQLAlchemy-адаптер для Suggestion.
   не исполнялись при непустом результате). window-function func.count().over()
   корректно возвращает 0 на пустой выборке, поэтому отдельный count_q для
   пустого случая тоже лишний. Итого: один SELECT вместо двух.
+- RESET: reset_status() — UPDATE WHERE status != PENDING, обнуляет
+  decided_by/decided_at, возвращает обновлённый объект или None если правка
+  уже PENDING.
 """
 from __future__ import annotations
 
@@ -227,27 +230,71 @@ class SuggestionRepository(ISuggestionRepository):
         Один UPDATE ... WHERE id IN (...) AND status = 'pending'.
         """
         from app.infrastructure.db.models.enums import SuggestionStatus
-        all_ids = [*decisions.accepted_ids, *decisions.rejected_ids]
-        if not all_ids:
+        all_decisions = decisions.decisions
+        if not all_decisions:
             return 0
+
+        accepted_ids = [
+            d.suggestion_id for d in all_decisions
+            if d.status == SuggestionStatusVO.ACCEPTED
+        ]
+        rejected_ids = [
+            d.suggestion_id for d in all_decisions
+            if d.status == SuggestionStatusVO.REJECTED
+        ]
+        all_ids = [d.suggestion_id for d in all_decisions]
 
         from app.infrastructure.db.models.suggestion import Suggestion as M
         stmt = (
             update(M)
             .where(
-                M.analysis_job_id == decisions.analysis_job_id,
+                M.analysis_job_id == decisions.document_id,  # document_id used as scope
                 M.status == SuggestionStatus.PENDING,
                 M.id.in_(all_ids),
             )
             .values(
                 status=case(
-                    (M.id.in_(decisions.accepted_ids), _status_to_orm(SuggestionStatusVO.ACCEPTED)),
+                    (M.id.in_(accepted_ids), _status_to_orm(SuggestionStatusVO.ACCEPTED)),
                     else_=_status_to_orm(SuggestionStatusVO.REJECTED),
                 ),
-                decided_by=decisions.decided_by,
-                decided_at=decisions.decided_at,
+                decided_by=decisions.user_id,
             )
         )
         result = await self._session.execute(stmt)
         await self._session.flush()
         return result.rowcount
+
+    async def reset_status(
+        self,
+        suggestion: "Suggestion",
+    ) -> "Suggestion | None":
+        """Сбросить решение правки обратно в PENDING.
+
+        Атомарный UPDATE ... WHERE status != 'pending' AND id = ?.
+        Возвращает обновлённый объект или None если правка уже PENDING
+        (сбрасывать нечего — идемпотентно с точки зрения репозитория,
+        но сервис вернёт SuggestionResetNotAllowedError).
+        """
+        from app.infrastructure.db.models.enums import SuggestionStatus
+        from app.infrastructure.db.models.suggestion import Suggestion as M
+        stmt = (
+            update(M)
+            .where(
+                M.id == suggestion.id,
+                M.status != SuggestionStatus.PENDING,
+            )
+            .values(
+                status=SuggestionStatus.PENDING,
+                decided_by=None,
+                decided_at=None,
+            )
+            .returning(M.id)
+        )
+        result = await self._session.execute(stmt)
+        updated_id = result.scalar_one_or_none()
+        await self._session.flush()
+        if updated_id is None:
+            return None
+        # Обновляем объект в identity map сессии
+        await self._session.refresh(suggestion)
+        return suggestion

@@ -115,6 +115,15 @@ class SuggestionAlreadyDecidedError(DomainError):
     """
 
 
+class SuggestionResetNotAllowedError(DomainError):
+    """Нельзя сбросить решение по правке.
+
+    Возникает когда правка уже в статусе PENDING (сбрасывать нечего)
+    или когда документ не в статусе awaiting_approval.
+    Сигнализирует роутеру вернуть HTTP 409 Conflict.
+    """
+
+
 class ReviewNotCompleteError(DomainError):
     """Review нельзя завершить: не все правки рассмотрены или экспорт не удался.
 
