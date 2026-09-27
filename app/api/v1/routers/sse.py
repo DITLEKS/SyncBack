@@ -22,6 +22,11 @@ GET /api/v1/events/documents
   Если переменная среды REDIS_SSE_PUBSUB_CHANNEL не задана или Redis
   недоступен при старте, автоматически активируется InMemorySSEBroker
   (старое поведение — допустимо для single-instance деплоя).
+
+FIX-5: endpoint теперь возвращает HTTP 422 если передано > 50 document_ids,
+  вместо молчаливого усечения. Клиент получает явную ошибку.
+FIX-4: get_redis_client() использует Redis.from_url() — конструктор без
+  сетевого вызова (соединение ленивое). Блокировки event loop нет — no-op.
 """
 from __future__ import annotations
 
@@ -33,7 +38,7 @@ from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from typing import AsyncIterator
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import get_current_user
@@ -44,6 +49,7 @@ logger = logging.getLogger("syncscribe.api.sse")
 router = APIRouter(prefix="/events", tags=["sse"])
 
 PING_INTERVAL = 25  # секунд между keepalive-пингами
+DOCUMENT_IDS_MAX = 50  # максимум ID в фильтре
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -363,14 +369,26 @@ async def document_events(
     request: Request,
     document_ids: str | None = Query(
         default=None,
-        description="Опциональный фильтр: UUID через запятую (макс 50).",
+        description=f"Опциональный фильтр: UUID через запятую (макс {DOCUMENT_IDS_MAX}).",
     ),
     current_user: User = Depends(get_current_user),
     broker: ISSEBroker = Depends(get_sse_broker),
 ) -> StreamingResponse:
     filter_ids: frozenset[uuid.UUID] = frozenset()
     if document_ids:
-        raw_ids = [s.strip() for s in document_ids.split(",") if s.strip()][:50]
+        raw_ids = [s.strip() for s in document_ids.split(",") if s.strip()]
+
+        # FIX-5: явный 422 при превышении лимита вместо молчаливого усечения.
+        # Клиент должен явно знать, что его запрос некорректен.
+        if len(raw_ids) > DOCUMENT_IDS_MAX:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Параметр document_ids содержит {len(raw_ids)} значений. "
+                    f"Максимально допустимо: {DOCUMENT_IDS_MAX}."
+                ),
+            )
+
         parsed: list[uuid.UUID] = []
         for raw in raw_ids:
             try:
