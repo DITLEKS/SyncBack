@@ -1,3 +1,13 @@
+"""
+Document ORM model.
+
+FIX-review-2: добавлена колонка current_analysis_job_id (nullable UUID FK → analysis_jobs.id).
+    DocumentResponse и DocumentListItem объявляли это поле, но ORM-колонки не было →
+    model_validate(document) всегда возвращал None даже при наличии активного job.
+    Колонка nullable=True, ondelete=SET NULL — при удалении job ссылка обнуляется.
+    Требует миграции: ALTER TABLE documents ADD COLUMN current_analysis_job_id UUID
+    REFERENCES analysis_jobs(id) ON DELETE SET NULL;
+"""
 import uuid
 from datetime import datetime
 
@@ -47,6 +57,16 @@ class Document(Base):
         server_default=DocumentStatus.DRAFT.value,
     )
     review_version = Column(Integer, nullable=False, default=0, server_default="0")
+    # FIX-review-2: current_analysis_job_id — денормализованная ссылка на текущий
+    # (последний запущенный) job. Обнуляется автоматически при удалении job (SET NULL).
+    # Заполняется в analysis_job_service при создании нового job (UPDATE documents SET
+    # current_analysis_job_id = :job_id WHERE id = :doc_id).
+    current_analysis_job_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("analysis_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     # C-1: добавлено поле original_storage_key — колонка существует в БД
     # с миграции 0011. Без ORM-объявления RETURNING storage_key, original_storage_key
     # в delete_by_id падал с AttributeError, а MinIO-снапшот никогда не удалялся.
@@ -68,4 +88,13 @@ class Document(Base):
         back_populates="document",
         foreign_keys="AnalysisJob.document_id",
         cascade="all, delete-orphan",
+    )
+    # FIX-review-2: relationship к текущему (активному) job без cascade.
+    # foreign_keys явно указан чтобы разрешить ambiguity (два FK на analysis_jobs).
+    current_analysis_job = relationship(
+        "AnalysisJob",
+        foreign_keys=[current_analysis_job_id],
+        primaryjoin="Document.current_analysis_job_id == AnalysisJob.id",
+        lazy="select",
+        uselist=False,
     )

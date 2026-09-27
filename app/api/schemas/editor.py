@@ -1,6 +1,9 @@
-"""Схемы ответов для editor-роутера.
+"""
+Схемы ответов для editor-роутера.
 
 C-3: CancelAllSuggestionsResponse добавлена для DELETE /editor/suggestions.
+FIX-review-1: EditorSectionResponse → DocumentSectionResponse (правильное имя класса
+    в document.py; EditorSectionResponse никогда не существовал → ImportError при старте).
 """
 import uuid
 from datetime import datetime
@@ -8,7 +11,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from app.api.schemas.document import EditorSectionResponse, SuggestionCounters
+from app.api.schemas.document import DocumentSectionResponse, SuggestionCounters
 from app.api.schemas.suggestion import SuggestionResponse
 from app.domain.value_objects import DocumentStatusVO
 
@@ -27,7 +30,8 @@ class EditorDocumentMeta(BaseModel):
 
 class EditorContent(BaseModel):
     plain_text: str
-    sections: list[EditorSectionResponse] = []
+    # FIX-review-1: тип изменён с EditorSectionResponse на DocumentSectionResponse.
+    sections: list[DocumentSectionResponse] = []
 
 
 class EditorPermissions(BaseModel):

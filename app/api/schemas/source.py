@@ -28,6 +28,9 @@ FIX-review-7: SourceResponse.scope: str → Literal["project", "document"].
 FIX-review-8: NoteCreateRequest задокументирован как internal-only.
      type сохраняется как 'file' (MinIO), не 'note' — явно указано в docstring.
      deprecated=True проставляется в роутере при регистрации эндпоинта.
+FIX-review-5: SourceResponse.type: str → Literal["url", "file"] + field_validator.
+     SourceBadge уже был исправлен, SourceResponse оставался str — несогласованность
+     в рамках одного файла. Добавлен field_validator _normalise_type по образцу SourceBadge.
 """
 
 import uuid
@@ -74,7 +77,9 @@ class SourceResponse(BaseModel):
     id: uuid.UUID
     project_id: uuid.UUID
     name: str
-    type: str
+    # FIX-review-5: type: str → Literal["url", "file"] + field_validator.
+    # SourceBadge уже имел это ограничение; SourceResponse отставал.
+    type: Literal["url", "file"]
     # FIX-review-7: scope: str → Literal["project", "document"].
     # Фронт статически знает допустимые значения; Pydantic валидирует ответ.
     scope: Literal["project", "document"]
@@ -82,6 +87,14 @@ class SourceResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def _normalise_type(cls, v: object) -> str:
+        """Accept SourceTypeVO enum or plain string; return the string value."""
+        if hasattr(v, "value"):
+            return v.value  # type: ignore[return-value]
+        return str(v)
 
 
 # I-1: лёгкое представление источника для карточек документов.

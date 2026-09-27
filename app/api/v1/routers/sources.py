@@ -2,7 +2,7 @@
 Источники истины внутри проекта.
 
 POST /projects/{id}/sources        — создать URL-источник
-POST /projects/{id}/sources/note   — создать текстовую заметку
+POST /projects/{id}/sources/note   — создать текстовую заметку (deprecated)
 POST /projects/{id}/sources/file   — загрузить файл
 GET  /projects/{id}/sources        — список с пагинацией
 DEL  /projects/{id}/sources/{sid}  — удалить источник
@@ -13,6 +13,12 @@ OPT-S6: scope в upload_file_source — typed SourceScopeVO Form, автовал
 OPT-S7: source_id — uuid.UUID вместо str (автопарсинг FastAPI).
 WARN-2: create_url_source и create_note_source передают document_id=payload.document_id
         в сервис — M2M-вставка при scope=document теперь корректна.
+FIX-review-4: DELETE /{source_id} — guard теперь получает document_id из источника.
+    Ранее вызывался _guard_no_active_job(document_id=None) → ранний return → защита
+    не работала. Теперь: source загружается через get_source(), document_id берётся
+    через uow.sources M2M-запрос; при наличии active job → 423.
+    Реализовано через новый метод source_service.get_source_document_id().
+FIX-review-6: /note помечен deprecated=True в регистрации роутера.
 """
 from __future__ import annotations
 
@@ -44,6 +50,7 @@ async def _guard_no_active_job(
 
     OPT-S3: при document_id=None (scope=project) ранний return;
     Depends(get_analysis_job_service) резолвится только когда нужен.
+    FIX-review-4: DELETE теперь передаёт реальный document_id вместо None.
     """
     if document_id is None:
         return
@@ -85,16 +92,26 @@ async def create_url_source(
 
 # ------------------------------------------------------------------
 # Текстовая заметка (P2: сохраняется как .txt в MinIO)
+# FIX-review-6: deprecated=True — эндпоинт internal-only, не для внешнего API.
 # ------------------------------------------------------------------
 
-@router.post("/note", response_model=SourceResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/note",
+    response_model=SourceResponse,
+    status_code=status.HTTP_201_CREATED,
+    deprecated=True,  # FIX-review-6: NoteCreateRequest → internal-only endpoint
+)
 async def create_note_source(
     payload: NoteCreateRequest,
     project: Project = Depends(get_allowed_project),
     source_service: SourceService = Depends(get_source_service),
     job_service: AnalysisJobService = Depends(get_analysis_job_service),
 ) -> SourceResponse:
-    """Создать текстовую заметку. Текст сохраняется в MinIO как .txt-файл."""
+    """[DEPRECATED] Создать текстовую заметку. Текст сохраняется в MinIO как .txt-файл.
+
+    Этот эндпоинт является internal-only. Используйте POST /sources/file
+    для загрузки файлов. type в ответе будет 'file', не 'note'.
+    """
     doc_id: _uuid.UUID | None = getattr(payload, "document_id", None)
     await _guard_no_active_job(project.id, doc_id, job_service)
     scope = SourceScopeVO(payload.scope)
@@ -182,11 +199,27 @@ async def delete_source(
 ) -> None:
     """Удалить источник.
 
-    OPT-S2: источник не загружается предварительно — delete_source_with_guard
-    делает одну атомарную операцию (проверка + DELETE).
-    OPT-S3 / FIX-1: guard вызывается с document_id=None → ранний return.
+    FIX-review-4: источник загружается через get_source() для получения
+    document_id (M2M-связь). Guard вызывается с реальным document_id —
+    при наличии активного job возвращает 423.
+
+    OPT-S2 сохранён частично: get_source() делает один SELECT,
+    delete_source_with_guard делает DELETE в той же транзакции.
     """
-    await _guard_no_active_job(project.id, None, job_service)
+    try:
+        # Шаг 1: загрузить источник для получения document_id (нужен для guard).
+        source = await source_service.get_source(project.id, source_id)
+    except SourceNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+    # Шаг 2: получить document_id из M2M (sources связаны с документами через document_sources).
+    # Source.document_id отсутствует как прямая колонка — используем helper сервиса.
+    doc_id: _uuid.UUID | None = await source_service.get_primary_document_id(source)
+
+    # Шаг 3: guard — 423 если document в активном job.
+    await _guard_no_active_job(project.id, doc_id, job_service)
+
+    # Шаг 4: удалить.
     try:
         await source_service.delete_source_with_guard(
             project_id=project.id,

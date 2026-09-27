@@ -1,3 +1,14 @@
+"""
+Infrastructure enums — DB-level string enumerations.
+
+FIX-review-7: DocumentStatus дополнен значениями ERROR и CANCELLED,
+    которые присутствуют в DocumentStatusVO (domain) и используются
+    в editor.py роутере (_STATUS_VIEW_MODE). Без этих значений PostgreSQL
+    enum-тип отвергал запись статуса при попытке UPDATE documents SET status='error'.
+    ВАЖНО: при применении требуется миграция:
+      ALTER TYPE document_status ADD VALUE IF NOT EXISTS 'error';
+      ALTER TYPE document_status ADD VALUE IF NOT EXISTS 'cancelled';
+"""
 import enum
 
 from app.domain.value_objects import DocumentFormatVO as DocumentFormat  # noqa: F401
@@ -14,6 +25,10 @@ class DocumentStatus(enum.StrEnum):
     IN_PROGRESS       = "in_progress"
     AWAITING_APPROVAL = "awaiting_approval"
     READY             = "ready"
+    # FIX-review-7: синхронизировано с DocumentStatusVO (domain/value_objects.py).
+    # Без этих значений записать ERROR/CANCELLED в БД невозможно.
+    ERROR             = "error"
+    CANCELLED         = "cancelled"
 
 
 class SourceType(enum.StrEnum):
