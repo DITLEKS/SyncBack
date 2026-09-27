@@ -138,42 +138,6 @@ CI (`.github/workflows/ci.yml`) запускает оба набора авто�
 
 Роли: `admin` (видит всё) и `user` (только свои проекты). Точка расширения — `project_members`.
 
-### Цепочка миграций Alembic
-
-```
-0001_initial_schema
-0002a_audit_logs_download
-0002b_p0_3_document_blocks
-0003_audit_logs_columns
-0004a_audit_logs_suggestion_id_nullable
-0004b_p0_review_version_block_id
-0005_project_description
-0006_document_status_lifecycle
-0007_idempotency_key_partial_success
-0008_source_scope
-0009_document_review_version
-0010_document_opens
-0011_document_original_storage_key
-0012_analysis_job_status_partial_success
-0013_document_blocks_and_suggestion_anchors
-0014_keyset_indexes
-0015_suggestion_job_status_index
-0016_schema_review_fixes
-0017_r1_r2_r3_r4_r5_r6_schema_cleanup
-0018_drop_text_content_from_sources + 0018_n1_n2_n4_n5_n6_n7_n8_fixes
-0019_add_indexes_opt4_opt5          ← OPT-4/OPT-5: индекс по suggestions.document_id + GIN pg_trgm
-```
-
-`alembic/env.py` использует `transaction_per_migration=True` — PostgreSQL требует коммита нового значения enum перед использованием в CHECK constraint.
-
-> **Применение последней миграции** (индексы OPT-4/5):
-> ```bash
-> # требуется расширение pg_trgm (один раз на БД):
-> # psql -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
-> alembic upgrade 0019
-> ```
-> Индекс по `pg_trgm` создаётся через `CONCURRENTLY` — не блокирует таблицу в продакшне.
-
 ## API — сводка эндпоинтов (префикс `/api/v1`)
 
 ```
@@ -251,16 +215,6 @@ t._get_storage    = lambda: FakeStorage()
 t._get_connector  = lambda: FakeConnector()
 t._get_llm_client = lambda: FakeLLMClient()
 ```
-
-## Оптимизации производительности (OPT-1 … OPT-5)
-
-| # | Место | Суть |
-|---|---|---|
-| OPT-1 | `suggestion_repository.list_with_total` | Удалён мёртвый код `count_q`/`items_q`; `func.count().over()` корректно возвращает 0 на пустой выборке — 1 SELECT вместо 2 |
-| OPT-2 | `dashboard_repository.get_recent_documents` | N+1 коррелированных `scalar_subquery()` заменены на `LEFT JOIN + COUNT FILTER + GROUP BY` — 1 запрос вместо N+1 |
-| OPT-3 | `document_repository.list_all_for_user` | 2 round-trip заменены на CTE + `COUNT() OVER()` — PostgreSQL выполняет CTE однократно |
-| OPT-4 | `alembic/versions/0019_add_indexes_opt4_opt5.py` | `CREATE INDEX ix_suggestions_document_id ON suggestions(document_id)` — ускоряет JOIN/EXISTS по `document_id` |
-| OPT-5 | `alembic/versions/0019_add_indexes_opt4_opt5.py` | GIN-индекс `ix_documents_name_trgm` (расширение `pg_trgm`) — превращает `ILIKE '%…%'` из seq-scan в index-scan |
 
 ## Доменные исключения
 
