@@ -19,6 +19,10 @@ FIX-9: SourceCreateRequest и NoteCreateRequest получили опциона�
 FIX-ревью: SourceBadge.type ужесточен с str до Literal["url", "file", "note"];
      добавлен field_validator для нормализации enum-значений (принимает как
      SourceTypeVO.URL так и строку "url").
+WARN-1 (ревью): SourceBadge.type исправлен с Literal["url","file","note"] на
+     Literal["url","file"]. SourceType enum (enums.py) содержит только FILE и URL
+     после миграции 0018. Значение "note" никогда не возвращается из БД —
+     мёртвый вариант в Literal вводил в заблуждение.
 """
 
 import uuid
@@ -73,15 +77,16 @@ class SourceBadge(BaseModel):
     """Minimal source representation for document card badges.
 
     Содержит только данные, нужные для бейджей: идентификатор, читаемое имя
-    и тип (url | file | note) для выбора иконки на фронте.
+    и тип (url | file) для выбора иконки на фронте.
 
-    FIX-ревью: type ужесточен с str до Literal["url", "file", "note"].
-    field_validator принимает как строки "url", так и SourceTypeVO-enum
-    (например, SourceTypeVO.URL), нормализуя до строкового значения.
+    WARN-1: "note" удалён из Literal — SourceType enum (после миграции 0018)
+    содержит только FILE и URL. Pydantic принимал "note" без ошибки, но
+    такое значение никогда не приходило из БД.
+    field_validator нормализует SourceTypeVO enum → строку.
     """
     id: uuid.UUID
     name: str
-    type: Literal["url", "file", "note"]
+    type: Literal["url", "file"]
 
     model_config = {"from_attributes": True}
 
