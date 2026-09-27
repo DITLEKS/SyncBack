@@ -20,6 +20,7 @@ from app.api.v1.routers.sse import init_sse_broker, shutdown_sse_broker
 from app.api.v1.routers.sse import router as sse_router
 from app.api.v1.routers.suggestions import router as suggestions_router
 from app.api.v1.routers.system import router as system_router
+from app.core.body_size_limit_middleware import BodySizeLimitMiddleware
 from app.core.config import get_settings
 from app.core.correlation_middleware import CorrelationIdMiddleware
 from app.core.logging_setup import configure_logging
@@ -64,7 +65,8 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS — первый middleware, до любых других.
+    # H-3: грубая защита от слишком больших request body до разбора multipart.
+    # Ставим до роутеров; CORS оставляем первым middleware.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_allowed_origins,
@@ -73,7 +75,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
         expose_headers=["X-Request-ID"],
     )
-
+    app.add_middleware(BodySizeLimitMiddleware)
     app.add_middleware(CorrelationIdMiddleware)
 
     @app.exception_handler(DomainError)

@@ -15,6 +15,10 @@ CRIT-D2 (этот раунд):
   - Убран прямой импорт UserRepository из инфраструктурного слоя.
   - get_current_user теперь принимает IUserRepository через Depends(get_user_repository).
   - Тип параметра — абстрактный порт, не конкретная реализация.
+
+H-2:
+  - JWTHandler инжектируется через Depends(get_jwt_handler), а не создаётся
+    заново на каждый запрос.
 """
 
 import uuid
@@ -22,7 +26,7 @@ import uuid
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 
-from app.core.dependencies import get_project_repository, get_user_repository
+from app.core.dependencies import get_jwt_handler, get_project_repository, get_user_repository
 from app.domain.exceptions import InvalidTokenError
 from app.domain.interfaces.repositories import IProjectRepository, IUserRepository
 from app.infrastructure.db.models.enums import UserRole
@@ -36,10 +40,10 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 async def get_current_user(
     token: str = Depends(oauth2_scheme),
     user_repository: IUserRepository = Depends(get_user_repository),
+    jwt_handler: JWTHandler = Depends(get_jwt_handler),
 ) -> User:
-    jwt_handler = JWTHandler()
     try:
-        payload = jwt_handler.decode_token(token)
+        payload = jwt_handler.decode_access_token(token)
     except InvalidTokenError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
 
