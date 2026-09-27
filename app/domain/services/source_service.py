@@ -1,24 +1,25 @@
 """
-Бизнес-логика источников истины: файл, текстовая заметка или ссылка.
+Бизнес-логика источников истины.
+
+После P2:
+  - create_text_source (хранил text_content в БД) удалён.
+  - create_note_source: кодирует текст в UTF-8, загружает в MinIO
+    как «<source_id>.txt», сохраняет storage_key. Единый путь
+    с файловым источником — воркер всегда идёт в MinIO.
+  - create_url_source: сохраняет url в БД (без файла в MinIO).
+  - create_file_source: без изменений.
 
 Архитектурные правила:
   - Зависит только от IUnitOfWork (порт) и FileStorage (порт).
   - Нет импортов из app.infrastructure.* при выполнении.
-  - _assert_sources_mutable — чистый guard, не трогает инфраструктуру.
-
-Примечание по импорту конфигурации:
-  `from app.core.config import Settings, get_settings` используется при выполнении
-  (не под TYPE_CHECKING) — это намеренно. app.core.config — не инфраструктурный слой
-  (не содержит ORM, I/O, сетевых зависимостей), поэтому импорт допустим в доменном сервисе.
-  Фиксируется здесь как документированное исключение из правила
-  «нет инфра-импортов в domain/services».
+  - app.core.config — допустимый non-infra импорт (документировано).
 """
 from __future__ import annotations
 
 import uuid
 from typing import TYPE_CHECKING
 
-from app.core.config import Settings, get_settings  # допустимый non-infra импорт (см. docstring)
+from app.core.config import Settings, get_settings
 from app.domain.exceptions import FileTooLargeError, SourceLockError, SourceNotFoundError
 from app.domain.interfaces.file_storage import FileStorage
 from app.domain.interfaces.unit_of_work import IUnitOfWork
@@ -29,7 +30,6 @@ if TYPE_CHECKING:
     from app.infrastructure.db.models.project import Project
     from app.infrastructure.db.models.source import Source
 
-# Статусы, при которых изменение набора источников документа заблокировано.
 _LOCKED_STATUSES: frozenset[DocumentStatusVO] = frozenset({
     DocumentStatusVO.IN_PROGRESS,
     DocumentStatusVO.AWAITING_APPROVAL,
@@ -53,7 +53,6 @@ class SourceService:
 
     @staticmethod
     def _assert_sources_mutable(document: "Document") -> None:
-        """Выбросить SourceLockError, если источники менять нельзя."""
         if document.status in _LOCKED_STATUSES:
             raise SourceLockError(
                 f"Нельзя изменить источники документа в статусе '{document.status.value}'. "
@@ -61,29 +60,74 @@ class SourceService:
             )
 
     # ------------------------------------------------------------------
-    # Create
+    # Create — note (P2: текст → MinIO как .txt)
     # ------------------------------------------------------------------
 
-    async def create_text_source(
+    async def create_note_source(
         self,
         project: "Project",
         name: str,
-        source_type: SourceTypeVO,
-        text_content: str | None,
-        url: str | None,
+        text_content: str,
+        scope: SourceScopeVO = SourceScopeVO.PROJECT,
+    ) -> "Source":
+        """Сохраняет текстовую заметку как .txt в MinIO.
+
+        Единый кодовый путь в пайплайне воркера:
+        воркер всегда идёт в MinIO по storage_key — никаких спецкейсов NOTE.
+        """
+        if len(text_content.encode()) > self._settings.max_upload_size_bytes:
+            raise FileTooLargeError(
+                f"Текст превышает лимит {self._settings.max_upload_size_mb} МБ"
+            )
+
+        source_id = uuid.uuid4()
+        storage_key = f"projects/{project.id}/sources/{source_id}/note.txt"
+        await self._storage.upload(
+            storage_key,
+            text_content.encode("utf-8"),
+            "text/plain; charset=utf-8",
+        )
+
+        try:
+            async with self._uow:
+                source = await self._uow.sources.create_with_id(
+                    source_id=source_id,
+                    project_id=project.id,
+                    name=name,
+                    source_type=SourceTypeVO.FILE,
+                    storage_key=storage_key,
+                    scope=scope,
+                )
+                await self._uow.commit()
+        except Exception:
+            await self._storage.delete(storage_key)
+            raise
+        return source
+
+    # ------------------------------------------------------------------
+    # Create — url
+    # ------------------------------------------------------------------
+
+    async def create_url_source(
+        self,
+        project: "Project",
+        name: str,
+        url: str,
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
     ) -> "Source":
         async with self._uow:
-            source = await self._uow.sources.create(
+            source = await self._uow.sources.create_url(
                 project_id=project.id,
                 name=name,
-                source_type=source_type,
-                text_content=text_content,
                 url=url,
                 scope=scope,
             )
             await self._uow.commit()
         return source
+
+    # ------------------------------------------------------------------
+    # Create — file (без изменений)
+    # ------------------------------------------------------------------
 
     async def create_file_source(
         self,
@@ -152,7 +196,7 @@ class SourceService:
         return sources
 
     # ------------------------------------------------------------------
-    # Attach / detach (P0-6 lock guard)
+    # Attach / detach
     # ------------------------------------------------------------------
 
     async def replace_document_sources(
@@ -160,10 +204,6 @@ class SourceService:
         document: "Document",
         source_ids: list[uuid.UUID],
     ) -> "list[Source]":
-        """Атомарная замена набора источников документа.
-
-        Заблокировано в статусах IN_PROGRESS и AWAITING_APPROVAL.
-        """
         self._assert_sources_mutable(document)
         async with self._uow:
             sources = await self._uow.sources.get_many_by_ids(source_ids)

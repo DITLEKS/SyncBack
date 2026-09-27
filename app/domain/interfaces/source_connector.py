@@ -1,12 +1,12 @@
 """
-Путь в репозитории: app/domain/interfaces/source_connector.py
+Порт коннектора источников истины.
 
-ИСПРАВЛЕНО: раньше этот порт импортировал `SourceType` напрямую из
-`app.infrastructure.db.models.enums`, из-за чего domain-слой формально зависел от
-инфраструктуры. Теперь порт определяет собственный SourceKind (enum.StrEnum,
-как и все другие enum в проекте после миграции UP042), не зависящий от
- SQLAlchemy/infrastructure. Конвертация infrastructure.SourceType -> SourceKind происходит
-на границе (ManualUploadConnector, analysis_tasks.py), а не внутри domain-порта.
+После P2: SourceKind содержит только FILE и URL.
+NOTE убран — тексты хранятся в MinIO как .txt и обрабатываются
+через ManualUploadConnector (SourceKind.FILE).
+
+Конвертация ORM SourceType → SourceKind выполняется на границе
+(analysis_tasks.py), а не внутри этого порта.
 """
 
 import enum
@@ -18,8 +18,7 @@ from typing import Protocol
 
 class SourceKind(enum.StrEnum):
     FILE = "file"
-    NOTE = "note"
-    LINK = "link"
+    URL  = "url"
 
 
 @dataclass
@@ -28,7 +27,6 @@ class SourceRef:
     name: str
     type: SourceKind
     storage_key: str | None
-    text_content: str | None
     url: str | None
     uploaded_at: datetime
 

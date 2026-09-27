@@ -1,10 +1,9 @@
 """
-Путь в репозитории: app/infrastructure/source_connectors/manual_upload_connector.py
+ManualUploadConnector — скачивает файл из MinIO и парсит его в plain-text.
 
-ИСПРАВЛЕНО: типы domain-порта теперь свои собственные (SourceKind), а не
-импортируются из infrastructure напрямую в domain. Эта реализация работает
-только с domain-типами; конвертация из infrastructure.SourceType в SourceKind вынесена в
-точку вызова (app/workers/tasks/analysis_tasks.py), где собирается SourceRef из ORM-модели.
+После P2: обрабатывает только SourceKind.FILE.
+Текстовые заметки (бывший NOTE) теперь сохраняются в MinIO как .txt
+и попадают сюда как обычные файлы с source_type=FILE.
 """
 from app.domain.interfaces.source_connector import SourceKind, SourceMetadata, SourceRef
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
@@ -17,18 +16,22 @@ class ManualUploadConnector:
         self._parsers = parser_registry
 
     def supports(self, source_type: SourceKind) -> bool:
-        return source_type in (SourceKind.FILE, SourceKind.NOTE, SourceKind.LINK)
+        return source_type == SourceKind.FILE
 
     async def fetch(self, source: SourceRef) -> str:
-        if source.type == SourceKind.NOTE:
-            return source.text_content or ""
-        if source.type == SourceKind.LINK:
-            return f"Ссылка на источник (контент по URL не загружается автоматически в MVP): {source.url}"
-        if source.type == SourceKind.FILE:
-            raw_bytes = await self._storage.download(source.storage_key)
-            parsed = self._parsers.parse_by_filename(source.storage_key, raw_bytes)
-            return parsed.plain_text
-        raise ValueError(f"Неизвестный тип источника: {source.type}")
+        if source.type != SourceKind.FILE:
+            raise ValueError(
+                f"ManualUploadConnector поддерживает только FILE, получен: {source.type}"
+            )
+        if not source.storage_key:
+            raise ValueError(f"storage_key отсутствует для источника {source.id}")
+        raw_bytes = await self._storage.download(source.storage_key)
+        parsed = self._parsers.parse_by_filename(source.storage_key, raw_bytes)
+        return parsed.plain_text
 
     async def get_metadata(self, source: SourceRef) -> SourceMetadata:
-        return SourceMetadata(name=source.name, type=source.type, uploaded_at=source.uploaded_at.isoformat())
+        return SourceMetadata(
+            name=source.name,
+            type=source.type,
+            uploaded_at=source.uploaded_at.isoformat(),
+        )
