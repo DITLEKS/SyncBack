@@ -11,6 +11,10 @@ SQLAlchemy-адаптер для Suggestion.
   экспорта; покрывается индексом ix_suggestions_job_status (0015).
 - L-D1 (этот раунд): удалён мёртвый метод _flush_and_refresh() — он был
   определён, но нигде не вызывался. Все вызовы flush() оставлены напрямую.
+- OPT-1: в list_with_total удалён мёртвый код (count_q / items_q строились, но
+  не исполнялись при непустом результате). window-function func.count().over()
+  корректно возвращает 0 на пустой выборке, поэтому отдельный count_q для
+  пустого случая тоже лишний. Итого: один SELECT вместо двух.
 """
 from __future__ import annotations
 
@@ -76,22 +80,26 @@ class SuggestionRepository(ISuggestionRepository):
         offset: int,
         status: SuggestionStatusVO | None = None,
     ) -> "tuple[list[Suggestion], int]":
+        """OPT-1: один SELECT с window-функцией вместо двух запросов.
+
+        func.count().over() возвращает 0 при пустой выборке, поэтому
+        отдельный fallback-запрос для пустого результата не нужен.
+        """
         from app.infrastructure.db.models.suggestion import Suggestion as M
-        base = select(M).where(M.analysis_job_id == analysis_job_id)
+        where_clauses = [M.analysis_job_id == analysis_job_id]
         if status is not None:
-            base = base.where(M.status == _status_to_orm(status))
-        count_q = select(func.count()).select_from(base.subquery())
-        items_q = base.order_by(M.created_at.asc()).limit(limit).offset(offset)
+            where_clauses.append(M.status == _status_to_orm(status))
+
         rows = (await self._session.execute(
             select(M, func.count().over().label("total"))
-            .where(M.analysis_job_id == analysis_job_id)
-            .where(*([] if status is None else [M.status == _status_to_orm(status)]))
+            .where(*where_clauses)
             .order_by(M.created_at.asc())
-            .limit(limit).offset(offset)
+            .limit(limit)
+            .offset(offset)
         )).all()
+
         if not rows:
-            total_result = await self._session.execute(count_q)
-            return [], total_result.scalar_one()
+            return [], 0
         items = [r[0] for r in rows]
         total = rows[0][1]
         return items, total
