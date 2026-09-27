@@ -1,30 +1,29 @@
 """
-Источники истины внутри проекта: текстовая заметка/ссылка через JSON-эндпоинт,
-файл — через отдельный multipart-эндпоинт.
+Источники истины внутри проекта.
 
-Путь в репозитории: app/api/v1/routers/sources.py
-
-ИСПРАВЛЕНО: upload_file_source читает файл через read_upload_within_limit()
-чанками вместо полной буферизации через file.read(). list_sources теперь принимает
-limit/offset и возвращает Page вместо всего списка целиком.
-
-P0-6: scope пробрасывается из запроса в сервисный слой как SourceScope (StrEnum).
+POST /projects/{id}/sources        — создать URL-источник (SourceCreateRequest)
+POST /projects/{id}/sources/note   — создать текстовую заметку (NoteCreateRequest, P2)
+POST /projects/{id}/sources/file   — загрузить файл (multipart)
+GET  /projects/{id}/sources        — список с пагинацией
+DEL  /projects/{id}/sources/{sid}  — удалить источник
 """
+from __future__ import annotations
+
+import uuid as _uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 
 from app.api.deps import get_allowed_project
 from app.api.schemas.pagination import Page
-from app.api.schemas.source import SourceCreateRequest, SourceResponse
+from app.api.schemas.source import NoteCreateRequest, SourceCreateRequest, SourceResponse
 from app.api.upload_utils import read_upload_within_limit
 from app.core.config import Settings, get_settings
 from app.core.dependencies import get_analysis_job_service, get_source_service
 from app.domain.exceptions import FileTooLargeError
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.domain.services.source_service import SourceService
-from app.infrastructure.db.models.enums import SourceType
+from app.domain.value_objects import SourceScopeVO
 from app.infrastructure.db.models.project import Project
-from app.infrastructure.db.models.source_scope import SourceScope
 
 router = APIRouter(prefix="/projects/{project_id}/sources", tags=["sources"])
 
@@ -34,7 +33,7 @@ async def _guard_no_active_job(
     document_id,
     job_service: AnalysisJobService,
 ) -> None:
-    """P0-6: выбрасывает 423 если у документа есть активный анализ."""
+    """423 если у документа есть активный анализ."""
     if document_id is None:
         return
     active = await job_service.get_active_for_document(project_id, document_id)
@@ -46,28 +45,57 @@ async def _guard_no_active_job(
         )
 
 
+# ------------------------------------------------------------------
+# URL-источник
+# ------------------------------------------------------------------
+
 @router.post("", response_model=SourceResponse, status_code=status.HTTP_201_CREATED)
-async def create_text_source(
+async def create_url_source(
     payload: SourceCreateRequest,
     project: Project = Depends(get_allowed_project),
     source_service: SourceService = Depends(get_source_service),
     job_service: AnalysisJobService = Depends(get_analysis_job_service),
 ) -> SourceResponse:
-    # P0-6 guard: scope=document подразумевает конкретный document_id в payload
+    """Создать источник типа URL."""
     await _guard_no_active_job(
         project.id,
         getattr(payload, "document_id", None),
         job_service,
     )
-    source_type = SourceType.NOTE if payload.type == "note" else SourceType.LINK
-    # payload.scope — Literal["project", "document"], SourceScope — StrEnum с теми же
-    # строковыми значениями, поэтому SourceScope(payload.scope) всегда корректен.
-    scope = SourceScope(payload.scope)  # P0-6
-    source = await source_service.create_text_source(
-        project, payload.name, source_type, payload.text_content, payload.url, scope=scope
+    scope = SourceScopeVO(payload.scope)
+    source = await source_service.create_url_source(
+        project, payload.name, payload.url, scope=scope
     )
     return SourceResponse.model_validate(source)
 
+
+# ------------------------------------------------------------------
+# Текстовая заметка (P2: сохраняется как .txt в MinIO)
+# ------------------------------------------------------------------
+
+@router.post("/note", response_model=SourceResponse, status_code=status.HTTP_201_CREATED)
+async def create_note_source(
+    payload: NoteCreateRequest,
+    project: Project = Depends(get_allowed_project),
+    source_service: SourceService = Depends(get_source_service),
+    job_service: AnalysisJobService = Depends(get_analysis_job_service),
+) -> SourceResponse:
+    """Создать текстовую заметку. Текст сохраняется в MinIO как .txt-файл."""
+    await _guard_no_active_job(
+        project.id,
+        getattr(payload, "document_id", None),
+        job_service,
+    )
+    scope = SourceScopeVO(payload.scope)
+    source = await source_service.create_note_source(
+        project, payload.name, payload.text_content, scope=scope
+    )
+    return SourceResponse.model_validate(source)
+
+
+# ------------------------------------------------------------------
+# Файловый источник
+# ------------------------------------------------------------------
 
 @router.post("/file", response_model=SourceResponse, status_code=status.HTTP_201_CREATED)
 async def upload_file_source(
@@ -93,10 +121,7 @@ async def upload_file_source(
             detail="document_id обязателен при scope=document",
         )
 
-    import uuid as _uuid  # noqa: PLC0415
     parsed_doc_id = _uuid.UUID(document_id) if document_id else None
-
-    # P0-6 guard
     await _guard_no_active_job(project.id, parsed_doc_id, job_service)
 
     try:
@@ -110,12 +135,16 @@ async def upload_file_source(
             file.filename,
             content,
             file.content_type or "application/octet-stream",
-            scope=SourceScope(scope),  # P0-6: строка → StrEnum
+            scope=SourceScopeVO(scope),
         )
     except FileTooLargeError as exc:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
     return SourceResponse.model_validate(source)
 
+
+# ------------------------------------------------------------------
+# List
+# ------------------------------------------------------------------
 
 @router.get("", response_model=Page[SourceResponse])
 async def list_sources(
@@ -126,9 +155,14 @@ async def list_sources(
 ) -> Page[SourceResponse]:
     sources, total = await source_service.list_sources(project.id, limit=limit, offset=offset)
     return Page[SourceResponse](
-        items=[SourceResponse.model_validate(s) for s in sources], total=total, limit=limit, offset=offset
+        items=[SourceResponse.model_validate(s) for s in sources],
+        total=total, limit=limit, offset=offset,
     )
 
+
+# ------------------------------------------------------------------
+# Delete
+# ------------------------------------------------------------------
 
 @router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_source(
@@ -137,9 +171,6 @@ async def delete_source(
     source_service: SourceService = Depends(get_source_service),
     job_service: AnalysisJobService = Depends(get_analysis_job_service),
 ) -> None:
-    """P0-6: проверяет активный job перед удалением источника."""
-    import uuid as _uuid  # noqa: PLC0415
-    # Получаем source, чтобы узнать document_id (для scope=document)
     src = await source_service.get_source(project.id, _uuid.UUID(source_id))
     doc_id = getattr(src, "document_id", None)
     await _guard_no_active_job(project.id, doc_id, job_service)

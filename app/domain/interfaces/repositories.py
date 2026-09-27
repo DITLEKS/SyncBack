@@ -323,17 +323,6 @@ class ISourceRepository(ABC):
     async def get_by_id(self, source_id: uuid.UUID) -> "Source | None": ...
 
     @abstractmethod
-    async def create(
-        self,
-        project_id: uuid.UUID,
-        name: str,
-        source_type: SourceTypeVO,
-        text_content: str | None = None,
-        url: str | None = None,
-        scope: SourceScopeVO = SourceScopeVO.PROJECT,
-    ) -> "Source": ...
-
-    @abstractmethod
     async def create_with_id(
         self,
         source_id: uuid.UUID,
@@ -341,6 +330,15 @@ class ISourceRepository(ABC):
         name: str,
         source_type: SourceTypeVO,
         storage_key: str,
+        scope: SourceScopeVO = SourceScopeVO.PROJECT,
+    ) -> "Source": ...
+
+    @abstractmethod
+    async def create_url(
+        self,
+        project_id: uuid.UUID,
+        name: str,
+        url: str,
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
     ) -> "Source": ...
 
@@ -364,31 +362,12 @@ class ISourceRepository(ABC):
         sources: "list[Source]",
     ) -> "list[Source]": ...
 
-    @abstractmethod
-    async def update(
-        self,
-        source: "Source",
-        name: str | None = None,
-        text_content: str | None = None,
-        url: str | None = None,
-    ) -> "Source": ...
-
-    @abstractmethod
-    async def delete(self, source: "Source") -> None: ...
-
 
 # ---------------------------------------------------------------------------
 # User
 # ---------------------------------------------------------------------------
 
 class IUserRepository(ABC):
-
-    @abstractmethod
-    async def get_by_id(self, user_id: uuid.UUID) -> "User | None": ...
-
-    @abstractmethod
-    async def get_by_email(self, email: str) -> "User | None": ...
-
     @abstractmethod
     async def create(
         self,
@@ -403,44 +382,13 @@ class IUserRepository(ABC):
     ) -> "User": ...
 
     @abstractmethod
+    async def get_by_email(self, email: str) -> "User | None": ...
+
+    @abstractmethod
+    async def get_by_id(self, user_id: uuid.UUID) -> "User | None": ...
+
+    @abstractmethod
     async def list_all(self, limit: int, offset: int) -> "list[User]": ...
 
     @abstractmethod
     async def count_all(self) -> int: ...
-
-
-# ---------------------------------------------------------------------------
-# Dashboard (read-model only)
-# ---------------------------------------------------------------------------
-
-class IDashboardRepository(ABC):
-
-    @abstractmethod
-    async def get_stats(self, user_id: uuid.UUID) -> dict: ...
-
-    @abstractmethod
-    async def get_activity_last_7_days(
-        self, user_id: uuid.UUID
-    ) -> list[dict]: ...
-
-    @abstractmethod
-    async def get_attention_documents(
-        self, user_id: uuid.UUID, limit: int
-    ) -> list[dict]: ...
-
-    @abstractmethod
-    async def get_recent_documents(
-        self, user_id: uuid.UUID, limit: int
-    ) -> list[dict]: ...
-
-
-# ---------------------------------------------------------------------------
-# DocumentOpen (write-port for "recently opened" tracking)
-# ---------------------------------------------------------------------------
-
-class IDocumentOpenRepository(ABC):
-
-    @abstractmethod
-    async def upsert_open(
-        self, user_id: uuid.UUID, document_id: uuid.UUID
-    ) -> None: ...

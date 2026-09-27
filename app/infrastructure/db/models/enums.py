@@ -17,9 +17,9 @@ class DocumentStatus(enum.StrEnum):
 
 
 class SourceType(enum.StrEnum):
-    FILE  = "file"
-    TEXT  = "text"
-    URL   = "url"
+    """После миграции 0018 в БД только 'file' и 'url'."""
+    FILE = "file"
+    URL  = "url"
 
 
 class AnalysisJobStatus(enum.StrEnum):

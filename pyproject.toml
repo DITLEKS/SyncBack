@@ -1,62 +1,63 @@
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
-name = "syncscribe-backend"
+name = "syncscribe"
 version = "0.1.0"
-description = "SyncScribe MVP backend"
+description = "SyncScribe backend — документация всегда актуальна"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.111",
-    "uvicorn[standard]>=0.30",
-    "gunicorn>=22.0",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "sqlalchemy[asyncio]>=2.0",
-    "asyncpg>=0.29",
     "alembic>=1.13",
     "celery[redis]>=5.4",
-    "redis>=5.0",
+    "httpx>=0.27",
+    "beautifulsoup4>=4.12",
+    "asyncpg>=0.29",
+    "redis[asyncio]>=5.0",
     "minio>=7.2",
-    "pyjwt>=2.8",
-    "passlib[bcrypt]>=1.7,<1.8",
-    "bcrypt>=4.0,<4.1",
+    "python-jose[cryptography]>=3.3",
+    "passlib[bcrypt]>=1.7",
     "python-multipart>=0.0.9",
     "python-docx>=1.1",
-    "python-magic>=0.4",
-    "greenlet>=3.0",
-    "email-validator>=2.1",
-    "hiredis>=2.3",
-    "httpx>=0.27",
+    "uvicorn[standard]>=0.29",
+    "structlog>=24.1",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "ruff>=0.5",
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
-    "fakeredis>=2.20",
+    "pytest-cov>=5.0",
+    "httpx>=0.27",
+    "ruff>=0.4",
+    "mypy>=1.10",
 ]
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["app*"]
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
 
 [tool.ruff]
-line-length = 110
+line-length = 100
 target-version = "py312"
-exclude = ["alembic/versions"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM"]
-ignore = ["E501"]
+select = ["E", "F", "I", "UP", "B", "C4", "PLC"]
+ignore = ["E501", "B008"]
 
-[tool.ruff.lint.isort]
-known-first-party = ["app"]
+[tool.ruff.lint.per-file-ignores]
+"alembic/*" = ["ALL"]
+"tests/*" = ["ALL"]
 
-[tool.ruff.lint.flake8-bugbear]
-extend-immutable-calls = [
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+exclude = ["alembic/versions"]
+
+[[tool.mypy.overrides]]
+module = [
     "fastapi.Depends",
     "fastapi.params.Depends",
     "fastapi.File",
@@ -64,11 +65,4 @@ extend-immutable-calls = [
     "fastapi.Query",
     "fastapi.Header",
 ]
-
-[tool.ruff.lint.per-file-ignores]
-"app/infrastructure/db/models/enums.py" = ["UP042"]
-"app/api/schemas/pagination.py" = ["UP046"]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
+ignore_missing_imports = true
