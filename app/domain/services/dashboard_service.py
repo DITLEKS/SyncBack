@@ -6,10 +6,12 @@ GET /documents/attention, GET /documents/recent.
   - Зависит только от IDashboardQueryService (read-model порт).
   - Нет импортов из app.infrastructure.* при выполнении.
 
-OPT-D8: track_open принимает project_id для проверки ownership.
+Снэпшот за сегодня пишется при каждом GET /dashboard — фоновый
+джоб не нужен. ON CONFLICT DO UPDATE гарантирует идемпотентность.
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import date, timedelta, timezone
 from datetime import datetime as dt
@@ -28,40 +30,33 @@ def _interpolate(
 ) -> list[TrendPoint]:
     """Строит 7 точек sparkline с линейной интерполяцией пропусков.
 
-    Правила:
-      - Известный день       → точное значение из снэпшота.
-      - Пропуск между двумя  → линейная интерполяция.
-      - Пропуск до первого   → значение первого известного снэпшота.
-      - Пропуск после последнего → значение последнего известного снэпшота.
-      - Нет снэпшотов вообще → flat-линия = fallback (текущее live-значение).
+      - Известный день         → точное значение из снэпшота.
+      - Пропуск между двумя    → линейная интерполяция.
+      - Пропуск до первого     → значение первого известного.
+      - Пропуск после последнего → значение последнего известного.
+      - Нет снэпшотов вообще   → flat = fallback.
     """
     if not snap_by_date:
         return [TrendPoint(date=d.isoformat(), value=fallback) for d in dates]
 
-    known_dates = sorted(snap_by_date.keys())
-    first_known = known_dates[0]
-    last_known = known_dates[-1]
+    known = sorted(snap_by_date)
+    first, last = known[0], known[-1]
 
     result: list[TrendPoint] = []
     for d in dates:
         if d in snap_by_date:
-            result.append(TrendPoint(date=d.isoformat(), value=snap_by_date[d]))
-        elif d < first_known:
-            # leading gap — тянем от первого известного
-            result.append(TrendPoint(date=d.isoformat(), value=snap_by_date[first_known]))
-        elif d > last_known:
-            # trailing gap — тянем от последнего известного
-            result.append(TrendPoint(date=d.isoformat(), value=snap_by_date[last_known]))
+            v = snap_by_date[d]
+        elif d < first:
+            v = snap_by_date[first]
+        elif d > last:
+            v = snap_by_date[last]
         else:
-            # пропуск между двумя известными — линейная интерполяция
-            before = max(kd for kd in known_dates if kd < d)
-            after = min(kd for kd in known_dates if kd > d)
+            before = max(k for k in known if k < d)
+            after  = min(k for k in known if k > d)
             v0, v1 = snap_by_date[before], snap_by_date[after]
-            span = (after - before).days          # всегда > 0
-            step = (d - before).days
-            value = v0 + (v1 - v0) * step / span
-            result.append(TrendPoint(date=d.isoformat(), value=round(value, 2)))
-
+            t = (d - before).days / (after - before).days
+            v = round(v0 + (v1 - v0) * t, 2)
+        result.append(TrendPoint(date=d.isoformat(), value=v))
     return result
 
 
@@ -70,38 +65,66 @@ class DashboardService:
         self._qs = dashboard_qs
 
     async def get_dashboard(self, user_id: uuid.UUID) -> DashboardResponse:
-        """GET /dashboard — текущее состояние + sparkline за 7 дней."""
-        stats, snapshots = await self._fetch(user_id)
+        """GET /dashboard.
 
-        total: int = stats["total"]
-        ready: int = stats["ready"]
-        relevance_percent = round(ready / total * 100) if total else 0.0
-
-        today = dt.now(tz=timezone.utc).date()
-        dates = [today - timedelta(days=i) for i in range(6, -1, -1)]
-
-        total_map:     dict[date, float] = {s["snapshot_date"]: float(s["total_count"])       for s in snapshots}
-        awaiting_map:  dict[date, float] = {s["snapshot_date"]: float(s["awaiting_count"])    for s in snapshots}
-        relevance_map: dict[date, float] = {s["snapshot_date"]: s["relevance_percent"]        for s in snapshots}
-
-        return DashboardResponse(
-            total_documents=total,
-            awaiting_approval_count=stats["awaiting"],
-            ready_count=ready,
-            relevance_percent=relevance_percent,
-            total_trend=_interpolate(dates, total_map,     float(total)),
-            awaiting_trend=_interpolate(dates, awaiting_map,  float(stats["awaiting"])),
-            relevance_trend=_interpolate(dates, relevance_map, float(relevance_percent)),
-        )
-
-    async def _fetch(self, user_id: uuid.UUID) -> tuple[dict, list[dict]]:
-        """stats и snapshots параллельно."""
-        import asyncio
+        Последовательность:
+          1. Параллельно читаем stats + trends.
+          2. Записываем снэпшот сегодня с live-значениями (upsert).
+          3. Подмерживаем trends актуальным сегодняшним снэпшотом.
+          4. Строим ответ с интерполяцией.
+        """
         stats, snapshots = await asyncio.gather(
             self._qs.get_stats(user_id),
             self._qs.get_trends(user_id, days=7),
         )
-        return stats, snapshots
+
+        total: int = stats["total"]
+        ready: int = stats["ready"]
+        awaiting: int = stats["awaiting"]
+        relevance = round(ready / total * 100, 1) if total else 0.0
+        today = dt.now(tz=timezone.utc).date()
+
+        # — записываем снэпшот сегодня: ON CONFLICT DO UPDATE, идемпотентно
+        await self._qs.upsert_snapshot(
+            owner_id=user_id,
+            snapshot_date=today,
+            total_count=total,
+            awaiting_count=awaiting,
+            relevance_percent=relevance,
+        )
+
+        # — подмерживаем локальный список свежезаписанным снэпшотом
+        snap_by_date: dict[date, dict] = {s["snapshot_date"]: s for s in snapshots}
+        snap_by_date[today] = {
+            "snapshot_date": today,
+            "total_count": total,
+            "awaiting_count": awaiting,
+            "relevance_percent": relevance,
+        }
+
+        dates = [today - timedelta(days=i) for i in range(6, -1, -1)]
+
+        return DashboardResponse(
+            total_documents=total,
+            awaiting_approval_count=awaiting,
+            ready_count=ready,
+            relevance_percent=relevance,
+            total_trend=_interpolate(
+                dates,
+                {d: float(s["total_count"]) for d, s in snap_by_date.items()},
+                float(total),
+            ),
+            awaiting_trend=_interpolate(
+                dates,
+                {d: float(s["awaiting_count"]) for d, s in snap_by_date.items()},
+                float(awaiting),
+            ),
+            relevance_trend=_interpolate(
+                dates,
+                {d: s["relevance_percent"] for d, s in snap_by_date.items()},
+                relevance,
+            ),
+        )
 
     async def get_attention_documents(
         self, user_id: uuid.UUID, limit: int = 4
