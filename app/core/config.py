@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     jwt_secret: str
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 60
+    # REVIEW-2: вынесено из магической константы 30*24*60*60 в jwt_handler.py
+    jwt_refresh_token_expire_days: int = 30
 
     login_max_attempts: int = 5
     login_lockout_seconds: int = 300
@@ -59,20 +61,16 @@ class Settings(BaseSettings):
 
     # M-3: jwt_secret обязан быть не менее 32 символов.
     # Слабый секрет (например, "secret" или пустая строка) позволяет
-    # брутфорс-подбор JWT и компрометацию всех токенов в продакшне.
+    # тривиально форжировать токены.
     @field_validator("jwt_secret")
     @classmethod
     def _validate_jwt_secret(cls, v: str) -> str:
         if len(v) < 32:
             raise ValueError(
-                "jwt_secret должен содержать не менее 32 символов. "
-                "Сгенерируйте надёжный секрет: python -c \"import secrets; print(secrets.token_hex(32))\""
+                "jwt_secret должен содержать минимум 32 символа. "
+                "Сгенерируйте его командой: openssl rand -hex 32"
             )
         return v
-
-    @property
-    def max_upload_size_bytes(self) -> int:
-        return self.max_upload_size_mb * 1024 * 1024
 
 
 @lru_cache

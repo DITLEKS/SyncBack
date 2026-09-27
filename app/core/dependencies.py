@@ -22,6 +22,15 @@ CRIT-D4 (этот раунд):
 H-2:
   JWTHandler вынесен в singleton-like фабрику _get_jwt_handler(),
   чтобы не создавать новый объект на каждый запрос.
+
+REVIEW-3 (dashboard isolation comment):
+  DashboardRepository использует отдельную сессию от UoW.
+  Это означает READ COMMITTED по умолчанию — uncommitted изменения
+  write-транзакций НЕ будут видны dashboard-запросам. Это приемлемо
+  для read-model (eventual consistency), но не подходит для операций,
+  требующих видеть uncommitted данные текущей транзакции.
+  Если потребуется консистентность внутри транзакции — передать
+  ту же сессию через параметр или поднять isolation level.
 """
 
 from functools import lru_cache
@@ -53,6 +62,7 @@ from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 from app.infrastructure.security.jwt_handler import JWTHandler
 from app.infrastructure.security.login_rate_limiter import LoginRateLimiter
 from app.infrastructure.security.password_hasher import PasswordHasher
+from app.infrastructure.security.refresh_token_store import RefreshTokenStore
 from app.infrastructure.storage.minio_storage import MinioStorage
 
 
@@ -162,6 +172,12 @@ def get_document_export_service(
 
 # ---------------------------------------------------------------------------
 # Dashboard — read-model инжектируется напрямую, минуя UoW
+#
+# REVIEW-3: DashboardRepository получает отдельную сессию (не ту, что UoW).
+# Это означает READ COMMITTED isolation — uncommitted изменения
+# параллельных write-транзакций НЕ видны. Для read-model это нормально
+# (eventual consistency). Если нужна видимость uncommitted данных
+# текущего запроса — передать session из get_uow явно.
 # ---------------------------------------------------------------------------
 
 def get_dashboard_query_service(
@@ -218,15 +234,22 @@ def get_login_rate_limiter() -> LoginRateLimiter:
     )
 
 
+def get_refresh_token_store() -> RefreshTokenStore:
+    """REVIEW-1: хранилище активных refresh-токенов."""
+    return RefreshTokenStore(get_redis_client())
+
+
 async def get_auth_service(
     session: AsyncSession = Depends(get_db_session),
     rate_limiter: LoginRateLimiter = Depends(get_login_rate_limiter),
+    refresh_store: RefreshTokenStore = Depends(get_refresh_token_store),
 ) -> AuthService:
     return AuthService(
         UserRepository(session),
         PasswordHasher(),
         _get_jwt_handler(),
         rate_limiter,
+        refresh_store,
     )
 
 

@@ -49,3 +49,19 @@ class SuggestionProtocol(Protocol):
     old_text: str | None
     new_text: str | None
     status: SuggestionStatusVO
+
+
+@runtime_checkable
+class UserProtocol(Protocol):
+    """Минимальный контракт пользователя, нужный AuthService.
+
+    REVIEW-7: добавлен, чтобы AuthService не импортировал ORM-модель User
+    из app.infrastructure.db.models.user.
+
+    role возвращается как str (.value enum'а или plain string) —
+    AuthService передаёт его в JWTHandler.create_access_token(role=...).
+    """
+    id: uuid.UUID
+    email: str
+    password_hash: str
+    role: str

@@ -14,15 +14,15 @@ HIGH-2-FIX: atomic_review_save — публичный метод с единст
   открывает новую сессию/транзакцию, и все flush() первого уровня пропадают.
   Метод помечен комментарием — НЕ вызывать внутри уже открытого uow-блока.
 
-NEW:
-  get_suggestion_by_id — получить одну правку по UUID (нужно редактору при навигации).
-  bulk_reject          — отклонить все PENDING-правки (зеркало bulk_accept).
+REVIEW-5: get_suggestion_by_id удалён — был мёртвым алиасом
+  get_suggestion_for_document. Используйте get_suggestion_for_document напрямую.
 """
 from __future__ import annotations
 
 import logging
 import uuid
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from app.domain.exceptions import (
     DocumentNotFoundError,
@@ -44,8 +44,8 @@ from app.domain.value_objects import (
     SuggestionStatusVO,
 )
 
-if False:  # noqa: SIM210  — заглушаем TYPE_CHECKING чтобы не импортировать
-    from app.domain.services.document_export_service import DocumentExportService  # noqa: F401
+if TYPE_CHECKING:
+    from app.domain.services.document_export_service import DocumentExportService
 
 logger = logging.getLogger("syncscribe.services.suggestion")
 
@@ -169,21 +169,6 @@ class SuggestionService:
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             return await self._get_suggestion_for_document(document, suggestion_id)
-
-    async def get_suggestion_by_id(
-        self,
-        project_id: uuid.UUID,
-        document_id: uuid.UUID,
-        suggestion_id: uuid.UUID,
-    ) -> SuggestionProtocol:
-        """Получить одну правку по UUID.
-
-        Используется редактором при навигации между правками по ID
-        (например, при переходе по ссылке или после accept/reject одной правки).
-        Делегирует в get_suggestion_for_document — проверяет принадлежность
-        документу и актуальность analysis_job.
-        """
-        return await self.get_suggestion_for_document(project_id, document_id, suggestion_id)
 
     async def get_accepted_changes(
         self, document_id: uuid.UUID
