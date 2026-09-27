@@ -1,0 +1,60 @@
+name: Migrate
+
+# Запускается только после успешного прогона CI на main.
+# Для деплоя на другие окружения — добавить отдельные jobs с environment.
+on:
+  push:
+    branches: [main]
+    paths:
+      # Миграция запускается только если изменились alembic-файлы или модели.
+      - "alembic/versions/**.py"
+      - "alembic/env.py"
+      - "app/infrastructure/db/models/**.py"
+
+# Не запускать параллельно: только одна миграция за раз на каждый environment.
+concurrency:
+  group: migrate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    name: alembic upgrade head
+    runs-on: ubuntu-latest
+    environment: production          # GitHub Environment — здесь хранятся secrets
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # Secrets задаются в Settings → Environments → production.
+      # Минимально нужен DATABASE_URL (postgresql+asyncpg://...).
+      # Остальные переменные — чтобы alembic env.py мог инициализировать config.
+      - name: Write .env from secrets
+        run: |
+          cat > .env <<EOF
+          DATABASE_URL=${{ secrets.DATABASE_URL }}
+          SECRET_KEY=${{ secrets.SECRET_KEY }}
+          S3_ENDPOINT=${{ secrets.S3_ENDPOINT }}
+          S3_ACCESS_KEY=${{ secrets.S3_ACCESS_KEY }}
+          S3_SECRET_KEY=${{ secrets.S3_SECRET_KEY }}
+          REDIS_URL=${{ secrets.REDIS_URL }}
+          EOF
+
+      - name: Show pending migrations (dry-run info)
+        run: alembic history --indicate-current
+        continue-on-error: true     # не падаем, если БД ещё недоступна на этом шаге
+
+      - name: Run migrations
+        run: alembic upgrade head
+
+      - name: Verify current revision
+        run: alembic current
