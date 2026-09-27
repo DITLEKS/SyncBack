@@ -25,6 +25,16 @@ S-1 (issue #37): list_suggestions_for_document — PaginationParams распак
 
 S-2 (issue #37): удалена мёртвая проверка `if updated is None` в _decide();
   update_status() бросает исключение, None никогда не возвращается.
+
+review #3: reset_suggestion выровнен с _decide — проверка `if updated is None`
+  заменена на ожидание исключения из reset_status(). Это устраняет расхождение
+  стиля обработки ошибок внутри одного класса. reset_status() обязан бросать
+  SuggestionResetNotAllowedError если правка уже PENDING (concurrent reset),
+  а не возвращать None.
+
+review #5: удалены дублирующие импорты внутри atomic_review_save —
+  ReviewDecisions, SuggestionDecision и OptimisticLockError уже импортированы
+  на уровне модуля.
 """
 from __future__ import annotations
 
@@ -278,7 +288,9 @@ class SuggestionService:
           3. Правка должна быть ACCEPTED или REJECTED — сбрасывать PENDING
              бессмысленно и является ошибкой клиента (409).
 
-        Атомарность обеспечивается UPDATE WHERE status != PENDING в репозитории.
+        review #3: проверка `if updated is None` удалена — выровнено с _decide.
+        reset_status() бросает SuggestionResetNotAllowedError при concurrent reset
+        (параллельный запрос уже сбросил правку), а не возвращает None.
         """
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
@@ -290,12 +302,9 @@ class SuggestionService:
                     f"Правка {suggestion_id} уже в статусе PENDING — сбрасывать нечего"
                 )
 
+            # review #3: reset_status() бросает исключение при concurrent reset —
+            # None не возвращается, проверка `if updated is None` удалена.
             updated = await self._uow.suggestions.reset_status(suggestion)
-            if updated is None:
-                raise SuggestionResetNotAllowedError(
-                    f"Правка {suggestion_id} уже была сброшена параллельным запросом"
-                )
-
             await self._uow.commit()
         return updated
 
@@ -406,13 +415,16 @@ class SuggestionService:
 
         ВАЖНО: метод сам открывает uow-блок — НЕ вызывать внутри
         уже открытого `async with self._uow`.
+
+        review #5: дублирующие импорты ReviewDecisions, SuggestionDecision и
+        OptimisticLockError внутри метода удалены — они уже импортированы
+        на уровне модуля.
         """
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             self._assert_awaiting_approval(document)
             job_id = self._assert_has_active_job(document)
 
-            from app.domain.value_objects import ReviewDecisions, SuggestionDecision
             decisions_list = tuple([
                 *[
                     SuggestionDecision(
@@ -437,7 +449,6 @@ class SuggestionService:
                 user_id=user_id,
             )
 
-            from app.domain.exceptions import OptimisticLockError
             locked_doc = await self._uow.documents.compare_and_increment_review_version(
                 document.id, review_version
             )

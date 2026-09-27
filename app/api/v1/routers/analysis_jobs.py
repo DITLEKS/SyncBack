@@ -1,8 +1,10 @@
 """Запуск, просмотр и отмена задач анализа документа.
 
 P0-7: Идемпотентный Idempotency-Key.
-P0-9: Повторный анализ READY-документа требует force=True в теле запроса.
-      Без force — HTTP 409 с confirmation_required=True.
+P0-9: Повторный анализ документа в статусах READY / ERROR / CANCELLED требует
+      force=True в теле запроса. Без force — HTTP 409 с confirmation_required=True.
+      review #2: расширено с «только READY» на READY | ERROR | CANCELLED через
+      service.check_document_needs_force_confirm().
 
 ОПТИМИЗАЦИЯ (код-ревью):
 - #4  detail HTTPException — .model_dump() вместо jsonable_encoder на Pydantic-объекте.
@@ -26,6 +28,9 @@ C-1 (аудит): REST-правильный способ отмены — DELETE
 REFACTOR: dispatch run_analysis_job делегирован в service.dispatch_job() —
   роутер не импортирует Celery-задачи напрямую.
   Deprecated POST /{job_id}/cancel удалён (фронт не подключён).
+
+review #7: добавлен logger.warning при поглощении ошибки dispatch в
+  start_analysis_job — потеря диагностики при сбое очереди устранена.
 """
 
 import logging
@@ -74,7 +79,7 @@ def _job_response(job, http_status: int = status.HTTP_201_CREATED) -> JSONRespon
         200: {"model": AnalysisJobResponse, "description": "Идемпотентный запрос — задача уже существует"},
         409: {
             "model": AnalysisJobConflictResponse,
-            "description": "Анализ уже запущен, или документ READY — нужен force=True (#9)",
+            "description": "Анализ уже запущен, или документ READY/ERROR/CANCELLED — нужен force=True (P0-9)",
         },
     },
 )
@@ -101,18 +106,19 @@ async def start_analysis_job(
                 )
             return _job_response(existing, status.HTTP_200_OK)
 
-    # P0-9: повторный анализ документа в статусе READY без force
+    # P0-9 (review #2): повторный анализ документа в статусе READY/ERROR/CANCELLED
+    # требует явного подтверждения через force=true.
     try:
-        is_ready = await service.check_document_is_ready(project.id, document_id)
+        needs_force = await service.check_document_needs_force_confirm(project.id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    if is_ready and not body.force:
+    if needs_force and not body.force:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=AnalysisJobConflictResponse(
                 detail=(
-                    "Документ уже в статусе Готов. "
+                    "Документ уже проходил анализ. "
                     "Перезапустить анализ? Передайте force=true."
                 ),
                 confirmation_required=True,
@@ -126,10 +132,16 @@ async def start_analysis_job(
     except (AnalysisAlreadyRunningError, InvalidDocumentStatusError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    # REFACTOR: dispatch делегирован в сервис — роутер не знает о Celery
+    # REFACTOR: dispatch делегирован в сервис — роутер не знает о Celery.
+    # review #7: явный лог при поглощении ошибки dispatch — потеря диагностики устранена.
     try:
         job = await service.dispatch_job(job)
     except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Не удалось задиспатчить analysis job — очередь недоступна",
+            exc_info=True,
+            extra={"job_id": str(job.id), "document_id": str(document_id)},
+        )
         job = await service.mark_job_queue_unavailable(job, str(exc))
 
     return _job_response(job)

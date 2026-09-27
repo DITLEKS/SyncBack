@@ -23,6 +23,9 @@
   - FEAT: reset_analysis() — сброс всех suggestions → pending, документ → AWAITING_APPROVAL.
   - FIX-ANAL-1: _ANALYSIS_ALLOWED_STATUSES дополнен ERROR и CANCELLED —
     повторный запуск анализа без ручного перевода в DRAFT через БД.
+  - review #2: добавлен check_document_needs_force_confirm() — возвращает True
+    для READY, ERROR и CANCELLED, чтобы роутер запрашивал force=true при
+    повторном запуске из любого из этих статусов, а не только из READY.
 """
 from __future__ import annotations
 
@@ -51,6 +54,16 @@ _ANALYSIS_ALLOWED_STATUSES = frozenset({
     DocumentStatusVO.READY,
     DocumentStatusVO.ERROR,      # FIX-ANAL-1
     DocumentStatusVO.CANCELLED,  # FIX-ANAL-1
+})
+
+# review #2: статусы, при которых роутер обязан требовать force=true
+# перед повторным запуском анализа. Включает ERROR и CANCELLED — пользователь
+# должен явно подтвердить повторный запуск из «нерабочего» состояния,
+# а не только из READY (как было до этого фикса).
+_FORCE_CONFIRM_STATUSES = frozenset({
+    DocumentStatusVO.READY,
+    DocumentStatusVO.ERROR,
+    DocumentStatusVO.CANCELLED,
 })
 
 # Статусы job, из которых допустима отмена:
@@ -100,6 +113,10 @@ class AnalysisJobService:
     async def check_document_is_ready(
         self, project_id: uuid.UUID, document_id: uuid.UUID
     ) -> bool:
+        """Устаревший метод — используйте check_document_needs_force_confirm.
+
+        Оставлен для обратной совместимости; возвращает True только для READY.
+        """
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
             if document is None or document.project_id != project_id:
@@ -107,6 +124,24 @@ class AnalysisJobService:
                     f"Документ {document_id} не найден в проекте {project_id}"
                 )
             return document.status == DocumentStatusVO.READY
+
+    async def check_document_needs_force_confirm(
+        self, project_id: uuid.UUID, document_id: uuid.UUID
+    ) -> bool:
+        """review #2: возвращает True если повторный запуск анализа требует
+        явного подтверждения (force=true) от пользователя.
+
+        True для статусов READY, ERROR и CANCELLED — во всех трёх случаях
+        анализ «уже выполнялся» и перезапуск должен быть осознанным.
+        False для DRAFT и AWAITING_APPROVAL — запуск без подтверждения.
+        """
+        async with self._uow:
+            document = await self._uow.documents.get_by_id(document_id)
+            if document is None or document.project_id != project_id:
+                raise DocumentNotFoundError(
+                    f"Документ {document_id} не найден в проекте {project_id}"
+                )
+            return document.status in _FORCE_CONFIRM_STATUSES
 
     async def get_document_for_job(
         self, project_id: uuid.UUID, document_id: uuid.UUID
