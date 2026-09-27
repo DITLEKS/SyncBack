@@ -29,6 +29,12 @@ REFACTOR: DELETE /editor/suggestions удалён — операция пере�
 PERF:
   - get_document_content и get_original_content вызываются через asyncio.gather()
   - reset_analysis: второй SELECT get_document убран — документ берётся из reset_result
+
+FIX-PERM-1: permissions block обновлён:
+  - can_analyze включает ERROR и CANCELLED (повторный запуск после сбоя/отмены).
+  - can_delete: ERROR и CANCELLED явно unlocked (explicit > implicit).
+  - sources_is_editable: ERROR и CANCELLED трактуются как редактируемые
+    (анализ не запущен, источники менять разрешено).
 """
 import asyncio
 import logging
@@ -79,6 +85,29 @@ _STATUS_VIEW_MODE: dict[DocumentStatusVO, str] = {
     DocumentStatusVO.ERROR: "original",
     DocumentStatusVO.CANCELLED: "original",
 }
+
+# FIX-PERM-1: статусы, из которых можно запустить анализ.
+# Включает ERROR и CANCELLED — позволяет повторный запуск без ручного
+# изменения статуса через БД. Соответствует _ANALYSIS_ALLOWED_STATUSES
+# в analysis_job_service.py (FIX-ANAL-1).
+_CAN_ANALYZE_STATUSES = frozenset({
+    DocumentStatusVO.DRAFT,
+    DocumentStatusVO.READY,
+    DocumentStatusVO.ERROR,
+    DocumentStatusVO.CANCELLED,
+})
+
+# FIX-PERM-1: статусы, при которых документ «заблокирован» (анализ активен).
+_LOCKED_STATUSES = frozenset({
+    DocumentStatusVO.IN_PROGRESS,
+})
+
+# FIX-PERM-1: статусы, при которых источники недоступны для редактирования.
+# ERROR и CANCELLED — анализ не запущен, источники менять можно (как DRAFT).
+_SOURCES_NOT_EDITABLE_STATUSES = frozenset({
+    DocumentStatusVO.IN_PROGRESS,
+    DocumentStatusVO.AWAITING_APPROVAL,
+})
 
 _SUGGESTIONS_MAX_LIMIT = 200
 
@@ -208,17 +237,13 @@ async def get_editor_aggregate(
         rejected=rejected,
     )
 
-    locked = document.status in (DocumentStatusVO.IN_PROGRESS,)
-    sources_is_editable = document.status not in (
-        DocumentStatusVO.IN_PROGRESS,
-        DocumentStatusVO.AWAITING_APPROVAL,
-    )
+    # FIX-PERM-1: явные frozenset-константы вместо inline-выражений.
     permissions = EditorPermissions(
-        can_analyze=document.status in (DocumentStatusVO.DRAFT, DocumentStatusVO.READY),
+        can_analyze=document.status in _CAN_ANALYZE_STATUSES,
         can_review=document.status == DocumentStatusVO.AWAITING_APPROVAL,
         can_export=document.status == DocumentStatusVO.READY,
-        can_delete=not locked,
-        sources_is_editable=sources_is_editable,
+        can_delete=document.status not in _LOCKED_STATUSES,
+        sources_is_editable=document.status not in _SOURCES_NOT_EDITABLE_STATUSES,
     )
 
     return EditorAggregateResponse(

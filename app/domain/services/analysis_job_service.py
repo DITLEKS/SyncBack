@@ -15,12 +15,14 @@
   - CRIT-1: bulk_create_jobs_for_project загружает только document.id (list[UUID]).
   - CRIT-2: _get_job бросает AnalysisJobNotFoundError при ненайденном job.
   - HIGH-1: mark_dispatched явно проверяет job.status == PENDING.
-  - N-3 (ревью): find_job_by_idempotency_key возвращает полный AnalysisJob | None.
-  - N-4 (ревью): удалён импорт DocumentStatus (ОРМ-enum) из роутера.
-  - N-5 (ревью): check_document_is_ready() возвращает bool, а не ORM-объект.
-  - N-2 (ревью): добавлен revoke_celery_task() — тонкий делегат к Celery.
+  - N-3 (ревю): find_job_by_idempotency_key возвращает полный AnalysisJob | None.
+  - N-4 (ревю): удалён импорт DocumentStatus (ОРМ-enum) из роутера.
+  - N-5 (ревю): check_document_is_ready() возвращает bool, а не ORM-объект.
+  - N-2 (ревю): добавлен revoke_celery_task() — тонкий делегат к Celery.
   - UI-fix: bulk_create_jobs_for_project принимает опциональный document_ids фильтр.
   - FEAT: reset_analysis() — сброс всех suggestions → pending, документ → AWAITING_APPROVAL.
+  - FIX-ANAL-1: _ANALYSIS_ALLOWED_STATUSES дополнен ERROR и CANCELLED —
+    повторный запуск анализа без ручного перевода в DRAFT через БД.
 """
 from __future__ import annotations
 
@@ -40,11 +42,15 @@ from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO, Sugg
 if TYPE_CHECKING:
     from app.infrastructure.db.models.analysis_job import AnalysisJob
 
-# Статусы документа, из которых разрешён запуск анализа:
+# Статусы документа, из которых разрешён запуск анализа.
+# FIX-ANAL-1: добавлены ERROR и CANCELLED — позволяет повторно запустить
+# анализ без ручного вмешательства в БД.
 _ANALYSIS_ALLOWED_STATUSES = frozenset({
     DocumentStatusVO.DRAFT,
     DocumentStatusVO.AWAITING_APPROVAL,
     DocumentStatusVO.READY,
+    DocumentStatusVO.ERROR,      # FIX-ANAL-1
+    DocumentStatusVO.CANCELLED,  # FIX-ANAL-1
 })
 
 # Статусы job, из которых допустима отмена:
@@ -149,6 +155,8 @@ class AnalysisJobService:
                     "Для документа уже выполняется анализ"
                 )
 
+            # FIX-ANAL-1: ERROR/CANCELLED тоже сбрасываются в DRAFT перед
+            # созданием job — самая ветка, что и AWAITING_APPROVAL/READY.
             if document.status != DocumentStatusVO.DRAFT:
                 document = await self._uow.documents.update_status(
                     document, DocumentStatusVO.DRAFT
@@ -281,7 +289,7 @@ class AnalysisJobService:
             await self._uow.suggestions.reset_to_pending_by_job(
                 document.current_analysis_job_id
             )
-            # Документ возвращается в AWAITING_APPROVAL (правки снова требуют ревью)
+            # Документ возвращается в AWAITING_APPROVAL (правки снова требуют ревю)
             await self._uow.documents.update_status(
                 document, DocumentStatusVO.AWAITING_APPROVAL
             )
