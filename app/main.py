@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from app.api.v1.routers.analysis_jobs import router as analysis_jobs_router
 from app.api.v1.routers.analysis_jobs_bulk import router as analysis_jobs_bulk_router
@@ -23,10 +25,27 @@ from app.api.v1.routers.system import router as system_router
 from app.core.body_size_limit_middleware import BodySizeLimitMiddleware
 from app.core.config import get_settings
 from app.core.correlation_middleware import CorrelationIdMiddleware
+from app.core.limiter import limiter
 from app.core.logging_setup import configure_logging
-from app.domain.exceptions import DomainError
+from app.domain.exceptions import (
+    AnalysisJobNotFoundError,
+    DomainError,
+    DocumentNotFoundError,
+    ProjectNotFoundError,
+    SourceNotFoundError,
+    SuggestionNotFoundError,
+)
 
 logger = logging.getLogger("syncscribe.main")
+
+# M-2: NotFound-исключения, которые должны возвращать 404 (не 400).
+_NOT_FOUND_EXCEPTIONS = (
+    DocumentNotFoundError,
+    ProjectNotFoundError,
+    SourceNotFoundError,
+    SuggestionNotFoundError,
+    AnalysisJobNotFoundError,
+)
 
 
 @asynccontextmanager
@@ -38,9 +57,6 @@ async def lifespan(app: FastAPI):
         extra={"env": settings.env, "llm_provider": settings.llm_provider},
     )
 
-    # Инициализируем SSE-брокер при старте приложения.
-    # Redis Pub/Sub (multi-instance) если redis_url задан;
-    # иначе автоматический fallback на InMemorySSEBroker (single-instance).
     await init_sse_broker(
         redis_url=settings.redis_url,
         channel=settings.redis_sse_channel,
@@ -65,8 +81,11 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # H-3: грубая защита от слишком больших request body до разбора multipart.
-    # Ставим до роутеров; CORS оставляем первым middleware.
+    # slowapi limiter — до регистрации роутеров.
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+    # CORS — первый middleware, до любых других.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_allowed_origins,
@@ -75,9 +94,21 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
         expose_headers=["X-Request-ID"],
     )
+    # H-3: грубая защита от слишком больших request body до разбора multipart.
     app.add_middleware(BodySizeLimitMiddleware)
     app.add_middleware(CorrelationIdMiddleware)
 
+    # M-2: NotFound-подклассы DomainError → 404 (должны быть ПЕРЕД общим DomainError handler).
+    @app.exception_handler(_NOT_FOUND_EXCEPTIONS[0])
+    @app.exception_handler(_NOT_FOUND_EXCEPTIONS[1])
+    @app.exception_handler(_NOT_FOUND_EXCEPTIONS[2])
+    @app.exception_handler(_NOT_FOUND_EXCEPTIONS[3])
+    @app.exception_handler(_NOT_FOUND_EXCEPTIONS[4])
+    async def not_found_error_handler(request, exc) -> JSONResponse:
+        logger.warning("Ресурс не найден", extra={"error_type": type(exc).__name__})
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    # Общий обработчик DomainError → 400 (после специфичных 404-handlers).
     @app.exception_handler(DomainError)
     async def domain_error_handler(request, exc: DomainError) -> JSONResponse:
         logger.warning("Необработанная доменная ошибка", extra={"error_type": type(exc).__name__})
