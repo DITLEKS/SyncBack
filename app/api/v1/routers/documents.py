@@ -14,6 +14,8 @@ M-5: get_document_content ловит конкретные ошибки:
 - DocumentParseError → 422
 - StorageError (OSError/IOError от MinIO-адаптера) → 502
 - Остальные Exception логируются → 500
+R-1: POST /{id}/sources возвращает AttachSourcesResponse(document, sources)
+     вместо голого DocumentResponse — фронт не делает лишний GET /sources.
 """
 import logging
 import uuid
@@ -25,12 +27,14 @@ from pydantic import TypeAdapter
 from app.api.deps import get_allowed_project, get_current_user
 from app.api.schemas.document import (
     AttachSourcesRequest,
+    AttachSourcesResponse,
     DocumentContentResponse,
     DocumentDownloadResponse,
     DocumentResponse,
     DocumentSectionResponse,
 )
 from app.api.schemas.pagination import Page
+from app.api.schemas.source import SourceResponse
 from app.api.upload_utils import read_upload_within_limit
 from app.core.config import Settings, get_settings
 from app.core.dependencies import (
@@ -291,18 +295,31 @@ async def export_document(
     )
 
 
-@router.post("/{document_id}/sources", response_model=DocumentResponse)
+@router.post(
+    "/{document_id}/sources",
+    response_model=AttachSourcesResponse,
+    summary="Прикрепить источники к документу",
+)
 async def attach_sources(
     document_id: uuid.UUID,
     payload: AttachSourcesRequest,
     project: Project = Depends(get_allowed_project),
     document_service: DocumentService = Depends(get_document_service),
     source_service: SourceService = Depends(get_source_service),
-) -> DocumentResponse:
+) -> AttachSourcesResponse:
+    """Прикрепить источники к документу.
+
+    R-1: возвращает document + sources, чтобы фронт не делал лишний
+    GET /sources после операции attach.
+    """
     try:
         document = await document_service.get_document(project.id, document_id)
         sources = await source_service.get_sources_for_project(project.id, payload.source_ids)
     except (DocumentNotFoundError, SourceNotFoundError) as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     document = await document_service.attach_sources(document, sources)
-    return DocumentResponse.model_validate(document)
+    source_responses = [SourceResponse.model_validate(s) for s in sources]
+    return AttachSourcesResponse(
+        document=DocumentResponse.model_validate(document),
+        sources=source_responses,
+    )

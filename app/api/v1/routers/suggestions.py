@@ -5,6 +5,8 @@ FIX-2: /reject-all возвращает BulkRejectResponse с полем rejecte
 FIX-6: _safe_bulk_log и _safe_single_log добавлен exc_info=True для сохранения трейса.
 FIX-7: review_save логирует предупреждение при расхождении If-Match vs payload.review_version.
 RESET: POST /{suggestion_id}/reset — отмена решения, возврат в PENDING.
+R-3: POST /finalize удалён — дублировал PUT /review с finalize=true.
+R-9: GET / принимает ?status=pending|accepted|rejected для серверной фильтрации.
 """
 
 import logging
@@ -49,6 +51,11 @@ _suggestion_list_adapter: TypeAdapter[list[SuggestionResponse]] = TypeAdapter(
 # L-4: конкретный алиас, разрешённый при определении класса — FastAPI < 0.100
 # корректно строит OpenAPI-схему без runtime-introspection generic alias.
 PageSuggestionResponse = Page[SuggestionResponse]
+
+# R-9: допустимые значения фильтра статуса правки
+_SUGGESTION_STATUS_FILTER_MAP: dict[str, SuggestionStatusVO] = {
+    vo.value: vo for vo in SuggestionStatusVO
+}
 
 router = APIRouter(
     prefix="/projects/{project_id}/documents/{document_id}/suggestions",
@@ -159,14 +166,39 @@ async def list_suggestions(
     document_id: uuid.UUID,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    # R-9: серверная фильтрация по статусу правки
+    status_filter: str | None = Query(
+        default=None,
+        alias="status",
+        description=(
+            "Фильтр по статусу правки. "
+            f"Допустимые значения: {', '.join(_SUGGESTION_STATUS_FILTER_MAP)}"
+        ),
+    ),
     project: Project = Depends(get_allowed_project),
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
 ) -> PageSuggestionResponse:
-    """L-4: response_model использует конкретный алиас PageSuggestionResponse."""
+    """Список правок документа с опциональной фильтрацией по статусу.
+
+    R-9: ?status=pending|accepted|rejected фильтрует на сервере,
+    устраняя необходимость клиентской фильтрации.
+    """
+    status_vo: SuggestionStatusVO | None = None
+    if status_filter is not None:
+        status_vo = _SUGGESTION_STATUS_FILTER_MAP.get(status_filter.lower())
+        if status_vo is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Неподдерживаемый статус правки: {status_filter!r}. "
+                    f"Допустимые значения: {', '.join(_SUGGESTION_STATUS_FILTER_MAP)}"
+                ),
+            )
+
     pagination = PaginationParams(limit=limit, offset=offset)
     try:
         suggestions, total = await suggestion_service.list_suggestions_for_document(
-            project.id, document_id, pagination
+            project.id, document_id, pagination, status_filter=status_vo
         )
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -416,31 +448,3 @@ async def reset_suggestion(
         audit_log_service, current_user.id, suggestion.id, AuditActionVO.RESET
     )
     return SuggestionResponse.model_validate(suggestion)
-
-
-@router.post("/finalize", response_model=DocumentResponse)
-async def finalize_review(
-    document_id: uuid.UUID,
-    project: Project = Depends(get_allowed_project),
-    current_user: User = Depends(get_current_user),
-    suggestion_service: SuggestionService = Depends(get_suggestion_service),
-    audit_log_service: AuditLogService = Depends(get_audit_log_service),
-) -> DocumentResponse:
-    try:
-        document = await suggestion_service.finalize_review(
-            project_id=project.id,
-            document_id=document_id,
-            user_id=current_user.id,
-        )
-    except DocumentNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-
-    await _safe_single_log(
-        audit_log_service,
-        current_user.id,
-        document.id,
-        AuditActionVO.FINALIZE_REVIEW,
-    )
-    return DocumentResponse.model_validate(document)

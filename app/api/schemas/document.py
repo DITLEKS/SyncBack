@@ -5,12 +5,18 @@ P0-6: добавлен UploadDocumentRequest — загрузка докумен
 P0-#12: поле переименовано title→name в DocumentListItem, чтобы совпадало
         с DocumentResponse.name и ORM-атрибутом Document.name.
 UI-fix: добавлено поле size_bytes в DocumentListItem (карточка документа в UI).
+R-1: добавлен AttachSourcesResponse — возвращается вместо голого DocumentResponse
+     после POST /{id}/sources; содержит document + sources, устраняя лишний
+     GET /sources на фронте.
 """
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from app.api.schemas.source import SourceResponse
 
 
 class DocumentResponse(BaseModel):
@@ -45,6 +51,20 @@ class DocumentDownloadResponse(BaseModel):
 
 class AttachSourcesRequest(BaseModel):
     source_ids: list[uuid.UUID]
+
+
+# R-1: ответ POST /{id}/sources — document + прикреплённые источники
+class AttachSourcesResponse(BaseModel):
+    """Ответ POST /documents/{id}/sources (R-1).
+
+    Возвращает обновлённые метаданные документа и полный список
+    прикреплённых к нему источников, чтобы фронт не делал дополнительный
+    GET /sources после операции attach.
+    """
+    document: DocumentResponse
+    sources: list["SourceResponse"]
+
+    model_config = {"from_attributes": True}
 
 
 # ── P0-6 ──────────────────────────────────────────────────────────────────────────
