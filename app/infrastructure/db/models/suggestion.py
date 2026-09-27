@@ -26,12 +26,23 @@ class Suggestion(Base):
         ),
         # Составной индекс для основного запроса: pending suggestions по job.
         Index("ix_suggestions_job_status", "analysis_job_id", "status"),
+        # R-2: индекс по document_id для прямых запросов без JOIN через AnalysisJob.
+        Index("ix_suggestions_document_status", "document_id", "status"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     analysis_job_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("analysis_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # R-2: денормализованный document_id — избавляет JOIN через analysis_jobs
+    # в dashboard-запросах и list_with_total. Заполняется при bulk_create
+    # из analysis_job.document_id — не может расходиться с родительским job.
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("documents.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -50,25 +61,17 @@ class Suggestion(Base):
         sa.Enum(ChangeType, name="change_type", values_callable=_values),
         nullable=False,
     )
-    old_text: Mapped[str | None] = mapped_column(Text, nullable=True)
-    new_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[SuggestionStatus] = mapped_column(
         sa.Enum(SuggestionStatus, name="suggestion_status", values_callable=_values),
         nullable=False,
         default=SuggestionStatus.PENDING,
         server_default=SuggestionStatus.PENDING.value,
     )
-    source_reference: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    # NUMERIC(4,3): точное хранение 0.000–1.000, без IEEE 754 погрешности.
+    original_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    suggested_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     confidence_score: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
-    explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
-    decided_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("users.id", ondelete="SET NULL"),
-        nullable=True,
-    )
-    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    order_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     analysis_job: Mapped["AnalysisJob"] = relationship(back_populates="suggestions")
