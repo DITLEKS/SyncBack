@@ -9,30 +9,24 @@ R-3: POST /finalize удалён — дублировал PUT /review с finaliz
 R-9: GET / принимает ?status=pending|accepted|rejected для серверной фильтрации.
 
 REFACTOR (bulk unification):
-  PATCH /suggestions — единый эндпоинт для single и bulk смены статуса правок.
-    · ids: list[UUID]  → точечное обновление
+  PATCH /suggestions — единственный endpoint для изменения статуса правок (single + bulk).
+    · ids: list[UUID]  → точечное обновление конкретных правок
     · filter: str      → bulk по предустановленному фильтру (pending/decided/all)
     · status           → целевой статус (accepted/rejected/pending=reset)
-  Старые RPC-суффиксы /accept, /reject, /accept-all, /reject-all оставлены
-  как deprecated HTTP 308 aliases до следующего мажорного релиза API.
+  Удалены: POST /accept, POST /reject, POST /accept-all, POST /reject-all.
 """
 
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import List
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from fastapi.responses import RedirectResponse
 from pydantic import TypeAdapter
 
 from app.api.deps import get_allowed_project, get_current_user
-from app.api.schemas.document import DocumentResponse
 from app.api.schemas.pagination import Page
 from app.api.schemas.review import ReviewSaveRequest, ReviewSaveResponse
 from app.api.schemas.suggestion import (
-    BulkAcceptResponse,
-    BulkRejectResponse,
     PatchSuggestionsRequest,
     PatchSuggestionsResponse,
     SuggestionResponse,
@@ -63,37 +57,16 @@ _suggestion_list_adapter: TypeAdapter[list[SuggestionResponse]] = TypeAdapter(
     list[SuggestionResponse]
 )
 
-# L-4
 PageSuggestionResponse = Page[SuggestionResponse]
 
-# R-9: допустимые значения фильтра статуса правки
 _SUGGESTION_STATUS_FILTER_MAP: dict[str, SuggestionStatusVO] = {
     vo.value: vo for vo in SuggestionStatusVO
 }
-
-# Дата окончания поддержки deprecated aliases (ISO 8601)
-_DEPRECATED_SUNSET = "2027-01-01"
 
 router = APIRouter(
     prefix="/projects/{project_id}/documents/{document_id}/suggestions",
     tags=["suggestions"],
 )
-
-
-# ---------------------------------------------------------------------------
-# M-5: DecisionContext dataclass вместо 7-аргументной сигнатуры
-# ---------------------------------------------------------------------------
-
-@dataclass
-class DecisionContext:
-    """Контекст принятия решения по одной правке."""
-    action: str  # "accept" | "reject"
-    document_id: uuid.UUID
-    suggestion_id: uuid.UUID
-    project: Project
-    current_user: User
-    suggestion_service: SuggestionService
-    audit_log_service: AuditLogService
 
 
 # ---------------------------------------------------------------------------
@@ -146,31 +119,8 @@ def _parse_if_match(if_match: str | None) -> int | None:
         ) from None
 
 
-async def _decide_suggestion(ctx: DecisionContext) -> SuggestionResponse:
-    """M-5: единая точка принятия решения по правке через DecisionContext."""
-    service_method = (
-        ctx.suggestion_service.accept_suggestion
-        if ctx.action == "accept"
-        else ctx.suggestion_service.reject_suggestion
-    )
-    try:
-        suggestion = await service_method(
-            ctx.project.id, ctx.document_id, ctx.suggestion_id, ctx.current_user.id
-        )
-    except (DocumentNotFoundError, SuggestionNotFoundError, StaleSuggestionJobError) as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except (InvalidDocumentStatusError, SuggestionAlreadyDecidedError) as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-
-    audit_action = AuditActionVO.ACCEPT if ctx.action == "accept" else AuditActionVO.REJECT
-    await _safe_single_log(
-        ctx.audit_log_service, ctx.current_user.id, suggestion.id, audit_action
-    )
-    return SuggestionResponse.model_validate(suggestion)
-
-
 # ---------------------------------------------------------------------------
-# Endpoints
+# GET /suggestions
 # ---------------------------------------------------------------------------
 
 @router.get("", response_model=PageSuggestionResponse)
@@ -217,6 +167,10 @@ async def list_suggestions(
     )
 
 
+# ---------------------------------------------------------------------------
+# GET /suggestions/{suggestion_id}
+# ---------------------------------------------------------------------------
+
 @router.get("/{suggestion_id}", response_model=SuggestionResponse)
 async def get_suggestion(
     document_id: uuid.UUID,
@@ -235,7 +189,7 @@ async def get_suggestion(
 
 
 # ---------------------------------------------------------------------------
-# PATCH /suggestions — единый эндпоинт обновления статуса (single + bulk)
+# PATCH /suggestions — единственный endpoint изменения статуса (single + bulk)
 # ---------------------------------------------------------------------------
 
 @router.patch(
@@ -275,10 +229,8 @@ async def patch_suggestions(
     | accepted   | pending    | сбросить решение    |
     | rejected   | pending    | сбросить решение    |
     | decided    | pending    | массовый reset      |
-
-    Заменяет: `POST /accept`, `POST /reject`, `POST /accept-all`, `POST /reject-all`.
     """
-    target_status = payload.status  # "accepted" | "rejected" | "pending"
+    target_status = payload.status
 
     try:
         result = await suggestion_service.patch_suggestions(
@@ -291,10 +243,13 @@ async def patch_suggestions(
         )
     except (DocumentNotFoundError, SuggestionNotFoundError) as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except (InvalidDocumentStatusError, SuggestionAlreadyDecidedError, SuggestionResetNotAllowedError) as exc:
+    except (
+        InvalidDocumentStatusError,
+        SuggestionAlreadyDecidedError,
+        SuggestionResetNotAllowedError,
+    ) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    # Audit log: определяем действие по целевому статусу
     action_map = {
         "accepted": AuditActionVO.ACCEPT,
         "rejected": AuditActionVO.REJECT,
@@ -402,7 +357,7 @@ async def review_save(
 
 
 # ---------------------------------------------------------------------------
-# POST /{id}/reset — сброс решения по одной правке
+# POST /{suggestion_id}/reset — сброс решения по одной правке
 # ---------------------------------------------------------------------------
 
 @router.post("/{suggestion_id}/reset", response_model=SuggestionResponse)
@@ -416,7 +371,9 @@ async def reset_suggestion(
 ) -> SuggestionResponse:
     """Отменить ранее принятое или отклонённое решение — вернуть правку в PENDING.
 
-    Доступно только пока документ в статусе `awaiting_approval`.
+    Возвращает полный SuggestionResponse с decided_by=null, decided_at=null.
+    Используй PATCH /suggestions с {"ids":[id], "status":"pending"} если нужен
+    только счётчик без полного объекта правки.
     """
     try:
         suggestion = await suggestion_service.reset_suggestion(
@@ -431,142 +388,3 @@ async def reset_suggestion(
         audit_log_service, current_user.id, suggestion.id, AuditActionVO.RESET
     )
     return SuggestionResponse.model_validate(suggestion)
-
-
-# ---------------------------------------------------------------------------
-# DEPRECATED ALIASES — будут удалены после 2027-01-01
-# Все редиректят на PATCH /suggestions с нужным телом через 308.
-# include_in_schema=False — скрыты из OpenAPI / Swagger UI.
-# ---------------------------------------------------------------------------
-
-def _deprecated_response(redirect_url: str) -> RedirectResponse:
-    """308 Permanent Redirect с маркерами deprecation."""
-    response = RedirectResponse(url=redirect_url, status_code=308)
-    response.headers["X-Deprecated"] = "true"
-    response.headers["Sunset"] = _DEPRECATED_SUNSET
-    response.headers["Link"] = (
-        f'<{redirect_url}>; rel="successor-version"'
-    )
-    return response
-
-
-@router.post(
-    "/{suggestion_id}/accept",
-    include_in_schema=False,
-    deprecated=True,
-)
-async def accept_suggestion_deprecated(
-    document_id: uuid.UUID,
-    suggestion_id: uuid.UUID,
-    project: Project = Depends(get_allowed_project),
-    current_user: User = Depends(get_current_user),
-    suggestion_service: SuggestionService = Depends(get_suggestion_service),
-    audit_log_service: AuditLogService = Depends(get_audit_log_service),
-) -> SuggestionResponse:
-    """@deprecated — используйте PATCH /suggestions с {"ids":[id],"status":"accepted"}."""
-    return await _decide_suggestion(DecisionContext(
-        action="accept",
-        document_id=document_id,
-        suggestion_id=suggestion_id,
-        project=project,
-        current_user=current_user,
-        suggestion_service=suggestion_service,
-        audit_log_service=audit_log_service,
-    ))
-
-
-@router.post(
-    "/{suggestion_id}/reject",
-    include_in_schema=False,
-    deprecated=True,
-)
-async def reject_suggestion_deprecated(
-    document_id: uuid.UUID,
-    suggestion_id: uuid.UUID,
-    project: Project = Depends(get_allowed_project),
-    current_user: User = Depends(get_current_user),
-    suggestion_service: SuggestionService = Depends(get_suggestion_service),
-    audit_log_service: AuditLogService = Depends(get_audit_log_service),
-) -> SuggestionResponse:
-    """@deprecated — используйте PATCH /suggestions с {"ids":[id],"status":"rejected"}."""
-    return await _decide_suggestion(DecisionContext(
-        action="reject",
-        document_id=document_id,
-        suggestion_id=suggestion_id,
-        project=project,
-        current_user=current_user,
-        suggestion_service=suggestion_service,
-        audit_log_service=audit_log_service,
-    ))
-
-
-@router.post(
-    "/accept-all",
-    include_in_schema=False,
-    deprecated=True,
-)
-async def bulk_accept_suggestions_deprecated(
-    document_id: uuid.UUID,
-    project: Project = Depends(get_allowed_project),
-    current_user: User = Depends(get_current_user),
-    suggestion_service: SuggestionService = Depends(get_suggestion_service),
-    audit_log_service: AuditLogService = Depends(get_audit_log_service),
-) -> BulkAcceptResponse:
-    """@deprecated — используйте PATCH /suggestions с {"filter":"pending","status":"accepted"}."""
-    try:
-        result = await suggestion_service.bulk_accept(
-            project.id, document_id, current_user.id
-        )
-    except (DocumentNotFoundError, SuggestionNotFoundError) as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-
-    accepted_ids = [s.id for s in result.suggestions]
-    await _safe_bulk_log(
-        audit_log_service,
-        current_user.id,
-        [(sid, AuditActionVO.BULK_ACCEPT) for sid in accepted_ids],
-    )
-    doc = result.document
-    return BulkAcceptResponse(
-        accepted_count=len(accepted_ids),
-        document_status=doc.status.value if doc else None,
-        review_version=doc.review_version if doc else None,
-    )
-
-
-@router.post(
-    "/reject-all",
-    include_in_schema=False,
-    deprecated=True,
-)
-async def bulk_reject_suggestions_deprecated(
-    document_id: uuid.UUID,
-    project: Project = Depends(get_allowed_project),
-    current_user: User = Depends(get_current_user),
-    suggestion_service: SuggestionService = Depends(get_suggestion_service),
-    audit_log_service: AuditLogService = Depends(get_audit_log_service),
-) -> BulkRejectResponse:
-    """@deprecated — используйте PATCH /suggestions с {"filter":"pending","status":"rejected"}."""
-    try:
-        result = await suggestion_service.bulk_reject(
-            project.id, document_id, current_user.id
-        )
-    except (DocumentNotFoundError, SuggestionNotFoundError) as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-
-    rejected_ids = [s.id for s in result.suggestions]
-    await _safe_bulk_log(
-        audit_log_service,
-        current_user.id,
-        [(sid, AuditActionVO.REJECT) for sid in rejected_ids],
-    )
-    doc = result.document
-    return BulkRejectResponse(
-        rejected_count=len(rejected_ids),
-        document_status=doc.status.value if doc else None,
-        review_version=doc.review_version if doc else None,
-    )
