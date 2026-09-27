@@ -1,18 +1,17 @@
 """
 DashboardRepository — реальные SQL-агрегаты для GET /dashboard.
 
-CRIT-D4: класс теперь наследует IDashboardQueryService, чтобы
-get_dashboard_service мог передать его как dashboard_qs= в DashboardService.
+CRIT-D4: класс теперь наследует IDashboardQueryService.
 
 Запросы:
   - get_stats                 единый COUNT(*) FILTER вместо трёх отдельных (PERF-1)
   - activity_last_7_days      GROUP BY date за последние 7 дней (из document_opens)
-  - get_attention_documents   Топ-N AWAITING_APPROVAL по pending_suggestions DESC + status
-  - get_recent_documents      5 последних открытых + счётчики правок (total/resolved)
+  - get_attention_documents   Топ-N AWAITING_APPROVAL по pending_suggestions DESC
+  - get_recent_documents      5 последних открытых + счётчики правок (OPT-2: 1 запрос)
   - upsert_open               ON CONFLICT DO UPDATE last_opened_at
 
-OPT-2: get_recent_documents переписан с коррелированных scalar_subquery()
-  на один LEFT JOIN + COUNT FILTER. Итог: N+1 запросов → 1 запрос.
+N-7: удалён лишний аргумент id= из pg_insert(DocumentOpen) — у модели нет
+     поля id, PK составной (user_id, document_id).
 """
 from __future__ import annotations
 
@@ -36,24 +35,14 @@ class DashboardRepository(IDashboardQueryService):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    # ------------------------------------------------------------------
-    # Вспомогательный подзапрос: документы, принадлежащие пользователю
-    # ------------------------------------------------------------------
-
     def _owned_docs_q(self, owner_id: uuid.UUID):
-        """SELECT d FROM documents JOIN projects WHERE projects.owner_id = owner_id"""
         return (
             select(Document)
             .join(Project, Document.project_id == Project.id)
             .where(Project.owner_id == owner_id)
         )
 
-    # ------------------------------------------------------------------
-    # PERF-1: единый агрегатный запрос вместо трёх отдельных COUNT
-    # ------------------------------------------------------------------
-
     async def get_stats(self, owner_id: uuid.UUID) -> dict:
-        """Возвращает {total, awaiting, ready} за один SQL-запрос."""
         q = (
             select(
                 func.count().label("total"),
@@ -74,14 +63,9 @@ class DashboardRepository(IDashboardQueryService):
         row = (await self._session.execute(q)).one()
         return {"total": row.total, "awaiting": row.awaiting, "ready": row.ready}
 
-    # ------------------------------------------------------------------
-    # Activity
-    # ------------------------------------------------------------------
-
     async def get_activity_last_7_days(
         self, owner_id: uuid.UUID
     ) -> list[dict]:
-        """Возвращает [{date: str, opens: int}] за последние 7 дней."""
         since = datetime.now(tz=timezone.utc) - timedelta(days=6)
         day_col = func.date_trunc("day", DocumentOpen.last_opened_at).label("day")
         q = (
@@ -104,17 +88,9 @@ class DashboardRepository(IDashboardQueryService):
             for i in range(6, -1, -1)
         ]
 
-    # ------------------------------------------------------------------
-    # Attention documents
-    # ------------------------------------------------------------------
-
     async def get_attention_documents(
         self, owner_id: uuid.UUID, limit: int = 4
     ) -> list[dict]:
-        """Топ-N документов в AWAITING_APPROVAL, сортировка по pending_suggestions DESC.
-
-        UI-fix: теперь возвращает поле status для цветного бейджа на плашке.
-        """
         pending_count = (
             select(func.count(Suggestion.id))
             .where(
@@ -156,18 +132,9 @@ class DashboardRepository(IDashboardQueryService):
             for r in rows
         ]
 
-    # ------------------------------------------------------------------
-    # Recent documents
-    # ------------------------------------------------------------------
-
     async def get_recent_documents(
         self, user_id: uuid.UUID, limit: int = 5
     ) -> list[dict]:
-        """N последних открытых документов пользователя.
-
-        OPT-2: коррелированные scalar_subquery() (N×2 отдельных COUNT-запроса)
-        заменены на LEFT JOIN + COUNT FILTER, итог: 1 запрос вместо N+1.
-        """
         q = (
             select(
                 Document.id,
@@ -186,6 +153,7 @@ class DashboardRepository(IDashboardQueryService):
             )
             .join(DocumentOpen, DocumentOpen.document_id == Document.id)
             .join(Project, Document.project_id == Project.id)
+            # N-1: Suggestion теперь имеет document_id — JOIN напрямую, без AnalysisJob.
             .outerjoin(Suggestion, Suggestion.document_id == Document.id)
             .where(DocumentOpen.user_id == user_id)
             .group_by(
@@ -214,17 +182,13 @@ class DashboardRepository(IDashboardQueryService):
             for r in rows
         ]
 
-    # ------------------------------------------------------------------
-    # Track open
-    # ------------------------------------------------------------------
-
     async def upsert_open(self, user_id: uuid.UUID, document_id: uuid.UUID) -> None:
-        """Упсерт last_opened_at атомарно (PostgreSQL ON CONFLICT DO UPDATE)."""
         now = datetime.now(tz=timezone.utc)
         stmt = (
             pg_insert(DocumentOpen)
             .values(
-                id=uuid.uuid4(),
+                # N-7: удалён id=uuid.uuid4() — у DocumentOpen нет поля id,
+                # PK составной (user_id, document_id). Лишний аргумент вызывал CompileError.
                 user_id=user_id,
                 document_id=document_id,
                 last_opened_at=now,

@@ -19,14 +19,13 @@ _values = lambda e: [m.value for m in e]  # noqa: E731
 class Suggestion(Base):
     __tablename__ = "suggestions"
     __table_args__ = (
-        # Уверенность модели: от 0.000 до 1.000.
         CheckConstraint(
             "confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)",
             name="ck_suggestions_confidence_range",
         ),
-        # Составной индекс для основного запроса: pending suggestions по job.
+        # N-5: index=True на analysis_job_id удалён — ix_suggestions_job_status покрывает его.
         Index("ix_suggestions_job_status", "analysis_job_id", "status"),
-        # R-2: индекс по document_id для прямых запросов без JOIN через AnalysisJob.
+        # N-6: index=True на document_id удалён — ix_suggestions_document_status покрывает его.
         Index("ix_suggestions_document_status", "document_id", "status"),
     )
 
@@ -35,20 +34,16 @@ class Suggestion(Base):
         UUID(as_uuid=True),
         ForeignKey("analysis_jobs.id", ondelete="CASCADE"),
         nullable=False,
-        index=True,
+        # N-5: index=True удалён — ix_suggestions_job_status (analysis_job_id, status) покрывает всё.
     )
-    # R-2: денормализованный document_id — избавляет JOIN через analysis_jobs
-    # в dashboard-запросах и list_with_total. Заполняется при bulk_create
-    # из analysis_job.document_id — не может расходиться с родительским job.
+    # R-2: денормализованный document_id — избавляет от JOIN через analysis_jobs.
+    # N-6: index=True удалён — ix_suggestions_document_status (document_id, status) покрывает всё.
     document_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("documents.id", ondelete="CASCADE"),
         nullable=False,
-        index=True,
     )
     section_ref: Mapped[str] = mapped_column(String(500), nullable=False)
-    # Якорная привязка к конкретному блоку документа.
-    # FK SET NULL: удаление блока не должно удалять правку.
     block_id: Mapped[str | None] = mapped_column(
         String(255),
         ForeignKey("document_blocks.block_ref", ondelete="SET NULL"),

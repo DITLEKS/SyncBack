@@ -151,13 +151,14 @@ class DocumentRepository(IDocumentRepository):
     ) -> tuple[list[dict[str, Any]], int]:
         """OPT-3: CTE + window COUNT() OVER () — 1 round-trip вместо 2.
 
-        OPT-5: поиск по name использует ilike('%...%'), который не использует
-        B-tree индекс. Для ускорения поиска применить GIN-индекс (pg_trgm).
-        Миграция: CREATE EXTENSION IF NOT EXISTS pg_trgm;
-                    CREATE INDEX ix_documents_name_trgm
-                      ON documents USING gin (name gin_trgm_ops);
+        N-1: Suggestion теперь имеет document_id — outerjoin напрямую без AnalysisJob.
+        Итог: убран промежуточный JOIN через analysis_jobs для счётчиков suggestions.
+
+        OPT-5: поиск по name использует ilike('%...%').
+        Для ускорения применить GIN-индекс (pg_trgm):
+          CREATE EXTENSION IF NOT EXISTS pg_trgm;
+          CREATE INDEX ix_documents_name_trgm ON documents USING gin (name gin_trgm_ops);
         """
-        from app.infrastructure.db.models.analysis_job import AnalysisJob as AJ
         from app.infrastructure.db.models.document import Document as M
         from app.infrastructure.db.models.enums import SuggestionStatus
         from app.infrastructure.db.models.project import Project as P
@@ -166,24 +167,21 @@ class DocumentRepository(IDocumentRepository):
         if sort_by not in _SORT_COLUMNS:
             sort_by = "updated_at"
 
-        suggestions_total = (
-            func.count(S.id)
-            .filter(AJ.document_id == M.id)
-            .label("suggestions_total")
-        )
+        # N-1: счётчики suggestions считаем напрямую через S.document_id — без JOIN через AJ.
+        suggestions_total = func.count(S.id).label("suggestions_total")
         suggestions_pending = (
             func.count(S.id)
-            .filter(AJ.document_id == M.id, S.status == SuggestionStatus.PENDING)
+            .filter(S.status == SuggestionStatus.PENDING)
             .label("suggestions_pending")
         )
         suggestions_accepted = (
             func.count(S.id)
-            .filter(AJ.document_id == M.id, S.status == SuggestionStatus.ACCEPTED)
+            .filter(S.status == SuggestionStatus.ACCEPTED)
             .label("suggestions_accepted")
         )
         suggestions_rejected = (
             func.count(S.id)
-            .filter(AJ.document_id == M.id, S.status == SuggestionStatus.REJECTED)
+            .filter(S.status == SuggestionStatus.REJECTED)
             .label("suggestions_rejected")
         )
 
@@ -197,8 +195,8 @@ class DocumentRepository(IDocumentRepository):
                 suggestions_rejected,
             )
             .join(P, M.project_id == P.id)
-            .outerjoin(AJ, AJ.document_id == M.id)
-            .outerjoin(S, S.analysis_job_id == AJ.id)
+            # N-1: прямой JOIN Suggestion.document_id == M.id, AJ больше не нужен.
+            .outerjoin(S, S.document_id == M.id)
             .where(P.owner_id == user_id)
             .group_by(M.id, P.name)
         )
@@ -208,27 +206,20 @@ class DocumentRepository(IDocumentRepository):
 
         if outdated:
             pending_exists = exists(
-                select(S.id)
-                .join(AJ, S.analysis_job_id == AJ.id)
-                .where(
-                    AJ.document_id == M.id,
+                select(S.id).where(
+                    S.document_id == M.id,
                     S.status == SuggestionStatus.PENDING,
                 )
             )
             base_q = base_q.where(pending_exists)
 
         if search:
-            # OPT-5: ilike('%...%') без GIN-индекса — seq-scan.
-            # Применить миграцию ix_documents_name_trgm (см. докстринг метода).
             safe_search = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             base_q = base_q.where(M.name.ilike(f"%{safe_search}%", escape="\\"))
 
         sort_col = getattr(M, sort_by)
         order_expr = sort_col.asc() if sort_dir == "asc" else sort_col.desc()
 
-        # OPT-3: CTE + window COUNT() OVER () — один round-trip вместо двух.
-        # PostgreSQL вычисляет CTE один раз, потом page выбирает из него
-        # LIMIT/OFFSET + total через window-функцию без повторного subquery.
         cte = base_q.cte("docs_cte")
         paged_q = (
             select(
@@ -279,6 +270,7 @@ class DocumentRepository(IDocumentRepository):
         document: "Document",
         export_key: str,
     ) -> None:
+        # N-2: поле exported_storage_key добавлено в модель Document.
         document.exported_storage_key = export_key
         await self._session.flush()
 

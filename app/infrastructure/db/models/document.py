@@ -44,12 +44,13 @@ class Document(Base):
         default=DocumentStatus.DRAFT,
         server_default=DocumentStatus.DRAFT.value,
     )
-    # R-1: current_analysis_job_id удалён — это была круговая FK
-    # (documents → analysis_jobs → documents), нигде не читалась в запросах.
-    # Текущий job получается через:
-    #   SELECT * FROM analysis_jobs WHERE document_id = ? ORDER BY created_at DESC LIMIT 1
-    # с частичным индексом ix_analysis_jobs_doc_latest (см. миграцию 0017).
+    # R-1: current_analysis_job_id удалён — круговая FK.
+    # Текущий job: SELECT * FROM analysis_jobs WHERE document_id = ? ORDER BY created_at DESC LIMIT 1
+    # с индексом ix_analysis_jobs_doc_latest (миграция 0017).
     review_version = Column(Integer, nullable=False, default=0, server_default="0")
+    # N-2: добавлено поле exported_storage_key — используется в
+    # DocumentRepository.update_exported_key(). Без поля метод падал с AttributeError.
+    exported_storage_key = Column(String(1024), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime(timezone=True),

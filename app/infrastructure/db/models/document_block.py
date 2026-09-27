@@ -31,6 +31,8 @@ class DocumentBlock(Base):
             "block_type = 'heading' OR heading_level IS NULL",
             name="ck_document_blocks_heading_level",
         ),
+        # N-4: index=True на document_id удалён — составной индекс ниже покрывает все
+        # запросы WHERE document_id = ?, ORDER BY position.
         Index("ix_document_blocks_doc_position", "document_id", "position"),
     )
 
@@ -39,18 +41,19 @@ class DocumentBlock(Base):
         UUID(as_uuid=True),
         ForeignKey("documents.id", ondelete="CASCADE"),
         nullable=False,
-        index=True,
+        # N-4: index=True удалён — ix_document_blocks_doc_position уже покрывает document_id.
     )
     # Стабильный строковый идентификатор блока (например, "h2-3", "p-12").
     # Именно на него ссылаются suggestions.block_id.
     block_ref: Mapped[str] = mapped_column(String(255), nullable=False)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     block_type: Mapped[BlockType] = mapped_column(
-        SAEnum(BlockType, name="block_type_enum", values_callable=lambda e: [m.value for e in e]),
+        # N-3 CRITICAL FIX: было "for e in e" (опечатка) → "for m in e".
+        # Без фикса SQLAlchemy передавал имена членов enum (HEADING, PARAGRAPH…)
+        # вместо значений (heading, paragraph…) → InvalidTextRepresentationError при INSERT.
+        SAEnum(BlockType, name="block_type_enum", values_callable=lambda e: [m.value for m in e]),
         nullable=False,
     )
     # R-3: raw_markdown удалён — дублировал content для markdown-документов.
-    # Формат источника определяется через Document.format; повторное хранение
-    # исходника в блоке давало ~50 % лишнего объёма таблицы для md-документов.
     content: Mapped[str] = mapped_column(Text, nullable=False)
     heading_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
