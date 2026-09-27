@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, Column, DateTime, Enum, ForeignKey, String, Text, func
+from sqlalchemy import CheckConstraint, Column, DateTime, Enum, ForeignKey, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -13,13 +13,12 @@ from app.infrastructure.db.models.source_scope import SourceScope
 class Source(Base):
     __tablename__ = "sources"
     __table_args__ = (
-        # Для FILE/TEXT обязателен storage_key или text_content.
-        # Для URL обязателен url.
+        # После миграции 0018 SourceType содержит только FILE и URL.
+        # Ветка type='text' удалена — text_content более не используется.
         CheckConstraint(
             """
             (type = 'url'  AND url IS NOT NULL) OR
-            (type = 'file' AND storage_key IS NOT NULL) OR
-            (type = 'text' AND text_content IS NOT NULL)
+            (type = 'file' AND storage_key IS NOT NULL)
             """,
             name="ck_sources_type_field_consistency",
         ),
@@ -38,7 +37,6 @@ class Source(Base):
         nullable=False,
     )
     storage_key = Column(String(1024), nullable=True)
-    text_content = Column(Text, nullable=True)
     url = Column(String(2048), nullable=True)
     # R-4: uploaded_at удалён — дублировал created_at (server_default=func.now()).
     # list_by_project теперь сортирует по created_at DESC.

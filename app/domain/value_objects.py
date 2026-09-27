@@ -33,6 +33,7 @@ class SuggestionStatusVO(StrEnum):
 
 class AnalysisJobStatusVO(StrEnum):
     PENDING         = "pending"
+    DISPATCHED      = "dispatched"   # синхронизировано с enums.AnalysisJobStatus
     PROCESSING      = "processing"
     SUCCESS         = "success"
     PARTIAL_SUCCESS = "partial_success"
@@ -81,6 +82,7 @@ class AuditActionVO(StrEnum):
     FINALIZE_REVIEW = "finalize_review"  # S-3 (issue #37) — used by router
     REOPEN          = "reopen"
     RESET           = "reset"            # отмена ранее принятого/отклонённого решения
+    DOWNLOAD        = "download"         # синхронизировано с enums.AuditAction
 
 
 # ---------------------------------------------------------------------------

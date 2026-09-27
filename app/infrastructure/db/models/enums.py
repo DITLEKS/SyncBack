@@ -45,9 +45,12 @@ class SuggestionStatus(enum.StrEnum):
 
 
 class AuditAction(enum.StrEnum):
-    ACCEPT      = "accept"
-    REJECT      = "reject"
-    BULK_ACCEPT = "bulk_accept"
-    FINALIZE    = "finalize"
-    REOPEN      = "reopen"
-    DOWNLOAD    = "download"
+    ACCEPT          = "accept"
+    REJECT          = "reject"
+    BULK_ACCEPT     = "bulk_accept"
+    BULK_REJECT     = "bulk_reject"      # синхронизировано с AuditActionVO
+    FINALIZE        = "finalize"
+    FINALIZE_REVIEW = "finalize_review"  # синхронизировано с AuditActionVO
+    REOPEN          = "reopen"
+    RESET           = "reset"            # синхронизировано с AuditActionVO
+    DOWNLOAD        = "download"
