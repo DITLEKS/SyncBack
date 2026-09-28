@@ -37,7 +37,7 @@ jobs:
           pytest -m "not integration" tests/ -v \
             --cov=app \
             --cov-report=term-missing \
-            --cov-fail-under=60
+            --cov-fail-under=70
 
   check-migrations:
     runs-on: ubuntu-latest
@@ -99,6 +99,17 @@ jobs:
             echo "ERROR: alembic current is not at head"
             exit 1
           fi
+
+      - name: Downgrade to base and re-upgrade (round-trip)
+        run: |
+          alembic downgrade base
+          alembic upgrade head
+          CURRENT=$(alembic current 2>&1)
+          if ! echo "$CURRENT" | grep -q '(head)'; then
+            echo "ERROR: round-trip upgrade failed"
+            exit 1
+          fi
+          echo "OK: round-trip migration confirmed"
 
   integration-tests:
     runs-on: ubuntu-latest
@@ -169,11 +180,12 @@ jobs:
       - name: Apply migrations
         run: alembic upgrade head
 
-      - name: Run integration tests with coverage (informational)
+      - name: Run integration tests with coverage
         run: |
           pytest -m integration tests/integration -v \
             --cov=app \
-            --cov-report=term-missing
+            --cov-report=term-missing \
+            --cov-fail-under=65
 
   build-images:
     runs-on: ubuntu-latest
