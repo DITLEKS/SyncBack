@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     env: Literal["local", "staging", "production"] = "local"
     debug: bool = False
 
+    # MVP: самостоятельная регистрация отключена по умолчанию.
+    # Пользователи поступают из AD или через seed-миграцию.
+    # Для включения установить REGISTRATION_ENABLED=true в .env.
+    registration_enabled: bool = False
+
     database_url: str
 
     redis_url: str

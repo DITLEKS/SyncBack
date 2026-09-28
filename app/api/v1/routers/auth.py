@@ -6,6 +6,10 @@ M-block: добавлен rate limit 5/minute на POST /register (защита 
 перебора паролей до достижения lockout на уровне сервиса).
 Лимит применяется по IP клиента; при превышении возвращается HTTP 429
 с заголовком Retry-After.
+
+MVP: REGISTRATION_ENABLED=false по умолчанию.
+POST /register возвращает 403 пока флаг не включён.
+Пользователи создаются через AD-интеграцию или seed-миграцию.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -19,6 +23,7 @@ from app.api.schemas.auth import (
     UserRegisterRequest,
     UserResponse,
 )
+from app.core.config import Settings, get_settings
 from app.core.dependencies import get_auth_service
 from app.core.limiter import limiter
 from app.domain.exceptions import (
@@ -39,11 +44,19 @@ async def register(
     request: Request,
     payload: UserRegisterRequest,
     auth_service: AuthService = Depends(get_auth_service),
+    settings: Settings = Depends(get_settings),
 ) -> UserResponse:
     """Регистрация нового пользователя.
 
+    MVP: endpoint закрыт флагом REGISTRATION_ENABLED (default=False).
+    При отключённой регистрации возвращает 403.
     Rate limit: 5 запросов в минуту с одного IP.
     """
+    if not settings.registration_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Регистрация отключена в текущей конфигурации.",
+        )
     try:
         user = await auth_service.register(payload.email, payload.password)
     except EmailAlreadyRegisteredError as exc:
