@@ -1,5 +1,6 @@
 import pytest
 import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.infrastructure.cache.redis_client as redis_client_module
 from app.infrastructure.db.session import db_session_context
@@ -7,9 +8,16 @@ from app.infrastructure.storage.minio_storage import MinioStorage
 
 
 @pytest_asyncio.fixture
-async def db_session():
+async def db_session() -> AsyncSession:
     async with db_session_context() as session:
         yield session
+
+
+# Alias used by test_e2e_document_lifecycle.py — both names resolve to the
+# same real PostgreSQL session so all E2E helpers can share one transaction.
+@pytest_asyncio.fixture
+async def pg_session(db_session: AsyncSession) -> AsyncSession:
+    yield db_session
 
 
 @pytest.fixture

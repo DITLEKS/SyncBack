@@ -1,15 +1,15 @@
 """
 Миграция: таблица document_opens для трекинга last_opened_at.
 
-Revision ID: 0010
-Revises: 0009
+Revision ID: 0010b
+Revises: 0010a
 Create Date: 2026-09-20
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0010"
-down_revision = "0009"
+revision = "0010b"
+down_revision = "0010a"
 branch_labels = None
 depends_on = None
 
@@ -37,13 +37,11 @@ def upgrade() -> None:
             server_default=sa.func.now(),
         ),
     )
-    # уникальный индекс (user_id, document_id) — один трек на пару
     op.create_unique_constraint(
         "uq_document_opens_user_document",
         "document_opens",
         ["user_id", "document_id"],
     )
-    # индекс для быстрой выборки последних открытий по пользователю
     op.create_index(
         "ix_document_opens_user_opened",
         "document_opens",

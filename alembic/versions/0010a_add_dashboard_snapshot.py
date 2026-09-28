@@ -1,14 +1,14 @@
 """
 add dashboard_snapshots table
 
-Revision ID: 0010
+Revision ID: 0010a
 Revises: 0009
 Create Date: 2026-09-27
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0010"
+revision = "0010a"
 down_revision = "0009"
 branch_labels = None
 depends_on = None

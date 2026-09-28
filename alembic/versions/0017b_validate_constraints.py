@@ -1,7 +1,7 @@
 """Validate NOT VALID constraints added in 0016.
 
-Revision ID: 0017
-Revises: 0016
+Revision ID: 0017b
+Revises: 0017a
 Create Date: 2026-09-27
 
 All constraints were added with NOT VALID in 0016 to avoid full-table scans
@@ -9,14 +9,11 @@ during the migration itself. This follow-up migration validates them.
 
 VALIDATE CONSTRAINT takes ShareUpdateExclusiveLock (allows reads and writes)
 instead of AccessExclusiveLock, so it is safe to run on a live production DB.
-
-Run this migration during a low-traffic window or with a statement_timeout
-set appropriately for your dataset size.
 """
 from alembic import op
 
-revision = "0017"
-down_revision = "0016"
+revision = "0017b"
+down_revision = "0017a"
 branch_labels = None
 depends_on = None
 
@@ -45,7 +42,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Re-mark constraints as NOT VALID (no data is changed)
-    # PostgreSQL does not support directly re-marking as NOT VALID after validation;
-    # the safest downgrade is a no-op. Constraints remain valid but marked validated.
+    # VALIDATE CONSTRAINT cannot be reversed — constraints remain validated.
     pass

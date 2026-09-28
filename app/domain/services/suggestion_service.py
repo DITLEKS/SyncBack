@@ -35,6 +35,12 @@ review #3: reset_suggestion выровнен с _decide — проверка `if
 review #5: удалены дублирующие импорты внутри atomic_review_save —
   ReviewDecisions, SuggestionDecision и OptimisticLockError уже импортированы
   на уровне модуля.
+
+PR4-FIX:
+  - count_by_document_and_status() добавлен — делегирует в репозиторий
+    по каждому статусу; устраняет AttributeError в editor._safe_count_by_status.
+  - reset_suggestion(): если reset_status() вернул None (concurrent reset
+    уже сбросил правку) — бросаем SuggestionResetNotAllowedError.
 """
 from __future__ import annotations
 
@@ -212,6 +218,34 @@ class SuggestionService:
             for s in suggestions
         ]
 
+    async def count_by_document_and_status(
+        self,
+        project_id: uuid.UUID,
+        document_id: uuid.UUID,
+    ) -> dict[str, int]:
+        """PR4-FIX: агрегатный счётчик правок по статусам для текущего job.
+
+        Используется в editor._safe_count_by_status() для корректного
+        отображения counters.pending/accepted/rejected при пагинации.
+        Три отдельных COUNT вместо O(n) прохода по странице.
+        Возвращает {'pending': N, 'accepted': N, 'rejected': N}.
+        """
+        async with self._uow:
+            document = await self._get_document_or_raise(project_id, document_id)
+            if document.current_analysis_job_id is None:
+                return {"pending": 0, "accepted": 0, "rejected": 0}
+            job_id = document.current_analysis_job_id
+            pending = await self._uow.suggestions.count_by_analysis_job_and_status(
+                job_id, SuggestionStatusVO.PENDING
+            )
+            accepted = await self._uow.suggestions.count_by_analysis_job_and_status(
+                job_id, SuggestionStatusVO.ACCEPTED
+            )
+            rejected = await self._uow.suggestions.count_by_analysis_job_and_status(
+                job_id, SuggestionStatusVO.REJECTED
+            )
+        return {"pending": pending, "accepted": accepted, "rejected": rejected}
+
     # ------------------------------------------------------------------
     # Single-suggestion decisions
     # ------------------------------------------------------------------
@@ -282,15 +316,14 @@ class SuggestionService:
         """Отменить ранее принятое или отклонённое решение — вернуть в PENDING.
 
         Бизнес-правила:
-          1. Документ обязан быть в статусе AWAITING_APPROVAL — только
-             в этом окне редактор имеет право менять решения.
+          1. Документ обязан быть в статусе AWAITING_APPROVAL.
           2. Правка обязана принадлежать текущему analysis job (stale-проверка).
-          3. Правка должна быть ACCEPTED или REJECTED — сбрасывать PENDING
-             бессмысленно и является ошибкой клиента (409).
+          3. Правка должна быть ACCEPTED или REJECTED.
 
-        review #3: проверка `if updated is None` удалена — выровнено с _decide.
-        reset_status() бросает SuggestionResetNotAllowedError при concurrent reset
-        (параллельный запрос уже сбросил правку), а не возвращает None.
+        PR4-FIX: если reset_status() вернул None — правка была сброшена
+        параллельным запросом между нашей проверкой и UPDATE.
+        Бросаем SuggestionResetNotAllowedError (409) вместо возврата None,
+        который привёл бы к ошибке сериализации ответа.
         """
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
@@ -302,9 +335,13 @@ class SuggestionService:
                     f"Правка {suggestion_id} уже в статусе PENDING — сбрасывать нечего"
                 )
 
-            # review #3: reset_status() бросает исключение при concurrent reset —
-            # None не возвращается, проверка `if updated is None` удалена.
             updated = await self._uow.suggestions.reset_status(suggestion)
+            if updated is None:
+                # Concurrent reset: параллельный запрос уже сбросил эту правку.
+                raise SuggestionResetNotAllowedError(
+                    f"Правка {suggestion_id} была сброшена параллельным запросом. "
+                    "Обновите список правок и повторите."
+                )
             await self._uow.commit()
         return updated
 
