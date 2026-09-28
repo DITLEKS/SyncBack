@@ -1,4 +1,4 @@
-"""Add documents.current_analysis_job_id and extend document_status enum.
+"""Add documents.current_analysis_job_id.
 
 Revision ID: 0023
 Revises: 0022
@@ -8,12 +8,11 @@ Changes:
   1. documents.current_analysis_job_id — UUID nullable FK -> analysis_jobs(id)
      ON DELETE SET NULL. Used for fast access to the current job without JOIN.
   2. ix_documents_current_analysis_job_id — partial index for reverse lookup.
-  3. document_status enum: adds 'error' and 'cancelled' (IF NOT EXISTS — safe
-     to apply even if values were added by an earlier migration).
 
-downgrade: DROP COLUMN, DROP INDEX, and safe-remove new enum values via
-     recreate (PostgreSQL does not support DROP VALUE for enum).
-     downgrade() restores 'ready' (not 'approved') to match app status.
+Note: 'error' and 'cancelled' were added to document_status in 0006 and
+removed again in 0020a. This migration no longer touches the enum.
+
+downgrade: DROP COLUMN + DROP INDEX only.
 """
 from __future__ import annotations
 
@@ -27,11 +26,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # 1. Extend enum (idempotent — IF NOT EXISTS)
-    op.execute("ALTER TYPE document_status ADD VALUE IF NOT EXISTS 'error'")
-    op.execute("ALTER TYPE document_status ADD VALUE IF NOT EXISTS 'cancelled'")
-
-    # 2. Add column to documents
+    # Add column to documents
     op.add_column(
         "documents",
         sa.Column(
@@ -46,7 +41,7 @@ def upgrade() -> None:
         ),
     )
 
-    # 3. Partial index: reverse lookup job -> document
+    # Partial index: reverse lookup job -> document
     op.create_index(
         "ix_documents_current_analysis_job_id",
         "documents",
@@ -56,7 +51,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # 1. Drop index and column
     op.drop_index(
         "ix_documents_current_analysis_job_id",
         table_name="documents",
@@ -67,25 +61,3 @@ def downgrade() -> None:
         type_="foreignkey",
     )
     op.drop_column("documents", "current_analysis_job_id")
-
-    # 2. Remove 'error'/'cancelled' from enum via recreate.
-    #    Rows with these statuses are reset to 'draft' first.
-    op.execute(
-        """
-        UPDATE documents
-        SET status = 'draft'
-        WHERE status IN ('error', 'cancelled')
-        """
-    )
-    op.execute(
-        """
-        ALTER TYPE document_status RENAME TO document_status_old;
-        CREATE TYPE document_status AS ENUM (
-            'draft', 'in_progress', 'awaiting_approval', 'ready'
-        );
-        ALTER TABLE documents
-            ALTER COLUMN status TYPE document_status
-            USING status::text::document_status;
-        DROP TYPE document_status_old;
-        """
-    )
