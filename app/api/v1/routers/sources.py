@@ -13,11 +13,9 @@ OPT-S6: scope в upload_file_source — typed SourceScopeVO Form, автовал
 OPT-S7: source_id — uuid.UUID вместо str (автопарсинг FastAPI).
 WARN-2: create_url_source и create_note_source передают document_id=payload.document_id
         в сервис — M2M-вставка при scope=document теперь корректна.
-FIX-review-4: DELETE /{source_id} — guard теперь получает document_id из источника.
-    Ранее вызывался _guard_no_active_job(document_id=None) → ранний return → защита
-    не работала. Теперь: source загружается через get_source(), document_id берётся
-    через uow.sources M2M-запрос; при наличии active job → 423.
-    Реализовано через новый метод source_service.get_source_document_id().
+FIX-review-4: DELETE /{source_id} — guard и удаление атомарны через
+    active_job_checker callback в delete_source_with_guard.
+    Удалён вызов source_service.get_primary_document_id() (метод не существует).
 FIX-review-6: /note помечен deprecated=True в регистрации роутера.
 """
 from __future__ import annotations
@@ -50,7 +48,6 @@ async def _guard_no_active_job(
 
     OPT-S3: при document_id=None (scope=project) ранний return;
     Depends(get_analysis_job_service) резолвится только когда нужен.
-    FIX-review-4: DELETE теперь передаёт реальный document_id вместо None.
     """
     if document_id is None:
         return
@@ -85,7 +82,7 @@ async def create_url_source(
         payload.name,
         payload.url,
         scope=scope,
-        document_id=doc_id,  # WARN-2: передаём document_id для M2M-вставки
+        document_id=doc_id,
     )
     return SourceResponse.model_validate(source)
 
@@ -99,7 +96,7 @@ async def create_url_source(
     "/note",
     response_model=SourceResponse,
     status_code=status.HTTP_201_CREATED,
-    deprecated=True,  # FIX-review-6: NoteCreateRequest → internal-only endpoint
+    deprecated=True,
 )
 async def create_note_source(
     payload: NoteCreateRequest,
@@ -120,7 +117,7 @@ async def create_note_source(
         payload.name,
         payload.text_content,
         scope=scope,
-        document_id=doc_id,  # WARN-2: передаём document_id для M2M-вставки
+        document_id=doc_id,
     )
     return SourceResponse.model_validate(source)
 
@@ -132,7 +129,6 @@ async def create_note_source(
 @router.post("/file", response_model=SourceResponse, status_code=status.HTTP_201_CREATED)
 async def upload_file_source(
     name: str = Form(..., min_length=1, max_length=255),
-    # OPT-S6: FastAPI автоматически валидирует scope через SourceScopeVO enum
     scope: SourceScopeVO = Form(default=SourceScopeVO.PROJECT),
     document_id: str | None = Form(
         default=None,
@@ -158,7 +154,7 @@ async def upload_file_source(
             content=content,
             content_type=file.content_type or "application/octet-stream",
             scope=scope,
-            document_id=parsed_doc_id,  # WARN-2: передаём document_id для M2M-вставки
+            document_id=parsed_doc_id,
         )
     except FileTooLargeError as exc:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc))
@@ -199,31 +195,33 @@ async def delete_source(
 ) -> None:
     """Удалить источник.
 
-    FIX-review-4: источник загружается через get_source() для получения
-    document_id (M2M-связь). Guard вызывается с реальным document_id —
-    при наличии активного job возвращает 423.
+    FIX-review-4 (P0): убран вызов source_service.get_primary_document_id()
+    (метод удалён из сервиса). Теперь guard и удаление выполняются атомарно
+    внутри delete_source_with_guard через active_job_checker callback —
+    устраняет TOCTOU и AttributeError.
 
-    OPT-S2 сохранён частично: get_source() делает один SELECT,
-    delete_source_with_guard делает DELETE в той же транзакции.
+    Порядок:
+      1. Передать active_job_checker (замыкание над job_service и project.id)
+         в delete_source_with_guard.
+      2. Сервис: загрузить source, получить document_id из M2M, вызвать
+         checker, удалить запись, сделать commit, затем best-effort MinIO delete.
     """
-    try:
-        # Шаг 1: загрузить источник для получения document_id (нужен для guard).
-        source = await source_service.get_source(project.id, source_id)
-    except SourceNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    async def active_job_checker(document_id: _uuid.UUID) -> None:
+        active = await job_service.get_active_for_document(project.id, document_id)
+        if active is not None:
+            raise HTTPException(
+                status_code=status.HTTP_423_LOCKED,
+                detail=(
+                    "Нельзя удалить источник пока идёт анализ документа. "
+                    "Дождитесь завершения задания или отмените его."
+                ),
+            )
 
-    # Шаг 2: получить document_id из M2M (sources связаны с документами через document_sources).
-    # Source.document_id отсутствует как прямая колонка — используем helper сервиса.
-    doc_id: _uuid.UUID | None = await source_service.get_primary_document_id(source)
-
-    # Шаг 3: guard — 423 если document в активном job.
-    await _guard_no_active_job(project.id, doc_id, job_service)
-
-    # Шаг 4: удалить.
     try:
         await source_service.delete_source_with_guard(
             project_id=project.id,
             source_id=source_id,
+            active_job_checker=active_job_checker,
         )
     except SourceNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
