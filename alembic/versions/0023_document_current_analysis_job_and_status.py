@@ -4,17 +4,16 @@ Revision ID: 0023
 Revises: 0022
 Create Date: 2026-09-27
 
-Изменения (соответствуют коммиту f6d5afb):
-  1. documents.current_analysis_job_id — UUID nullable FK → analysis_jobs(id)
-     ON DELETE SET NULL. Используется для быстрого доступа к текущему заданию
-     без JOIN: Document.current_analysis_job (relationship в models/document.py).
-  2. ix_documents_current_analysis_job_id — индекс для обратного поиска
-     «какой документ сейчас анализируется данным job».
-  3. document_status enum: добавлены значения 'error' и 'cancelled'
-     для синхронизации с DocumentStatusVO (value_objects.py).
+Changes:
+  1. documents.current_analysis_job_id — UUID nullable FK -> analysis_jobs(id)
+     ON DELETE SET NULL. Used for fast access to the current job without JOIN.
+  2. ix_documents_current_analysis_job_id — partial index for reverse lookup.
+  3. document_status enum: adds 'error' and 'cancelled' (IF NOT EXISTS — safe
+     to apply even if values were added by an earlier migration).
 
-downgrade: DROP COLUMN, DROP INDEX, а также safe-удаление новых enum-значений
-     через пересоздание типа (PostgreSQL не поддерживает DROP VALUE для enum).
+downgrade: DROP COLUMN, DROP INDEX, and safe-remove new enum values via
+     recreate (PostgreSQL does not support DROP VALUE for enum).
+     downgrade() restores 'ready' (not 'approved') to match app status.
 """
 from __future__ import annotations
 
@@ -28,11 +27,11 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # 1. Расширяем enum до применения ALTER TABLE
+    # 1. Extend enum (idempotent — IF NOT EXISTS)
     op.execute("ALTER TYPE document_status ADD VALUE IF NOT EXISTS 'error'")
     op.execute("ALTER TYPE document_status ADD VALUE IF NOT EXISTS 'cancelled'")
 
-    # 2. Новая колонка на documents
+    # 2. Add column to documents
     op.add_column(
         "documents",
         sa.Column(
@@ -47,7 +46,7 @@ def upgrade() -> None:
         ),
     )
 
-    # 3. Индекс для обратного поиска job → document
+    # 3. Partial index: reverse lookup job -> document
     op.create_index(
         "ix_documents_current_analysis_job_id",
         "documents",
@@ -57,7 +56,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # 1. Убираем индекс и колонку
+    # 1. Drop index and column
     op.drop_index(
         "ix_documents_current_analysis_job_id",
         table_name="documents",
@@ -69,10 +68,8 @@ def downgrade() -> None:
     )
     op.drop_column("documents", "current_analysis_job_id")
 
-    # 2. PostgreSQL не поддерживает DROP VALUE для enum.
-    # Пересоздаём тип без 'error' / 'cancelled'.
-    # Предварительно обновляем строки, чтобы не нарушить NOT NULL constraints
-    # (на практике значения не должны присутствовать при откате).
+    # 2. Remove 'error'/'cancelled' from enum via recreate.
+    #    Rows with these statuses are reset to 'draft' first.
     op.execute(
         """
         UPDATE documents
@@ -84,7 +81,7 @@ def downgrade() -> None:
         """
         ALTER TYPE document_status RENAME TO document_status_old;
         CREATE TYPE document_status AS ENUM (
-            'draft', 'in_progress', 'awaiting_approval', 'approved'
+            'draft', 'in_progress', 'awaiting_approval', 'ready'
         );
         ALTER TABLE documents
             ALTER COLUMN status TYPE document_status

@@ -1,7 +1,7 @@
 """C-1 (issue #37): add decided_by, decided_at to suggestions.
 
-Revision ID: 0020
-Revises: 0019
+Revision ID: 0020b
+Revises: 0020a
 Create Date: 2026-09-27
 """
 from __future__ import annotations
@@ -10,8 +10,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
-revision = "0020"
-down_revision = "0019"
+revision = "0020b"
+down_revision = "0020a"
 branch_labels = None
 depends_on = None
 

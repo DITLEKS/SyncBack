@@ -1,17 +1,8 @@
-"""P2: index on suggestions.decided_by for filter/join queries.
+"""Add index on suggestions.decided_by.
 
 Revision ID: 0022
 Revises: 0021
-Create Date: 2026-09-27
-
-P2: индекс нужен для запросов вида:
-  - «показать все правки, принятые/отклонённые конкретным пользователем»
-  - JOIN users ON suggestions.decided_by = users.id
-Partial WHERE decided_by IS NOT NULL исключает незакрытые правки (majority).
 """
-from __future__ import annotations
-
-import sqlalchemy as sa
 from alembic import op
 
 revision = "0022"
@@ -25,7 +16,7 @@ def upgrade() -> None:
         "ix_suggestions_decided_by",
         "suggestions",
         ["decided_by"],
-        postgresql_where=sa.text("decided_by IS NOT NULL"),
+        postgresql_where="decided_by IS NOT NULL",
     )
 
 
