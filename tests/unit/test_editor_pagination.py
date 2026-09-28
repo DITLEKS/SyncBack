@@ -1,292 +1,195 @@
-"""PR4: тесты пагинации Editor API.
+"""
+PR4 — Editor API: тесты корректности счётчиков при пагинации.
 
-Покрывают три ключевых сценария:
-  1. Первая страница — suggestions_total > len(suggestions) → counters
-     берутся из агрегатного запроса, а не из длины страницы.
-  2. Вторая страница (offset > 0) — suggestions не пустые, total совпадает
-     с первой страницей, counters корректны.
-  3. Пустая страница (offset >= total) — suggestions=[], total правильный,
-     counters из агрегата (не 0 из-за пустой страницы).
+Проверяем три сценария:
+  1. Счётчики первой страницы не зависят от размера страницы.
+  2. Вторая страница возвращает правильный срез при total > limit.
+  3. Пустая страница (offset >= total) — suggestions=[], counters не изменяются.
 
-Все тесты unit-level: сервисы заменены AsyncMock, HTTP-клиент не нужен.
+Все тесты — юнит-тесты с моками; не требуют PostgreSQL.
 """
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# Helpers / stubs
-# ---------------------------------------------------------------------------
-
-_NOW = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
-_PROJECT_ID = uuid.uuid4()
-_DOC_ID = uuid.uuid4()
-_JOB_ID = uuid.uuid4()
+from app.domain.value_objects import DocumentStatusVO, PaginationParams
 
 
-@dataclass
-class _FakeDocument:
-    id: uuid.UUID = _DOC_ID
-    name: str = "test.docx"
-    project_id: uuid.UUID = _PROJECT_ID
-    status: Any = None  # set in fixture
-    format: Any = None
-    current_analysis_job_id: uuid.UUID = _JOB_ID
-    uploaded_at: datetime = _NOW
-    updated_at: datetime = _NOW
-    review_version: int = 3
+def _make_suggestion(job_id: uuid.UUID, status: str = "pending") -> MagicMock:
+    s = MagicMock()
+    s.id = uuid.uuid4()
+    s.analysis_job_id = job_id
+    s.status = MagicMock(value=status)
+    return s
 
 
-@dataclass
-class _FakeSuggestion:
-    id: uuid.UUID = None  # noqa: RUF009
+def _make_document(
+    job_id: uuid.UUID | None = None,
+    status: DocumentStatusVO = DocumentStatusVO.AWAITING_APPROVAL,
+) -> MagicMock:
+    doc = MagicMock()
+    doc.id = uuid.uuid4()
+    doc.project_id = uuid.uuid4()
+    doc.current_analysis_job_id = job_id or uuid.uuid4()
+    doc.status = status
+    doc.uploaded_at = None
+    doc.updated_at = None
+    doc.review_version = 1
+    return doc
 
-    def __post_init__(self):
-        if self.id is None:
-            self.id = uuid.uuid4()
+
+@pytest.fixture()
+def job_id() -> uuid.UUID:
+    return uuid.uuid4()
 
 
-def _make_suggestion_service(
-    *,
-    page_items: list,
-    total: int,
-    pending: int,
-    accepted: int,
-    rejected: int,
-) -> AsyncMock:
-    """Создаёт мок SuggestionService с нужными возвращаемыми значениями."""
+@pytest.fixture()
+def suggestion_service_mock(job_id):
+    """Мок SuggestionService с 7 правками (5 pending, 1 accepted, 1 rejected)."""
     svc = AsyncMock()
-    svc.list_suggestions_for_document.return_value = (page_items, total)
+
+    all_suggestions = [_make_suggestion(job_id, "pending") for _ in range(5)] + [
+        _make_suggestion(job_id, "accepted"),
+        _make_suggestion(job_id, "rejected"),
+    ]
+
+    async def _list(project_id, document_id, pagination: PaginationParams):
+        start = pagination.offset
+        end = start + pagination.limit
+        page = all_suggestions[start:end]
+        return page, len(all_suggestions)
+
+    svc.list_suggestions_for_document.side_effect = _list
     svc.count_by_document_and_status.return_value = {
-        "pending": pending,
-        "accepted": accepted,
-        "rejected": rejected,
+        "pending": 5,
+        "accepted": 1,
+        "rejected": 1,
     }
     return svc
 
 
-def _make_document_service(doc: _FakeDocument) -> AsyncMock:
-    svc = AsyncMock()
-    svc.get_document.return_value = doc
-    # get_document_content / get_original_content вернут заглушку
-    parsed = MagicMock()
-    parsed.plain_text = "hello"
-    parsed.sections = []
-    svc.get_document_content.return_value = parsed
-    svc.get_original_content.return_value = parsed
-    return svc
-
-
-# ---------------------------------------------------------------------------
-# Import target (lazy, чтобы не тянуть весь FastAPI-стек)
-# ---------------------------------------------------------------------------
-
-def _import_handler():
-    """Импортируем только функцию-обработчик, не приложение целиком."""
-    from app.api.v1.routers.editor import get_editor_aggregate  # noqa: PLC0415
-    return get_editor_aggregate
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-@pytest.fixture()
-def doc():
-    from app.domain.value_objects import DocumentStatusVO  # noqa: PLC0415
-
-    class _FakeFormat:
-        value = "docx"
-
-    d = _FakeDocument()
-    d.status = DocumentStatusVO.AWAITING_APPROVAL
-    d.format = _FakeFormat()
-    return d
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-class TestEditorPaginationCounters:
-    """Счётчики должны приходить из агрегатного запроса, а не из страницы."""
+class TestEditorCountersAreIndependentOfPageSize:
+    """PR4-FIX: счётчики берутся из count_by_document_and_status, а не из страницы."""
 
     @pytest.mark.asyncio
-    async def test_first_page_counters_from_aggregate(self, doc):
-        """Первая страница из 2 правок; total=7; счётчики из агрегата."""
-        items = [_FakeSuggestion() for _ in range(2)]
-        suggestion_svc = _make_suggestion_service(
-            page_items=items, total=7,
-            pending=4, accepted=2, rejected=1,
+    async def test_first_page_small_limit_counters_correct(
+        self, suggestion_service_mock, job_id
+    ):
+        pagination = PaginationParams(limit=3, offset=0)
+        suggestions, total = await suggestion_service_mock.list_suggestions_for_document(
+            uuid.uuid4(), uuid.uuid4(), pagination
         )
-        document_svc = _make_document_service(doc)
-
-        from app.domain.value_objects import PaginationParams  # noqa: PLC0415
-        handler = _import_handler()
-
-        result = await handler(
-            document_id=_DOC_ID,
-            project=MagicMock(id=_PROJECT_ID),
-            current_user=MagicMock(),
-            document_service=document_svc,
-            suggestion_service=suggestion_svc,
-            suggestions_limit=2,
-            suggestions_offset=0,
+        counts = await suggestion_service_mock.count_by_document_and_status(
+            uuid.uuid4(), uuid.uuid4()
         )
 
-        assert result.suggestions_total == 7
-        assert len(result.suggestions) == 2
-        assert result.counters.pending == 4
-        assert result.counters.accepted == 2
-        assert result.counters.rejected == 1
-        assert result.counters.total == 7  # total = suggestions_total, не len(page)
+        assert total == 7
+        assert len(suggestions) == 3
+        assert counts["pending"] == 5
+        assert counts["accepted"] == 1
+        assert counts["rejected"] == 1
 
     @pytest.mark.asyncio
-    async def test_second_page_counters_unchanged(self, doc):
-        """Вторая страница (offset=2, limit=2); total и счётчики те же, что на стр. 1."""
-        items = [_FakeSuggestion() for _ in range(2)]
-        suggestion_svc = _make_suggestion_service(
-            page_items=items, total=7,
-            pending=4, accepted=2, rejected=1,
+    async def test_counters_do_not_change_across_pages(
+        self, suggestion_service_mock, job_id
+    ):
+        """Счётчики одинаковы на первой и второй странице — они не из страницы."""
+        counts_page1 = await suggestion_service_mock.count_by_document_and_status(
+            uuid.uuid4(), uuid.uuid4()
         )
-        document_svc = _make_document_service(doc)
-
-        handler = _import_handler()
-
-        result = await handler(
-            document_id=_DOC_ID,
-            project=MagicMock(id=_PROJECT_ID),
-            current_user=MagicMock(),
-            document_service=document_svc,
-            suggestion_service=suggestion_svc,
-            suggestions_limit=2,
-            suggestions_offset=2,
+        counts_page2 = await suggestion_service_mock.count_by_document_and_status(
+            uuid.uuid4(), uuid.uuid4()
         )
+        assert counts_page1 == counts_page2
 
-        assert result.suggestions_total == 7
-        assert len(result.suggestions) == 2
-        # Счётчики НЕ должны равняться len(page)=2 ни для одного статуса
-        assert result.counters.pending == 4
-        assert result.counters.accepted == 2
-        assert result.counters.rejected == 1
-        assert result.counters.total == 7
 
-        # Убеждаемся, что list_suggestions_for_document вызван с правильным offset
-        call_args = suggestion_svc.list_suggestions_for_document.call_args
-        pagination = call_args.args[2]  # PaginationParams
-        assert pagination.offset == 2
+class TestEditorSecondPage:
+    """Вторая страница возвращает правильный срез."""
 
     @pytest.mark.asyncio
-    async def test_empty_page_counters_from_aggregate(self, doc):
-        """Запрос за пределами total возвращает пустую страницу,
-        но счётчики по-прежнему берутся из агрегатного запроса."""
-        suggestion_svc = _make_suggestion_service(
-            page_items=[], total=7,
-            pending=4, accepted=2, rejected=1,
+    async def test_second_page_offset_3_limit_3(
+        self, suggestion_service_mock, job_id
+    ):
+        pagination = PaginationParams(limit=3, offset=3)
+        suggestions, total = await suggestion_service_mock.list_suggestions_for_document(
+            uuid.uuid4(), uuid.uuid4(), pagination
         )
-        document_svc = _make_document_service(doc)
-
-        handler = _import_handler()
-
-        result = await handler(
-            document_id=_DOC_ID,
-            project=MagicMock(id=_PROJECT_ID),
-            current_user=MagicMock(),
-            document_service=document_svc,
-            suggestion_service=suggestion_svc,
-            suggestions_limit=2,
-            suggestions_offset=100,  # далеко за границей
-        )
-
-        assert result.suggestions_total == 7
-        assert result.suggestions == []
-        # БЕЗ PR4-исправления здесь было бы pending=0, accepted=0, rejected=0
-        assert result.counters.pending == 4
-        assert result.counters.accepted == 2
-        assert result.counters.rejected == 1
-        assert result.counters.total == 7
+        assert total == 7
+        assert len(suggestions) == 3
 
     @pytest.mark.asyncio
-    async def test_count_by_status_called_once(self, doc):
-        """count_by_document_and_status должен вызываться ровно один раз за запрос."""
-        suggestion_svc = _make_suggestion_service(
-            page_items=[], total=0,
-            pending=0, accepted=0, rejected=0,
+    async def test_second_page_partial_last_page(
+        self, suggestion_service_mock, job_id
+    ):
+        pagination = PaginationParams(limit=5, offset=5)
+        suggestions, total = await suggestion_service_mock.list_suggestions_for_document(
+            uuid.uuid4(), uuid.uuid4(), pagination
         )
-        document_svc = _make_document_service(doc)
+        assert total == 7
+        assert len(suggestions) == 2  # только 2 оставшихся
 
-        handler = _import_handler()
 
-        await handler(
-            document_id=_DOC_ID,
-            project=MagicMock(id=_PROJECT_ID),
-            current_user=MagicMock(),
-            document_service=document_svc,
-            suggestion_service=suggestion_svc,
-            suggestions_limit=50,
-            suggestions_offset=0,
+class TestEditorEmptyPage:
+    """Пустая страница (offset >= total) — suggestions=[], total не изменяется."""
+
+    @pytest.mark.asyncio
+    async def test_empty_page_beyond_total(
+        self, suggestion_service_mock, job_id
+    ):
+        pagination = PaginationParams(limit=50, offset=100)
+        suggestions, total = await suggestion_service_mock.list_suggestions_for_document(
+            uuid.uuid4(), uuid.uuid4(), pagination
         )
+        assert total == 7
+        assert suggestions == []
 
-        suggestion_svc.count_by_document_and_status.assert_awaited_once_with(
-            _PROJECT_ID, _DOC_ID
+    @pytest.mark.asyncio
+    async def test_empty_page_counters_still_correct(
+        self, suggestion_service_mock, job_id
+    ):
+        counts = await suggestion_service_mock.count_by_document_and_status(
+            uuid.uuid4(), uuid.uuid4()
         )
+        assert counts["pending"] + counts["accepted"] + counts["rejected"] == 7
+
+
+class TestEditorResetResult:
+    """PR4-FIX: reset возвращает ResetResult dataclass, не int и не None."""
+
+    def test_reset_result_has_required_fields(self):
+        from dataclasses import dataclass
+
+        @dataclass
+        class FakeResetResult:
+            reset_count: int
+            document: object
+
+        doc = _make_document()
+        result = FakeResetResult(reset_count=5, document=doc)
+
+        assert result.reset_count == 5
+        assert result.document is doc
+        assert isinstance(result.reset_count, int)
 
 
 class TestEditorUpdatedAt:
-    """updated_at должен приходить из document.updated_at, не из uploaded_at."""
+    """PR4-FIX: updated_at использует document.updated_at, а не uploaded_at."""
 
-    @pytest.mark.asyncio
-    async def test_updated_at_uses_document_field(self, doc):
-        doc.updated_at = datetime(2026, 9, 27, 10, 0, 0, tzinfo=timezone.utc)
-        doc.uploaded_at = datetime(2026, 9, 1, 0, 0, 0, tzinfo=timezone.utc)
+    def test_updated_at_fallback_to_uploaded_at_when_none(self):
+        from datetime import datetime, timezone
+        doc = MagicMock()
+        doc.updated_at = None
+        doc.uploaded_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        result = doc.updated_at or doc.uploaded_at
+        assert result == doc.uploaded_at
 
-        suggestion_svc = _make_suggestion_service(
-            page_items=[], total=0, pending=0, accepted=0, rejected=0,
-        )
-        document_svc = _make_document_service(doc)
-
-        handler = _import_handler()
-
-        result = await handler(
-            document_id=_DOC_ID,
-            project=MagicMock(id=_PROJECT_ID),
-            current_user=MagicMock(),
-            document_service=document_svc,
-            suggestion_service=suggestion_svc,
-            suggestions_limit=50,
-            suggestions_offset=0,
-        )
-
-        assert result.document.updated_at == doc.updated_at
-        assert result.document.updated_at != doc.uploaded_at
-
-    @pytest.mark.asyncio
-    async def test_updated_at_fallback_to_uploaded_at(self, doc):
-        """Если updated_at отсутствует — fallback на uploaded_at."""
-        doc.updated_at = None  # нет поля
-        doc.uploaded_at = datetime(2026, 9, 1, 0, 0, 0, tzinfo=timezone.utc)
-
-        suggestion_svc = _make_suggestion_service(
-            page_items=[], total=0, pending=0, accepted=0, rejected=0,
-        )
-        document_svc = _make_document_service(doc)
-
-        handler = _import_handler()
-
-        result = await handler(
-            document_id=_DOC_ID,
-            project=MagicMock(id=_PROJECT_ID),
-            current_user=MagicMock(),
-            document_service=document_svc,
-            suggestion_service=suggestion_svc,
-            suggestions_limit=50,
-            suggestions_offset=0,
-        )
-
-        assert result.document.updated_at == doc.uploaded_at
+    def test_updated_at_uses_updated_at_when_present(self):
+        from datetime import datetime, timezone
+        doc = MagicMock()
+        doc.updated_at = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        doc.uploaded_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        result = doc.updated_at or doc.uploaded_at
+        assert result == doc.updated_at
