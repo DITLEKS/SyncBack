@@ -3,9 +3,6 @@
 GET    /projects/{project_id}/documents/{document_id}/editor
 POST   /projects/{project_id}/documents/{document_id}/editor/reset
 
-Экспорт вынесен в GET /projects/{project_id}/documents/{document_id}/export
-(роутер documents.py) — /editor/export удалён как дублирующий endpoint.
-
 #7: возвращаем view_mode и original_content (исходный plain_text без правок)
 #8: возвращаем sources_is_editable=False при in_progress / awaiting_approval
 
@@ -31,8 +28,14 @@ PERF:
   - reset_analysis: второй SELECT get_document убран — документ берётся из reset_result
 
 FIX-P0: убраны ссылки на DocumentStatusVO.ERROR и DocumentStatusVO.CANCELLED
-  (удалены в коммите fe39c67, 4STATUS). После 4STATUS документ с ошибкой/отменой
-  анализа публично имеет status=draft — ветки по ERROR/CANCELLED не нужны.
+  (удалены в коммите fe39c67, 4STATUS).
+
+PR4-FIX:
+  - _safe_count_by_status теперь работает корректно — SuggestionService.count_by_document_and_status
+    добавлен в PR4. Fallback по странице убран (был маскировкой ошибки).
+  - reset_analysis(): reset_result — ResetResult dataclass; читаем reset_count и document напрямую.
+  - EditorDocumentMeta.updated_at: использует document.updated_at (с fallback на uploaded_at),
+    а не всегда uploaded_at.
 """
 import asyncio
 import logging
@@ -75,9 +78,6 @@ _STATUSES_WITH_APPLIED_CHANGES = frozenset({
     DocumentStatusVO.READY,
 })
 
-# FIX-P0: ERROR/CANCELLED удалены из DocumentStatusVO (4STATUS, fe39c67).
-# Документ с ошибкой/отменой анализа теперь имеет status=DRAFT,
-# поэтому DRAFT-ветка покрывает все эти случаи.
 _STATUS_VIEW_MODE: dict[DocumentStatusVO, str] = {
     DocumentStatusVO.DRAFT: "original",
     DocumentStatusVO.IN_PROGRESS: "original",
@@ -85,20 +85,15 @@ _STATUS_VIEW_MODE: dict[DocumentStatusVO, str] = {
     DocumentStatusVO.READY: "clean",
 }
 
-# FIX-P0: can_analyze — только статусы существующего DocumentStatusVO.
-# DRAFT покрывает бывшие ERROR/CANCELLED (4STATUS).
 _CAN_ANALYZE_STATUSES = frozenset({
     DocumentStatusVO.DRAFT,
     DocumentStatusVO.READY,
 })
 
-# Статусы, при которых документ «заблокирован» (анализ активен).
 _LOCKED_STATUSES = frozenset({
     DocumentStatusVO.IN_PROGRESS,
 })
 
-# FIX-P0: источники недоступны для редактирования только при активном анализе.
-# DRAFT (бывший ERROR/CANCELLED) — редактирование разрешено.
 _SOURCES_NOT_EDITABLE_STATUSES = frozenset({
     DocumentStatusVO.IN_PROGRESS,
     DocumentStatusVO.AWAITING_APPROVAL,
@@ -152,6 +147,10 @@ async def get_editor_aggregate(
     review_version = getattr(document, "review_version", 0) or 0
     view_mode = _STATUS_VIEW_MODE.get(document.status, "original")
 
+    # PR4-FIX: updated_at берётся из document.updated_at (если есть),
+    # иначе fallback на uploaded_at. Ранее всегда использовался uploaded_at.
+    updated_at = getattr(document, "updated_at", None) or document.uploaded_at
+
     meta = EditorDocumentMeta(
         id=document.id,
         title=document.name,
@@ -159,12 +158,11 @@ async def get_editor_aggregate(
         status=document.status,
         current_analysis_job_id=document.current_analysis_job_id,
         created_at=document.uploaded_at,
-        updated_at=document.uploaded_at,
+        updated_at=updated_at,
         review_version=review_version,
         view_mode=view_mode,
     )
 
-    # PERF: content и original_content независимы — запускаем параллельно
     needs_original = document.status in _STATUSES_WITH_APPLIED_CHANGES
 
     async def _fetch_content():
@@ -207,23 +205,16 @@ async def get_editor_aggregate(
         _safe_count_by_status(suggestion_service, project.id, document_id),
     )
 
-    # Если оригинал не нужен — подставляем текущий контент (статусы DRAFT/IN_PROGRESS)
     original_content = original_content_raw if needs_original else editor_content
 
     suggestions = [SuggestionResponse.model_validate(s) for s in suggestions_raw]
 
+    # PR4-FIX: счётчики всегда из агрегатного запроса O(1).
+    # Fallback по текущей странице убран — он маскировал отсутствие метода
+    # и давал некорректные значения при пагинации.
     pending = status_counts.get("pending", 0)
     accepted = status_counts.get("accepted", 0)
     rejected = status_counts.get("rejected", 0)
-    # Fallback: считаем по текущей странице если агрегат вернул пустой словарь
-    if not status_counts:
-        for s in suggestions:
-            if s.status == "pending":
-                pending += 1
-            elif s.status == "accepted":
-                accepted += 1
-            elif s.status == "rejected":
-                rejected += 1
 
     counters = SuggestionCounters(
         total=suggestions_total,
@@ -256,9 +247,17 @@ async def _safe_count_by_status(
     project_id: uuid.UUID,
     document_id: uuid.UUID,
 ) -> dict:
+    """PR4-FIX: SuggestionService.count_by_document_and_status() теперь существует.
+    AttributeError больше не возникает; except-ветка оставлена как защитный барьер
+    на случай неожиданных исключений при запросе к БД.
+    """
     try:
         return await suggestion_service.count_by_document_and_status(project_id, document_id)
-    except (AttributeError, NotImplementedError):
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Не удалось получить агрегатные счётчики правок",
+            extra={"document_id": str(document_id)},
+        )
         return {}
 
 
@@ -278,7 +277,8 @@ async def reset_analysis(
     """Сбросить все правки текущего анализа: статус suggestions → pending,
     документ → AWAITING_APPROVAL.
 
-    PERF: повторный get_document после reset убран — статус берётся из reset_result.
+    PR4-FIX: reset_result — ResetResult dataclass с reset_count и document.
+    Читаем поля напрямую без isinstance-проверок и второго SELECT.
     """
     try:
         document = await document_service.get_document(project.id, document_id)
@@ -300,21 +300,11 @@ async def reset_analysis(
 
     reset_result = await job_service.reset_analysis(project.id, document_id)
 
-    # reset_analysis может вернуть int (кол-во правок) или объект с документом.
-    # Если возвращает объект — берём статус из него, избегая второго SELECT.
-    if isinstance(reset_result, int):
-        suggestions_reset_count = reset_result
-        new_status = DocumentStatusVO.AWAITING_APPROVAL.value
-        new_review_version = 0
-    else:
-        suggestions_reset_count = getattr(reset_result, "reset_count", 0) or 0
-        updated_doc = getattr(reset_result, "document", None)
-        if updated_doc is not None:
-            new_status = updated_doc.status.value
-            new_review_version = getattr(updated_doc, "review_version", 0) or 0
-        else:
-            new_status = DocumentStatusVO.AWAITING_APPROVAL.value
-            new_review_version = 0
+    # PR4-FIX: reset_result всегда ResetResult — читаем атрибуты напрямую.
+    suggestions_reset_count = reset_result.reset_count
+    updated_doc = reset_result.document
+    new_status = updated_doc.status.value
+    new_review_version = getattr(updated_doc, "review_version", 0) or 0
 
     return ResetResponse(
         document_id=document_id,

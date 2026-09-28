@@ -27,10 +27,14 @@
     анализа имеет status=DRAFT, что уже входит в оба frozenset.
   - FIX-P0-DISPATCH: добавлен dispatch_job() — строит Celery chord и вызывает
     mark_dispatched(). create_job() теперь устанавливает current_analysis_job_id.
+  - PR4-FIX: reset_analysis() возвращает ResetResult(reset_count, document) вместо None,
+    чтобы editor.py мог читать suggestions_reset_count и review_version без
+    второго SELECT.
 """
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from app.domain.exceptions import (
@@ -47,36 +51,43 @@ if TYPE_CHECKING:
     from app.infrastructure.db.models.analysis_job import AnalysisJob
 
 # FIX-P0: ERROR/CANCELLED удалены — они не существуют в DocumentStatusVO (4STATUS).
-# Документ после сбоя/отмены анализа переводится в DRAFT (миграция 0020),
-# поэтому DRAFT здесь достаточно для повторного запуска.
 _ANALYSIS_ALLOWED_STATUSES = frozenset({
     DocumentStatusVO.DRAFT,
     DocumentStatusVO.AWAITING_APPROVAL,
     DocumentStatusVO.READY,
 })
 
-# FIX-P0: ERROR/CANCELLED удалены. READY остаётся единственным статусом,
-# из которого повторный запуск требует явного force=true.
 _FORCE_CONFIRM_STATUSES = frozenset({
     DocumentStatusVO.READY,
 })
 
-# Статусы job, из которых допустима отмена:
 _CANCELLABLE_JOB_STATUSES = frozenset({
     AnalysisJobStatusVO.PENDING,
     AnalysisJobStatusVO.PROCESSING,
 })
 
-# Статусы job, из которых допустим диспатч:
 _DISPATCHABLE_JOB_STATUSES = frozenset({
     AnalysisJobStatusVO.PENDING,
 })
 
-# Статусы документа, из которых разрешён сброс:
 _RESET_ALLOWED_STATUSES = frozenset({
     DocumentStatusVO.AWAITING_APPROVAL,
     DocumentStatusVO.READY,
 })
+
+
+@dataclass
+class ResetResult:
+    """PR4-FIX: возвращается из reset_analysis() вместо None.
+
+    reset_count — количество правок, сброшенных обратно в PENDING.
+    document    — актуальный объект документа после UPDATE статуса.
+
+    Позволяет editor.py читать suggestions_reset_count и review_version
+    без второго SELECT к БД.
+    """
+    reset_count: int
+    document: object  # DocumentProtocol — избегаем кросс-импорта на верхнем уровне
 
 
 class AnalysisJobService:
@@ -108,10 +119,6 @@ class AnalysisJobService:
     async def check_document_is_ready(
         self, project_id: uuid.UUID, document_id: uuid.UUID
     ) -> bool:
-        """Устаревший метод — используйте check_document_needs_force_confirm.
-
-        Оставлен для обратной совместимости; возвращает True только для READY.
-        """
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
             if document is None or document.project_id != project_id:
@@ -123,13 +130,6 @@ class AnalysisJobService:
     async def check_document_needs_force_confirm(
         self, project_id: uuid.UUID, document_id: uuid.UUID
     ) -> bool:
-        """Возвращает True если повторный запуск анализа требует
-        явного подтверждения (force=true) от пользователя.
-
-        True для статуса READY — анализ уже выполнялся и перезапуск
-        должен быть осознанным.
-        False для DRAFT и AWAITING_APPROVAL — запуск без подтверждения.
-        """
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
             if document is None or document.project_id != project_id:
@@ -185,7 +185,6 @@ class AnalysisJobService:
                     "Для документа уже выполняется анализ"
                 )
 
-            # Если документ не в DRAFT — сбрасываем в DRAFT перед созданием job.
             if document.status != DocumentStatusVO.DRAFT:
                 document = await self._uow.documents.update_status(
                     document, DocumentStatusVO.DRAFT
@@ -210,21 +209,6 @@ class AnalysisJobService:
 
         FIX-P0-DISPATCH: метод, который ранее отсутствовал и вызывался
         роутером (приводило к AttributeError → каждый job сразу FAILED).
-
-        Алгоритм:
-          1. Собрать список source_ids из job.sources (eager-loaded в репозитории).
-          2. Построить chord: N задач process_source_for_analysis_job
-             + callback finalize_analysis_job.
-          3. Отправить chord в Celery.
-          4. Вызвать mark_dispatched() с полученным task_id (id chord-группы).
-
-        Если Celery недоступен — chord.delay() / chord.apply_async() бросит
-        исключение; роутер перехватывает его и вызывает
-        mark_job_queue_unavailable().
-
-        Импорты Celery-задач выполняются лениво (внутри метода), чтобы
-        не нарушать правило «никаких инфраструктурных импортов на верхнем
-        уровне модуля».
         """
         if job.status not in _DISPATCHABLE_JOB_STATUSES:
             raise InvalidDocumentStatusError(
@@ -232,7 +216,6 @@ class AnalysisJobService:
                 f"Допустимые статусы: {', '.join(s.value for s in _DISPATCHABLE_JOB_STATUSES)}"
             )
 
-        # Lazy import — инфраструктурный уровень, недопустим на верхнем уровне.
         from celery import chord  # noqa: PLC0415
         from app.workers.tasks import (  # noqa: PLC0415
             finalize_analysis_job,
@@ -250,7 +233,6 @@ class AnalysisJobService:
                 finalize_analysis_job.si(job_id_str)
             )
         else:
-            # Нет источников — сразу финализируем.
             result = finalize_analysis_job.delay(job_id_str)
 
         task_id = result.id
@@ -319,7 +301,7 @@ class AnalysisJobService:
         return job
 
     async def revoke_celery_task(self, celery_task_id: str) -> None:
-        from app.workers.celery_app import celery_app  # noqa: PLC0415 — lazy import
+        from app.workers.celery_app import celery_app  # noqa: PLC0415
         celery_app.control.revoke(celery_task_id, terminate=False)
 
     async def get_active_for_document(
@@ -346,13 +328,13 @@ class AnalysisJobService:
         self,
         project_id: uuid.UUID,
         document_id: uuid.UUID,
-    ) -> None:
+    ) -> ResetResult:
         """Сбросить все правки текущего job: suggestions → pending,
         документ → AWAITING_APPROVAL.
 
-        Допустимо только из статусов AWAITING_APPROVAL и READY.
-        Если у документа нет current_analysis_job_id — сбрасывать нечего,
-        выбрасываем AnalysisJobNotFoundError.
+        PR4-FIX: возвращает ResetResult(reset_count, document) вместо None.
+        Editor читает suggestions_reset_count и review_version из объекта
+        без второго SELECT к БД (PERF).
         """
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
@@ -371,24 +353,22 @@ class AnalysisJobService:
                     "У документа нет активного анализа для сброса"
                 )
 
-            await self._uow.suggestions.reset_to_pending_by_job(
+            reset_count = await self._uow.suggestions.reset_to_pending_by_job(
                 document.current_analysis_job_id
             )
-            await self._uow.documents.update_status(
+            document = await self._uow.documents.update_status(
                 document, DocumentStatusVO.AWAITING_APPROVAL
             )
             await self._uow.commit()
+
+        return ResetResult(reset_count=reset_count, document=document)
 
     async def bulk_create_jobs_for_project(
         self,
         project_id: uuid.UUID,
         document_ids: list[uuid.UUID] | None = None,
     ) -> list[dict]:
-        """CRIT-1: загружаем только document.id (UUID), не ORM-объекты.
-
-        UI-fix: если document_ids задан — запускаем анализ только для них
-        (если они входят в проект). Если None — все analyzable-документы проекта.
-        """
+        """CRIT-1: загружаем только document.id (UUID), не ORM-объекты."""
         async with self._uow:
             all_analyzable: list[uuid.UUID] = [
                 doc.id
