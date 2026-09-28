@@ -25,6 +25,8 @@
     и _FORCE_CONFIRM_STATUSES — эти значения удалены из DocumentStatusVO в
     коммите fe39c67 (4STATUS). После 4STATUS документ с ошибкой/отменой
     анализа имеет status=DRAFT, что уже входит в оба frozenset.
+  - FIX-P0-DISPATCH: добавлен dispatch_job() — строит Celery chord и вызывает
+    mark_dispatched(). create_job() теперь устанавливает current_analysis_job_id.
 """
 from __future__ import annotations
 
@@ -194,8 +196,65 @@ class AnalysisJobService:
                 status=AnalysisJobStatusVO.PENDING,
                 idempotency_key=idempotency_key,
             )
+
+            # FIX-P0-DISPATCH: устанавливаем current_analysis_job_id в той же
+            # транзакции, чтобы колонка никогда не оставалась NULL после создания job.
+            document.current_analysis_job_id = job.id
+            await self._uow.session.flush()
+
             await self._uow.commit()
         return job
+
+    async def dispatch_job(self, job: "AnalysisJob") -> None:
+        """Отправить job в очередь Celery.
+
+        FIX-P0-DISPATCH: метод, который ранее отсутствовал и вызывался
+        роутером (приводило к AttributeError → каждый job сразу FAILED).
+
+        Алгоритм:
+          1. Собрать список source_ids из job.sources (eager-loaded в репозитории).
+          2. Построить chord: N задач process_source_for_analysis_job
+             + callback finalize_analysis_job.
+          3. Отправить chord в Celery.
+          4. Вызвать mark_dispatched() с полученным task_id (id chord-группы).
+
+        Если Celery недоступен — chord.delay() / chord.apply_async() бросит
+        исключение; роутер перехватывает его и вызывает
+        mark_job_queue_unavailable().
+
+        Импорты Celery-задач выполняются лениво (внутри метода), чтобы
+        не нарушать правило «никаких инфраструктурных импортов на верхнем
+        уровне модуля».
+        """
+        if job.status not in _DISPATCHABLE_JOB_STATUSES:
+            raise InvalidDocumentStatusError(
+                f"Диспатч недопустим для задачи в статусе {job.status!r}. "
+                f"Допустимые статусы: {', '.join(s.value for s in _DISPATCHABLE_JOB_STATUSES)}"
+            )
+
+        # Lazy import — инфраструктурный уровень, недопустим на верхнем уровне.
+        from celery import chord  # noqa: PLC0415
+        from app.workers.tasks import (  # noqa: PLC0415
+            finalize_analysis_job,
+            process_source_for_analysis_job,
+        )
+
+        job_id_str = str(job.id)
+        source_tasks = [
+            process_source_for_analysis_job.si(job_id_str, str(source.id))
+            for source in job.sources
+        ]
+
+        if source_tasks:
+            result = chord(source_tasks)(
+                finalize_analysis_job.si(job_id_str)
+            )
+        else:
+            # Нет источников — сразу финализируем.
+            result = finalize_analysis_job.delay(job_id_str)
+
+        task_id = result.id
+        await self.mark_dispatched(job, task_id)
 
     async def mark_dispatched(
         self, job: "AnalysisJob", task_id: str
