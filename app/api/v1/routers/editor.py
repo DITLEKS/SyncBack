@@ -30,11 +30,9 @@ PERF:
   - get_document_content и get_original_content вызываются через asyncio.gather()
   - reset_analysis: второй SELECT get_document убран — документ берётся из reset_result
 
-FIX-PERM-1: permissions block обновлён:
-  - can_analyze включает ERROR и CANCELLED (повторный запуск после сбоя/отмены).
-  - can_delete: ERROR и CANCELLED явно unlocked (explicit > implicit).
-  - sources_is_editable: ERROR и CANCELLED трактуются как редактируемые
-    (анализ не запущен, источники менять разрешено).
+FIX-P0: убраны ссылки на DocumentStatusVO.ERROR и DocumentStatusVO.CANCELLED
+  (удалены в коммите fe39c67, 4STATUS). После 4STATUS документ с ошибкой/отменой
+  анализа публично имеет status=draft — ветки по ERROR/CANCELLED не нужны.
 """
 import asyncio
 import logging
@@ -77,33 +75,30 @@ _STATUSES_WITH_APPLIED_CHANGES = frozenset({
     DocumentStatusVO.READY,
 })
 
+# FIX-P0: ERROR/CANCELLED удалены из DocumentStatusVO (4STATUS, fe39c67).
+# Документ с ошибкой/отменой анализа теперь имеет status=DRAFT,
+# поэтому DRAFT-ветка покрывает все эти случаи.
 _STATUS_VIEW_MODE: dict[DocumentStatusVO, str] = {
     DocumentStatusVO.DRAFT: "original",
     DocumentStatusVO.IN_PROGRESS: "original",
     DocumentStatusVO.AWAITING_APPROVAL: "suggested",
     DocumentStatusVO.READY: "clean",
-    DocumentStatusVO.ERROR: "original",
-    DocumentStatusVO.CANCELLED: "original",
 }
 
-# FIX-PERM-1: статусы, из которых можно запустить анализ.
-# Включает ERROR и CANCELLED — позволяет повторный запуск без ручного
-# изменения статуса через БД. Соответствует _ANALYSIS_ALLOWED_STATUSES
-# в analysis_job_service.py (FIX-ANAL-1).
+# FIX-P0: can_analyze — только статусы существующего DocumentStatusVO.
+# DRAFT покрывает бывшие ERROR/CANCELLED (4STATUS).
 _CAN_ANALYZE_STATUSES = frozenset({
     DocumentStatusVO.DRAFT,
     DocumentStatusVO.READY,
-    DocumentStatusVO.ERROR,
-    DocumentStatusVO.CANCELLED,
 })
 
-# FIX-PERM-1: статусы, при которых документ «заблокирован» (анализ активен).
+# Статусы, при которых документ «заблокирован» (анализ активен).
 _LOCKED_STATUSES = frozenset({
     DocumentStatusVO.IN_PROGRESS,
 })
 
-# FIX-PERM-1: статусы, при которых источники недоступны для редактирования.
-# ERROR и CANCELLED — анализ не запущен, источники менять можно (как DRAFT).
+# FIX-P0: источники недоступны для редактирования только при активном анализе.
+# DRAFT (бывший ERROR/CANCELLED) — редактирование разрешено.
 _SOURCES_NOT_EDITABLE_STATUSES = frozenset({
     DocumentStatusVO.IN_PROGRESS,
     DocumentStatusVO.AWAITING_APPROVAL,
@@ -212,7 +207,7 @@ async def get_editor_aggregate(
         _safe_count_by_status(suggestion_service, project.id, document_id),
     )
 
-    # Если оригинал не нужен — подставляем текущий контент (статусы DRAFT/IN_PROGRESS/ERROR)
+    # Если оригинал не нужен — подставляем текущий контент (статусы DRAFT/IN_PROGRESS)
     original_content = original_content_raw if needs_original else editor_content
 
     suggestions = [SuggestionResponse.model_validate(s) for s in suggestions_raw]
@@ -237,7 +232,6 @@ async def get_editor_aggregate(
         rejected=rejected,
     )
 
-    # FIX-PERM-1: явные frozenset-константы вместо inline-выражений.
     permissions = EditorPermissions(
         can_analyze=document.status in _CAN_ANALYZE_STATUSES,
         can_review=document.status == DocumentStatusVO.AWAITING_APPROVAL,

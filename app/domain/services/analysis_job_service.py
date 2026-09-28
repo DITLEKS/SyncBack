@@ -21,11 +21,10 @@
   - N-2 (ревю): добавлен revoke_celery_task() — тонкий делегат к Celery.
   - UI-fix: bulk_create_jobs_for_project принимает опциональный document_ids фильтр.
   - FEAT: reset_analysis() — сброс всех suggestions → pending, документ → AWAITING_APPROVAL.
-  - FIX-ANAL-1: _ANALYSIS_ALLOWED_STATUSES дополнен ERROR и CANCELLED —
-    повторный запуск анализа без ручного перевода в DRAFT через БД.
-  - review #2: добавлен check_document_needs_force_confirm() — возвращает True
-    для READY, ERROR и CANCELLED, чтобы роутер запрашивал force=true при
-    повторном запуске из любого из этих статусов, а не только из READY.
+  - FIX-P0: убраны DocumentStatusVO.ERROR/CANCELLED из _ANALYSIS_ALLOWED_STATUSES
+    и _FORCE_CONFIRM_STATUSES — эти значения удалены из DocumentStatusVO в
+    коммите fe39c67 (4STATUS). После 4STATUS документ с ошибкой/отменой
+    анализа имеет status=DRAFT, что уже входит в оба frozenset.
 """
 from __future__ import annotations
 
@@ -45,25 +44,19 @@ from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO, Sugg
 if TYPE_CHECKING:
     from app.infrastructure.db.models.analysis_job import AnalysisJob
 
-# Статусы документа, из которых разрешён запуск анализа.
-# FIX-ANAL-1: добавлены ERROR и CANCELLED — позволяет повторно запустить
-# анализ без ручного вмешательства в БД.
+# FIX-P0: ERROR/CANCELLED удалены — они не существуют в DocumentStatusVO (4STATUS).
+# Документ после сбоя/отмены анализа переводится в DRAFT (миграция 0020),
+# поэтому DRAFT здесь достаточно для повторного запуска.
 _ANALYSIS_ALLOWED_STATUSES = frozenset({
     DocumentStatusVO.DRAFT,
     DocumentStatusVO.AWAITING_APPROVAL,
     DocumentStatusVO.READY,
-    DocumentStatusVO.ERROR,      # FIX-ANAL-1
-    DocumentStatusVO.CANCELLED,  # FIX-ANAL-1
 })
 
-# review #2: статусы, при которых роутер обязан требовать force=true
-# перед повторным запуском анализа. Включает ERROR и CANCELLED — пользователь
-# должен явно подтвердить повторный запуск из «нерабочего» состояния,
-# а не только из READY (как было до этого фикса).
+# FIX-P0: ERROR/CANCELLED удалены. READY остаётся единственным статусом,
+# из которого повторный запуск требует явного force=true.
 _FORCE_CONFIRM_STATUSES = frozenset({
     DocumentStatusVO.READY,
-    DocumentStatusVO.ERROR,
-    DocumentStatusVO.CANCELLED,
 })
 
 # Статусы job, из которых допустима отмена:
@@ -128,11 +121,11 @@ class AnalysisJobService:
     async def check_document_needs_force_confirm(
         self, project_id: uuid.UUID, document_id: uuid.UUID
     ) -> bool:
-        """review #2: возвращает True если повторный запуск анализа требует
+        """Возвращает True если повторный запуск анализа требует
         явного подтверждения (force=true) от пользователя.
 
-        True для статусов READY, ERROR и CANCELLED — во всех трёх случаях
-        анализ «уже выполнялся» и перезапуск должен быть осознанным.
+        True для статуса READY — анализ уже выполнялся и перезапуск
+        должен быть осознанным.
         False для DRAFT и AWAITING_APPROVAL — запуск без подтверждения.
         """
         async with self._uow:
@@ -190,8 +183,7 @@ class AnalysisJobService:
                     "Для документа уже выполняется анализ"
                 )
 
-            # FIX-ANAL-1: ERROR/CANCELLED тоже сбрасываются в DRAFT перед
-            # созданием job — самая ветка, что и AWAITING_APPROVAL/READY.
+            # Если документ не в DRAFT — сбрасываем в DRAFT перед созданием job.
             if document.status != DocumentStatusVO.DRAFT:
                 document = await self._uow.documents.update_status(
                     document, DocumentStatusVO.DRAFT
@@ -320,11 +312,9 @@ class AnalysisJobService:
                     "У документа нет активного анализа для сброса"
                 )
 
-            # Сбрасываем все правки текущего job обратно в pending
             await self._uow.suggestions.reset_to_pending_by_job(
                 document.current_analysis_job_id
             )
-            # Документ возвращается в AWAITING_APPROVAL (правки снова требуют ревю)
             await self._uow.documents.update_status(
                 document, DocumentStatusVO.AWAITING_APPROVAL
             )
@@ -348,7 +338,6 @@ class AnalysisJobService:
                 )
             ]
 
-        # Фильтрация по document_ids если задана
         if document_ids is not None:
             requested = frozenset(document_ids)
             analyzable_ids = [did for did in all_analyzable if did in requested]
