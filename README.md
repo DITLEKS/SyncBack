@@ -87,6 +87,11 @@ docker compose exec backend ruff check .
 | `test_iter_accepted_changes_pages.py` | Пагинированный итератор принятых правок |
 | `test_status_transitions.py` | Полная матрица допустимых/недопустимых переходов статусов |
 | `test_unit_of_work_abc.py` | ABC UoW: реализации обязаны переопределять все методы |
+| `test_my_documents_sources.py` | Фильтрация источников в «Мои документы» |
+| `test_source_document_m2m.py` | M:N привязка источников к документам |
+| `test_source_repository_scope.py` | Изоляция источников по scope и владельцу |
+| `test_source_service_batch.py` | Пакетные операции с источниками |
+| `test_list_with_total_window_count.py` | Пагинатор с оконным COUNT |
 
 ### Integration-тесты (`tests/integration/`)
 
@@ -232,7 +237,7 @@ Query-параметры пагинации правок:
 Поле `suggestions_total` в ответе — полный счётчик правок документа (для пагинатора фронта). Счётчики `pending`/`accepted`/`rejected` вычисляются O(1) агрегатным SQL-запросом, не O(n) проходом по текущей странице.
 
 Поля `permissions`:
-- `can_analyze` — доступно из `draft`, `ready`, `error`, `cancelled` (**повторный запуск после сбоя/отмены без ручного сброса статуса**).
+- `can_analyze` — доступно только из `draft`, `awaiting_approval`, `ready`. Статусы `error` и `cancelled` **не дают прямого повторного запуска** — документ необходимо предварительно перевести в `draft` (миграция `0020` делает это автоматически при обновлении схемы для существующих записей; в рантайне воркер выставляет `draft` при финализации с ошибкой/отменой).
 - `can_review` — только `awaiting_approval`.
 - `can_export` — только `ready`.
 - `can_delete` — всё кроме `in_progress`.
@@ -263,7 +268,7 @@ Query-параметры пагинации правок:
 - После загрузки — `draft`.
 - После успешной постановки задачи в Celery — `in_progress`.
 - Успешный анализ с правками — `awaiting_approval`; без правок — `ready`.
-- Ошибка — `error`; отмена — `cancelled`. **Оба статуса позволяют повторный запуск анализа** (`can_analyze=true`) без ручного сброса статуса через БД — поведение аналогично `draft`.
+- Ошибка — `error`; отмена — `cancelled`. Оба статуса **не разрешают прямой повторный запуск анализа** (`can_analyze=false`). Для повторного запуска документ должен вернуться в `draft` (воркер делает это автоматически при финализации; при необходимости — через сброс статуса в `draft` вручную через БД или миграцию).
 - Из `awaiting_approval` в `ready` — только через `PUT /suggestions/review` с `finalize=true` или `PATCH /suggestions` при отсутствии `pending`-правок.
 - Из `awaiting_approval` / `ready` — откат через `POST /editor/reset` (возвращает в `awaiting_approval`, сбрасывает правки, инкрементирует `review_version`).
 
@@ -382,7 +387,8 @@ SyncBack/
 │       ├── 0017_r1_r2_r3_r4_r5_r6_schema_cleanup.py
 │       ├── 0018_drop_text_content_from_sources.py
 │       ├── 0018_n1_n2_n4_n5_n6_n7_n8_fixes.py
-│       └── 0019_add_indexes_opt4_opt5.py
+│       ├── 0019_add_indexes_opt4_opt5.py
+│       └── 0020_drop_error_cancelled_analysis_allowed.py
 └── app/
     ├── main.py
     ├── core/{config,logging_setup,correlation_middleware,body_size_limit_middleware,dependencies}.py
@@ -444,8 +450,13 @@ tests/
 │   ├── test_jwt_handler.py
 │   ├── test_login_rate_limiter.py
 │   ├── test_minio_presigned_url_ttl.py
+│   ├── test_my_documents_sources.py
 │   ├── test_password_hasher.py
 │   ├── test_analysis_tasks_missing_records.py
+│   ├── test_source_document_m2m.py
+│   ├── test_source_repository_scope.py
+│   ├── test_source_service_batch.py
+│   ├── test_list_with_total_window_count.py
 │   ├── test_status_transitions.py
 │   └── test_unit_of_work_abc.py
 └── integration/
