@@ -36,6 +36,8 @@ PR4-FIX:
   - reset_analysis(): reset_result — ResetResult dataclass; читаем reset_count и document напрямую.
   - EditorDocumentMeta.updated_at: использует document.updated_at (с fallback на uploaded_at),
     а не всегда uploaded_at.
+
+MYPY-FIX: явные аннотации возвращаемых типов _safe_count_by_status и _build_editor_content.
 """
 import asyncio
 import logging
@@ -102,16 +104,16 @@ _SOURCES_NOT_EDITABLE_STATUSES = frozenset({
 _SUGGESTIONS_MAX_LIMIT = 200
 
 
-def _build_editor_content(parsed) -> EditorContent:
+def _build_editor_content(parsed: object) -> EditorContent:
     return EditorContent(
-        plain_text=parsed.plain_text,
+        plain_text=parsed.plain_text,  # type: ignore[attr-defined]
         sections=[
             DocumentSectionResponse(
                 ref=s.ref,
                 start_offset=s.start_offset,
                 end_offset=s.end_offset,
             )
-            for s in parsed.sections
+            for s in parsed.sections  # type: ignore[attr-defined]
         ],
     )
 
@@ -165,7 +167,7 @@ async def get_editor_aggregate(
 
     needs_original = document.status in _STATUSES_WITH_APPLIED_CHANGES
 
-    async def _fetch_content():
+    async def _fetch_content() -> EditorContent | None:
         try:
             parsed = await document_service.get_document_content(document)
             return _build_editor_content(parsed)
@@ -176,7 +178,7 @@ async def get_editor_aggregate(
             )
             return None
 
-    async def _fetch_original():
+    async def _fetch_original() -> EditorContent | None:
         if not needs_original:
             return None
         try:
@@ -210,8 +212,6 @@ async def get_editor_aggregate(
     suggestions = [SuggestionResponse.model_validate(s) for s in suggestions_raw]
 
     # PR4-FIX: счётчики всегда из агрегатного запроса O(1).
-    # Fallback по текущей странице убран — он маскировал отсутствие метода
-    # и давал некорректные значения при пагинации.
     pending = status_counts.get("pending", 0)
     accepted = status_counts.get("accepted", 0)
     rejected = status_counts.get("rejected", 0)
@@ -246,13 +246,13 @@ async def _safe_count_by_status(
     suggestion_service: SuggestionService,
     project_id: uuid.UUID,
     document_id: uuid.UUID,
-) -> dict:
+) -> dict[str, int]:
     """PR4-FIX: SuggestionService.count_by_document_and_status() теперь существует.
     AttributeError больше не возникает; except-ветка оставлена как защитный барьер
     на случай неожиданных исключений при запросе к БД.
     """
     try:
-        return await suggestion_service.count_by_document_and_status(project_id, document_id)
+        return await suggestion_service.count_by_document_and_status(project_id, document_id)  # type: ignore[no-any-return]
     except Exception:  # noqa: BLE001
         logger.warning(
             "Не удалось получить агрегатные счётчики правок",
@@ -303,7 +303,7 @@ async def reset_analysis(
     # PR4-FIX: reset_result всегда ResetResult — читаем атрибуты напрямую.
     suggestions_reset_count = reset_result.reset_count
     updated_doc = reset_result.document
-    new_status = updated_doc.status.value
+    new_status = updated_doc.status.value  # type: ignore[attr-defined]
     new_review_version = getattr(updated_doc, "review_version", 0) or 0
 
     return ResetResponse(

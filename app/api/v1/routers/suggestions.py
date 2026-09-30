@@ -13,6 +13,8 @@ REFACTOR (bulk unification):
 OPT-S4: POST /{id}/reset — alias поверх patch_suggestions;
         возвращает SuggestionResponse для одиночного id (обратная совместимость).
 OPT-S5: audit_decisions строится через itertools.chain (без O(N) tuple в памяти).
+
+MYPY-FIX: явные аннотации возвращаемых типов для всех хелперов и роутер-функций.
 """
 
 import itertools
@@ -80,7 +82,7 @@ async def _safe_bulk_log(
 ) -> None:
     try:
         await audit_log_service.bulk_log_suggestion_decisions(user_id, decisions)
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning(
             "Не удалось записать bulk audit_log для решений по правкам",
             exc_info=True,
@@ -96,7 +98,7 @@ async def _safe_single_log(
 ) -> None:
     try:
         await audit_log_service.log_suggestion_decision(user_id, suggestion_id, action)
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning(
             "Не удалось записать audit_log для решения по правке",
             exc_info=True,
@@ -245,13 +247,13 @@ async def patch_suggestions(
     ) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    action_map = {
+    action_map: dict[str, AuditActionVO] = {
         "accepted": AuditActionVO.ACCEPT,
         "rejected": AuditActionVO.REJECT,
         "pending": AuditActionVO.RESET,
     }
     audit_action = action_map[target_status]
-    updated_ids = getattr(result, "updated_ids", None) or []
+    updated_ids: list[uuid.UUID] = getattr(result, "updated_ids", None) or []
     if updated_ids:
         await _safe_bulk_log(
             audit_log_service,

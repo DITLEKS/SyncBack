@@ -31,6 +31,8 @@ REFACTOR: dispatch run_analysis_job делегирован в service.dispatch_j
 
 review #7: добавлен logger.warning при поглощении ошибки dispatch в
   start_analysis_job — потеря диагностики при сбое очереди устранена.
+
+MYPY-FIX: _job_response возвращает JSONResponse (явная аннотация).
 """
 
 import logging
@@ -64,7 +66,7 @@ router = APIRouter(
 )
 
 
-def _job_response(job, http_status: int = status.HTTP_201_CREATED) -> JSONResponse:
+def _job_response(job: object, http_status: int = status.HTTP_201_CREATED) -> JSONResponse:
     return JSONResponse(
         status_code=http_status,
         content=jsonable_encoder(AnalysisJobResponse.model_validate(job)),

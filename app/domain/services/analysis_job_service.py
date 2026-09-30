@@ -30,6 +30,8 @@
   - PR4-FIX: reset_analysis() возвращает ResetResult(reset_count, document) вместо None,
     чтобы editor.py мог читать suggestions_reset_count и review_version без
     второго SELECT.
+  - MYPY-FIX: dispatch_job() → AnalysisJob, revoke_celery_task() → None,
+    все методы имеют явные аннотации возвращаемых типов.
 """
 from __future__ import annotations
 
@@ -204,11 +206,12 @@ class AnalysisJobService:
             await self._uow.commit()
         return job
 
-    async def dispatch_job(self, job: "AnalysisJob") -> None:
-        """Отправить job в очередь Celery.
+    async def dispatch_job(self, job: "AnalysisJob") -> "AnalysisJob":
+        """Отправить job в очередь Celery и вернуть обновлённый объект.
 
         FIX-P0-DISPATCH: метод, который ранее отсутствовал и вызывался
         роутером (приводило к AttributeError → каждый job сразу FAILED).
+        MYPY-FIX: возвращает AnalysisJob (был None → несовпадение с роутером).
         """
         if job.status not in _DISPATCHABLE_JOB_STATUSES:
             raise InvalidDocumentStatusError(
@@ -236,7 +239,7 @@ class AnalysisJobService:
             result = finalize_analysis_job.delay(job_id_str)
 
         task_id = result.id
-        await self.mark_dispatched(job, task_id)
+        return await self.mark_dispatched(job, task_id)
 
     async def mark_dispatched(
         self, job: "AnalysisJob", task_id: str

@@ -17,8 +17,10 @@ FIX-review-4: DELETE /{source_id} — guard и удаление атомарны
     active_job_checker callback в delete_source_with_guard.
     Удалён вызов source_service.get_primary_document_id() (метод не существует).
 FIX-review-6: /note помечен deprecated=True в регистрации роутера.
+
+MYPY-FIX: убран `from __future__ import annotations` (конфликтует с
+  runtime-eval FastAPI Form(SourceScopeVO)); явные аннотации возвращаемых типов.
 """
-from __future__ import annotations
 
 import uuid as _uuid
 
