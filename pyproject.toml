@@ -48,7 +48,13 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "C4", "PLC"]
-ignore = ["E501", "B008"]
+ignore = [
+    "E501",
+    "B008",
+    # PLC0415: delayed imports inside functions are an intentional pattern
+    # in repository classes to avoid circular imports at module load time.
+    "PLC0415",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "alembic/*" = ["ALL"]

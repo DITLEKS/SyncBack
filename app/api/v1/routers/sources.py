@@ -159,7 +159,9 @@ async def upload_file_source(
             document_id=parsed_doc_id,
         )
     except FileTooLargeError as exc:
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)
+        ) from exc
     return SourceResponse.model_validate(source)
 
 
@@ -226,4 +228,6 @@ async def delete_source(
             active_job_checker=active_job_checker,
         )
     except SourceNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
