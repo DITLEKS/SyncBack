@@ -35,9 +35,16 @@ class User(Base):
             values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
+        # NOTE: UserRole.VIEWER.value == 'viewer'.
+        # Значение 'viewer' присутствует в PostgreSQL-типе user_role начиная
+        # с начальной миграции (0001). Дополнительная миграция ADD VALUE не нужна.
         default=UserRole.VIEWER,
         server_default=UserRole.VIEWER.value,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    projects: Mapped[list["Project"]] = relationship(back_populates="owner")
+    projects: Mapped[list["Project"]] = relationship(
+        "Project",
+        back_populates="owner",
+        lazy="noload",
+    )
