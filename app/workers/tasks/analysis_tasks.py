@@ -22,21 +22,16 @@ import asyncio
 import functools
 import logging
 import uuid
-from typing import Any
 
 from app.domain.exceptions import (
     DocumentParseError,
-    SourceNotFoundError,
 )
 from app.domain.interfaces.source_connector import SourceKind, SourceRef
-from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO
 from app.infrastructure.cache.redis_client import get_redis_client
-from app.infrastructure.cache.sync_redis_client import get_sync_redis_client
 from app.infrastructure.db.session import isolated_uow
 from app.infrastructure.llm.factory import get_llm_client
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
-from app.infrastructure.queue.dead_letter_store import DeadLetterStore
 from app.infrastructure.source_connectors.manual_upload_connector import ManualUploadConnector
 from app.infrastructure.source_connectors.url_connector import UrlConnector
 from app.infrastructure.storage.minio_storage import MinioStorage
@@ -265,21 +260,15 @@ async def _finalize(results: list[dict], job_id: str) -> None:
             logger.error("finalize: document не найден", extra={"job_id": job_id})
             return
 
-        if cancelled:
-            # 4STATUS: отмена → документ возвращается в DRAFT
+        if cancelled and not failed:
             job.status = AnalysisJobStatusVO.CANCELLED
             document.status = DocumentStatusVO.DRAFT
         elif failed:
-            # 4STATUS: ошибка → документ возвращается в DRAFT (не в ERROR)
-            job.status = AnalysisJobStatusVO.FAILED
+            all_failed = len(failed) == len(results)
+            job.status = AnalysisJobStatusVO.FAILED if all_failed else AnalysisJobStatusVO.PARTIAL_SUCCESS
             document.status = DocumentStatusVO.DRAFT
         else:
-            pending_suggestions = await uow.suggestions.count_pending(job.id)
-            if pending_suggestions > 0:
-                job.status = AnalysisJobStatusVO.SUCCESS
-                document.status = DocumentStatusVO.AWAITING_APPROVAL
-            else:
-                job.status = AnalysisJobStatusVO.SUCCESS
-                document.status = DocumentStatusVO.READY
+            job.status = AnalysisJobStatusVO.SUCCESS
+            document.status = DocumentStatusVO.AWAITING_APPROVAL
 
         await uow.commit()

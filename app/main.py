@@ -29,8 +29,8 @@ from app.core.limiter import limiter
 from app.core.logging_setup import configure_logging
 from app.domain.exceptions import (
     AnalysisJobNotFoundError,
-    DomainError,
     DocumentNotFoundError,
+    DomainError,
     ProjectNotFoundError,
     SourceNotFoundError,
     SuggestionNotFoundError,
