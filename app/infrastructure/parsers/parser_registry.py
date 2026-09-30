@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
-from typing import Callable
 
 from app.domain.exceptions import UnsupportedFormatError
 from app.domain.interfaces.document_parser import ParsedDocument
@@ -24,9 +23,9 @@ _BLOCKED_EXTENSIONS: frozenset[str] = frozenset({".doc"})
 
 
 class DocumentParserRegistry:
-    """Registry парсеров документов.
+    """Реестри парсеров документов.
 
-    Диспатчер суффиксов строится один раз через @lru_cache.
+    Диспатчер суффиксов строится один раз через dict.get().
     Добавление нового формата: добавить парсер в __init__ и запись в _EXTENSION_MAP.
     """
 
@@ -44,13 +43,8 @@ class DocumentParserRegistry:
         self._txt_parser      = TxtParser()
         self._markdown_parser = MarkdownParser()
 
-    @lru_cache(maxsize=None)
     def _get_parser_for_suffix(self, suffix: str) -> str | None:
-        """Вернуть атрибут парсера для заданного суффикса или None (fallback).
-
-        @lru_cache гарантирует O(1) dict.get() вместо O(n) if/elif-цепочки
-        и кэширует результат на весь лифтайм объекта.
-        """
+        """Вернуть атрибут парсера для заданного суффикса или None (fallback)."""
         return self._EXTENSION_MAP.get(suffix)
 
     def parse_by_filename(self, filename: str, raw_bytes: bytes) -> ParsedDocument:

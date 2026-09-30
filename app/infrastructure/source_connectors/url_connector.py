@@ -19,6 +19,11 @@ import urllib.robotparser
 
 import httpx
 
+try:
+    from bs4 import BeautifulSoup as _BeautifulSoup
+except ImportError:
+    _BeautifulSoup = None  # type: ignore[assignment,misc]
+
 from app.domain.interfaces.source_connector import SourceKind, SourceMetadata, SourceRef
 
 logger = logging.getLogger("syncscribe.connectors.url")
@@ -79,7 +84,7 @@ class UrlConnector:
                 asyncio.to_thread(self._read_robots_sync, url),
                 timeout=_ROBOTS_TIMEOUT,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.debug("robots.txt check timed out, продолжаем", extra={"url": url})
         except Exception as exc:
             logger.debug("robots.txt check failed, продолжаем", extra={"url": url, "exc": str(exc)})
@@ -100,11 +105,9 @@ class UrlConnector:
 
     @staticmethod
     def _strip_html(raw: bytes) -> str:
-        try:
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(raw, "html.parser")
+        if _BeautifulSoup is not None:
+            soup = _BeautifulSoup(raw, "html.parser")
             for tag in soup(["script", "style", "noscript", "head"]):
                 tag.decompose()
             return soup.get_text(separator="\n", strip=True)
-        except ImportError:
-            return raw.decode("utf-8", errors="replace")
+        return raw.decode("utf-8", errors="replace")
