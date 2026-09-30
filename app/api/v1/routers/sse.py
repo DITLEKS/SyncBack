@@ -23,10 +23,15 @@ GET /api/v1/events/documents
   недоступен при старте, автоматически активируется InMemorySSEBroker
   (старое поведение — допустимо для single-instance деплоя).
 
-FIX-5: endpoint теперь возвращает HTTP 422 если передано > 50 document_ids,
+FIX-5: endpoint возвращает HTTP 422 если передано > 50 document_ids,
   вместо молчаливого усечения. Клиент получает явную ошибку.
+FIX-5b: невалидные UUID в document_ids также возвращают HTTP 422
+  вместо молчаливого пропуска.
 FIX-4: get_redis_client() использует Redis.from_url() — конструктор без
   сетевого вызова (соединение ленивое). Блокировок event loop нет — no-op.
+FIX-6: _event_stream корректно обрабатывает CancelledError и GeneratorExit,
+  гарантируя вызов unsubscribe через finally.
+FIX-7: get_sse_broker() логирует предупреждение при fallback без lifespan.
 """
 from __future__ import annotations
 
@@ -35,7 +40,7 @@ import json
 import logging
 import uuid
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -49,6 +54,7 @@ logger = logging.getLogger("syncscribe.api.sse")
 router = APIRouter(prefix="/events", tags=["sse"])
 
 PING_INTERVAL = 25
+# Лимит document_ids в фильтре. При необходимости вынести в Settings.
 DOCUMENT_IDS_MAX = 50
 
 
@@ -251,7 +257,10 @@ class RedisPubSubBroker(ISSEBroker):
 _broker: ISSEBroker | None = None
 
 
-async def init_sse_broker(redis_url: str | None = None, channel: str = "syncscribe:sse") -> ISSEBroker:
+async def init_sse_broker(
+    redis_url: str | None = None,
+    channel: str = "syncscribe:sse",
+) -> ISSEBroker:
     """Инициализировать брокер при старте приложения (вызывать из lifespan)."""
     global _broker
     if redis_url:
@@ -279,8 +288,18 @@ async def shutdown_sse_broker() -> None:
 
 
 def get_sse_broker() -> ISSEBroker:
+    """Dependency: возвращает активный брокер.
+
+    Если init_sse_broker() не был вызван из lifespan — логирует предупреждение
+    и создаёт InMemorySSEBroker как fallback (только для single-instance).
+    """
     global _broker
     if _broker is None:
+        logger.warning(
+            "SSE broker не был инициализирован через lifespan. "
+            "Создаётся InMemorySSEBroker как fallback — "
+            "допустимо только для single-instance деплоя."
+        )
         _broker = InMemorySSEBroker()
     return _broker
 
@@ -291,6 +310,12 @@ async def _event_stream(
     document_ids: frozenset[uuid.UUID],
     broker: ISSEBroker,
 ) -> AsyncIterator[bytes]:
+    """Генератор SSE-событий для одного подключённого клиента.
+
+    Гарантирует unsubscribe через finally — в том числе при CancelledError
+    и GeneratorExit (Python < 3.11 не всегда вызывает finally при cancel
+    внутри asyncio.wait_for без явного перехвата).
+    """
     sub_id, q = await broker.subscribe(user_id, document_ids)
     try:
         while True:
@@ -301,6 +326,8 @@ async def _event_stream(
             except asyncio.TimeoutError:
                 yield b"event: ping\ndata: {}\n\n"
                 continue
+            except (asyncio.CancelledError, GeneratorExit):
+                break
 
             if event is None:
                 break
@@ -318,7 +345,10 @@ async def document_events(
     request: Request,
     document_ids: str | None = Query(
         default=None,
-        description=f"Опциональный фильтр: UUID через запятую (макс {DOCUMENT_IDS_MAX}).",
+        description=(
+            f"Опциональный фильтр: UUID через запятую (макс {DOCUMENT_IDS_MAX}). "
+            "Невалидные UUID возвращают HTTP 422."
+        ),
     ),
     current_user: User = Depends(get_current_user),
     broker: ISSEBroker = Depends(get_sse_broker),
@@ -337,11 +367,24 @@ async def document_events(
             )
 
         parsed: list[uuid.UUID] = []
+        invalid: list[str] = []
         for raw in raw_ids:
             try:
                 parsed.append(uuid.UUID(raw))
             except ValueError:
-                pass
+                invalid.append(raw)
+
+        if invalid:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Параметр document_ids содержит невалидные UUID: "
+                    f"{', '.join(invalid[:5])}"
+                    + (f" (и ещё {len(invalid) - 5})" if len(invalid) > 5 else "")
+                    + "."
+                ),
+            )
+
         filter_ids = frozenset(parsed)
 
     return StreamingResponse(

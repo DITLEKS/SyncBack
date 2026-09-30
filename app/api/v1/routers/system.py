@@ -12,7 +12,7 @@ router = APIRouter(prefix="/system", tags=["system"])
 
 # Форматы, которые парсер принимает без ошибки
 _SUPPORTED_FORMATS = ["pdf", "docx", "txt", "md"]
-# Форматы, которые известны, но вернут 400 UnsupportedFormatError
+# Форматы, которые известны системе, но вернут 400 UnsupportedFormatError
 _UNSUPPORTED_FORMATS = ["doc"]
 
 
@@ -38,16 +38,17 @@ async def get_capabilities(
     supported_formats = [
         f.value
         for f in DocumentFormat
-        if f != DocumentFormat.DOC  # .doc не поддерживается парсером
+        if f.value not in _UNSUPPORTED_FORMATS
     ]
     return {
         "upload": {
             "max_size_mb": settings.max_upload_size_mb,
             "max_size_bytes": settings.max_upload_size_bytes,
             "supported_formats": supported_formats,
+            "unsupported_formats": _UNSUPPORTED_FORMATS,
             "supported_mime_types": [
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
-                "text/plain",   # .txt
+                "text/plain",    # .txt
                 "text/markdown",  # .md
                 "text/x-markdown",
             ],

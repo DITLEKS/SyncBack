@@ -12,7 +12,7 @@ REFACTOR (bulk unification):
 
 OPT-S4: POST /{id}/reset — alias поверх patch_suggestions;
         возвращает SuggestionResponse для одиночного id (обратная совместимость).
-OPT-S5: audit_decisions строится через itertools.chain (без O(N) tuple в памяти).
+OPT-S5: audit_decisions строится через itertools.chain (единый проход по спискам).
 
 MYPY-FIX: явные аннотации возвращаемых типов для всех хелперов и роутер-функций.
 """
@@ -253,7 +253,9 @@ async def patch_suggestions(
         "pending": AuditActionVO.RESET,
     }
     audit_action = action_map[target_status]
-    updated_ids: list[uuid.UUID] = getattr(result, "updated_ids", None) or []
+    # result.updated_ids — обязательное поле PatchSuggestionsResult.
+    # Если сервис не вернул список — это баг в сервисном слое, а не здесь.
+    updated_ids: list[uuid.UUID] = result.updated_ids
     if updated_ids:
         await _safe_bulk_log(
             audit_log_service,
@@ -310,7 +312,7 @@ async def review_save(
         else:
             rejected_ids.append(d.suggestion_id)
 
-    # OPT-S5: itertools.chain вместо tuple unpack — без O(N) аллокации в памяти
+    # OPT-S5: единый проход через itertools.chain для построения audit_decisions.
     audit_decisions: list[tuple[uuid.UUID, AuditActionVO]] = [
         (sid, AuditActionVO.ACCEPT if sid in accepted_set else AuditActionVO.REJECT)
         for sid in itertools.chain(accepted_ids, rejected_ids)
