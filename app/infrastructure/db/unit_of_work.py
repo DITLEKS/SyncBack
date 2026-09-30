@@ -17,8 +17,8 @@ SQLAlchemy-реализация Unit of Work.
 """
 from __future__ import annotations
 
-from typing import Any
 from types import TracebackType
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -56,7 +56,7 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         # Auth repositories (HIGH-A: добавлен, чтобы uow.users не давал AttributeError)
         self.users       = UserRepository(session)
 
-    async def __aenter__(self) -> "SqlAlchemyUnitOfWork":
+    async def __aenter__(self) -> SqlAlchemyUnitOfWork:
         return self
 
     async def __aexit__(
