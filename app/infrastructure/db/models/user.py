@@ -3,6 +3,13 @@
 
 Фикс: добавлен values_callable, чтобы SQLAlchemy отправлял в БД значение enum-члена,
 а не его имя.
+
+FIX-review-server-default: server_default оставлен как 'user' (значение, созданное
+в миграции 0001). Значение 'viewer' появляется в PostgreSQL-типе user_role только
+после миграции 0024. Использование 'viewer' до 0024 вызывает
+InvalidTextRepresentationError при любом INSERT без явного role.
+ORM-уровневый default=UserRole.VIEWER сохранён — Python всегда подставляет
+значение явно, server_default срабатывает только при raw-SQL вставках.
 """
 
 import uuid
@@ -35,11 +42,10 @@ class User(Base):
             values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
-        # NOTE: UserRole.VIEWER.value == 'viewer'.
-        # Значение 'viewer' присутствует в PostgreSQL-типе user_role начиная
-        # с начальной миграции (0001). Дополнительная миграция ADD VALUE не нужна.
+        # server_default uses 'user' — present in user_role since migration 0001.
+        # Switch to UserRole.VIEWER.value after migration 0024 has run on all envs.
         default=UserRole.VIEWER,
-        server_default=UserRole.VIEWER.value,
+        server_default="user",
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
