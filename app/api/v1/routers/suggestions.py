@@ -1,21 +1,9 @@
-"""API для работы с правками документа.
+"""Правки документа: список, решения (PATCH — single и bulk), сохранение ревью, сброс.
 
-FIX-2: /reject-all возвращает BulkRejectResponse с полем rejected_count.
-FIX-6: _safe_bulk_log и _safe_single_log с exc_info=True.
-FIX-7: review_save логирует предупреждение при расхождении If-Match vs payload.review_version.
-RESET: POST /{suggestion_id}/reset — делегирует в patch_suggestions (OPT-S4).
-R-3: POST /finalize удалён — дублировал PUT /review с finalize=true.
-R-9: GET / принимает ?status= для серверной фильтрации.
-
-REFACTOR (bulk unification):
-  PATCH /suggestions — единственный endpoint для изменения статуса правок.
-
-OPT-S4: POST /{id}/reset — alias поверх patch_suggestions;
-        возвращает SuggestionResponse для одиночного id (обратная совместимость).
-OPT-S5: audit_decisions строится через itertools.chain (без O(N) tuple в памяти).
+Запись в аудит идёт после фиксации решения и не блокирует ответ: сбой аудита
+логируется, но пользователь получает успешный результат.
 """
 
-import itertools
 import logging
 import uuid
 
@@ -76,32 +64,43 @@ router = APIRouter(
 async def _safe_bulk_log(
     audit_log_service: AuditLogService,
     user_id: uuid.UUID,
+    document_id: uuid.UUID,
     decisions: list[tuple[uuid.UUID, AuditActionVO]],
 ) -> None:
+    if not decisions:
+        return
     try:
-        await audit_log_service.bulk_log_suggestion_decisions(user_id, decisions)
+        await audit_log_service.log_suggestion_decisions(user_id, document_id, decisions)
     except Exception:
         logger.warning(
-            "Не удалось записать bulk audit_log для решений по правкам",
+            "Не удалось записать audit_log для решений по правкам",
             exc_info=True,
-            extra={"user_id": str(user_id)},
+            extra={"user_id": str(user_id), "document_id": str(document_id)},
         )
 
 
 async def _safe_single_log(
     audit_log_service: AuditLogService,
     user_id: uuid.UUID,
+    document_id: uuid.UUID,
     suggestion_id: uuid.UUID,
     action: AuditActionVO,
 ) -> None:
     try:
-        await audit_log_service.log_suggestion_decision(user_id, suggestion_id, action)
+        await audit_log_service.log_suggestion_decision(user_id, document_id, suggestion_id, action)
     except Exception:
         logger.warning(
             "Не удалось записать audit_log для решения по правке",
             exc_info=True,
             extra={"suggestion_id": str(suggestion_id), "user_id": str(user_id)},
         )
+
+
+_PATCH_AUDIT_ACTIONS: dict[SuggestionStatusVO, AuditActionVO] = {
+    SuggestionStatusVO.ACCEPTED: AuditActionVO.ACCEPT,
+    SuggestionStatusVO.REJECTED: AuditActionVO.REJECT,
+    SuggestionStatusVO.PENDING: AuditActionVO.RESET,
+}
 
 
 def _parse_if_match(if_match: str | None) -> int | None:
@@ -228,16 +227,16 @@ async def patch_suggestions(
     | pending | rejected | отклонить        |
     | decided | pending  | сбросить решение |
     """
-    target_status = payload.status
+    target_status = SuggestionStatusVO(payload.status)
 
     try:
         result = await suggestion_service.patch_suggestions(
             project_id=project.id,
             document_id=document_id,
             user_id=current_user.id,
+            target_status=target_status,
             ids=payload.ids,
             filter=payload.filter,
-            target_status=target_status,
         )
     except (DocumentNotFoundError, SuggestionNotFoundError) as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -248,25 +247,17 @@ async def patch_suggestions(
     ) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    action_map = {
-        "accepted": AuditActionVO.ACCEPT,
-        "rejected": AuditActionVO.REJECT,
-        "pending": AuditActionVO.RESET,
-    }
-    audit_action = action_map[target_status]
-    updated_ids = getattr(result, "updated_ids", None) or []
-    if updated_ids:
-        await _safe_bulk_log(
-            audit_log_service,
-            current_user.id,
-            [(sid, audit_action) for sid in updated_ids],
-        )
-
-    doc = getattr(result, "document", None)
+    audit_action = _PATCH_AUDIT_ACTIONS[target_status]
+    await _safe_bulk_log(
+        audit_log_service,
+        current_user.id,
+        document_id,
+        [(sid, audit_action) for sid in result.updated_ids],
+    )
     return PatchSuggestionsResponse(
         updated_count=result.updated_count,
-        document_status=doc.status.value if doc else None,
-        review_version=getattr(doc, "review_version", None) if doc else None,
+        document_status=result.document.status.value,
+        review_version=result.document.review_version,
     )
 
 
@@ -303,20 +294,14 @@ async def review_save(
 
     accepted_ids: list[uuid.UUID] = []
     rejected_ids: list[uuid.UUID] = []
-    accepted_set: set[uuid.UUID] = set()
-
+    audit_decisions: list[tuple[uuid.UUID, AuditActionVO]] = []
     for d in payload.decisions:
         if d.decision == "accepted":
             accepted_ids.append(d.suggestion_id)
-            accepted_set.add(d.suggestion_id)
+            audit_decisions.append((d.suggestion_id, AuditActionVO.ACCEPT))
         else:
             rejected_ids.append(d.suggestion_id)
-
-    # OPT-S5: itertools.chain вместо tuple unpack — без O(N) аллокации в памяти
-    audit_decisions: list[tuple[uuid.UUID, AuditActionVO]] = [
-        (sid, AuditActionVO.ACCEPT if sid in accepted_set else AuditActionVO.REJECT)
-        for sid in itertools.chain(accepted_ids, rejected_ids)
-    ]
+            audit_decisions.append((d.suggestion_id, AuditActionVO.REJECT))
 
     try:
         result = await suggestion_service.atomic_review_save(
@@ -342,7 +327,7 @@ async def review_save(
     except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    await _safe_bulk_log(audit_log_service, current_user.id, audit_decisions)
+    await _safe_bulk_log(audit_log_service, current_user.id, document_id, audit_decisions)
 
     doc = result.document
     return ReviewSaveResponse(
@@ -372,9 +357,7 @@ async def reset_suggestion(
 ) -> SuggestionResponse:
     """Отменить ранее принятое/отклонённое решение — вернуть правку в PENDING.
 
-    OPT-S4: делегирует в reset_suggestion сервиса (единая бизнес-логика).
-    Возвращает полный SuggestionResponse для обратной совместимости.
-    Для bulk-reset используй PATCH /suggestions с {"ids": [...], "status": "pending"}.
+    Для массового сброса используйте PATCH /suggestions с {"ids": [...], "status": "pending"}.
     """
     try:
         suggestion = await suggestion_service.reset_suggestion(
@@ -385,5 +368,7 @@ async def reset_suggestion(
     except (InvalidDocumentStatusError, SuggestionResetNotAllowedError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    await _safe_single_log(audit_log_service, current_user.id, suggestion.id, AuditActionVO.RESET)
+    await _safe_single_log(
+        audit_log_service, current_user.id, document_id, suggestion.id, AuditActionVO.RESET
+    )
     return SuggestionResponse.model_validate(suggestion)

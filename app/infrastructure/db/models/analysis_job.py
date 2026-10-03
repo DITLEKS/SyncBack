@@ -51,6 +51,7 @@ class AnalysisJob(Base):
             "document_id",
             unique=True,
             postgresql_where=text("status IN ('pending', 'processing')"),
+            sqlite_where=text("status IN ('pending', 'processing')"),
         ),
         # Последняя задача документа: WHERE document_id = ? ORDER BY created_at DESC.
         Index("ix_analysis_jobs_doc_latest", "document_id", "created_at"),

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, TypedDict
 
 from app.domain.interfaces.user_repository import IUserRepository  # noqa: F401
@@ -416,6 +417,18 @@ class ISuggestionRepository(ABC):
         ...
 
     @abstractmethod
+    async def reset_to_pending(
+        self,
+        analysis_job_id: uuid.UUID,
+        ids: Sequence[uuid.UUID] | None = None,
+    ) -> list[uuid.UUID]:
+        """Вернуть в PENDING принятые/отклонённые правки job (все или только ids).
+
+        Возвращает id фактически сброшенных правок.
+        """
+        ...
+
+    @abstractmethod
     async def delete_by_analysis_job(
         self,
         analysis_job_id: uuid.UUID,
@@ -518,6 +531,18 @@ class IAuditLogRepository(ABC):
         suggestion_id: uuid.UUID | None = None,
         details: Any | None = None,
     ) -> AuditLog: ...
+
+    @abstractmethod
+    async def create_many(
+        self,
+        *,
+        document_id: uuid.UUID,
+        user_id: uuid.UUID | None,
+        action: str,
+        suggestion_ids: Sequence[uuid.UUID],
+    ) -> int:
+        """Записать одно и то же действие для набора правок одним flush."""
+        ...
 
     @abstractmethod
     async def list_for_document(

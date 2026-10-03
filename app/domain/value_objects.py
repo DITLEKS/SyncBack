@@ -144,6 +144,9 @@ class ReviewDecisions:
     decisions: tuple[SuggestionDecision, ...] = field(default_factory=tuple)
     document_id: uuid.UUID | None = None
     user_id: uuid.UUID | None = None
+    # Решения применяются только к правкам текущего анализа: после повторного
+    # анализа у документа остаются правки старых job, их трогать нельзя.
+    analysis_job_id: uuid.UUID | None = None
 
     def __post_init__(self) -> None:
         if self.decisions and not self.user_id:

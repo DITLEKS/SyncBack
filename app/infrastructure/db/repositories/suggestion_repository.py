@@ -31,6 +31,7 @@ SQLAlchemy-адаптер для Suggestion.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -272,13 +273,16 @@ class SuggestionRepository(ISuggestionRepository):
 
         from app.infrastructure.db.models.suggestion import Suggestion as M
 
+        where_clauses = [
+            M.document_id == decisions.document_id,
+            M.status == SuggestionStatus.PENDING,
+            M.id.in_(all_ids),
+        ]
+        if decisions.analysis_job_id is not None:
+            where_clauses.append(M.analysis_job_id == decisions.analysis_job_id)
         stmt = (
             update(M)
-            .where(
-                M.document_id == decisions.document_id,  # M-1 fix: document_id scope
-                M.status == SuggestionStatus.PENDING,
-                M.id.in_(all_ids),
-            )
+            .where(*where_clauses)
             .values(
                 status=case(
                     (M.id.in_(accepted_ids), _status_to_orm(SuggestionStatusVO.ACCEPTED)),
@@ -412,6 +416,33 @@ class SuggestionRepository(ISuggestionRepository):
         result = await self._session.execute(stmt)
         await self._session.flush()
         return result.rowcount
+
+    async def reset_to_pending(
+        self,
+        analysis_job_id: uuid.UUID,
+        ids: Sequence[uuid.UUID] | None = None,
+    ) -> list[uuid.UUID]:
+        from app.infrastructure.db.models.enums import SuggestionStatus
+        from app.infrastructure.db.models.suggestion import Suggestion as M
+
+        where_clauses = [
+            M.analysis_job_id == analysis_job_id,
+            M.status != SuggestionStatus.PENDING,
+        ]
+        if ids is not None:
+            if not ids:
+                return []
+            where_clauses.append(M.id.in_(list(ids)))
+        stmt = (
+            update(M)
+            .where(*where_clauses)
+            .values(status=SuggestionStatus.PENDING, decided_by=None, decided_at=None)
+            .returning(M.id)
+        )
+        result = await self._session.execute(stmt)
+        reset_ids = list(result.scalars().all())
+        await self._session.flush()
+        return reset_ids
 
     async def reset_to_pending_by_job(
         self,
