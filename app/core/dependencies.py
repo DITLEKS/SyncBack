@@ -2,13 +2,13 @@
 DI-фабрики FastAPI.
 
 Все сервисы получают UoW (или отдельные репозитории для AuthService, у которого
-нет собственного UoW-метода). Конкретные репозитории НЕ инстансируются в этом
+нет собственного UoW-метода). Конкретные репозитории НЕ инстанцируются в этом
 файле напрямую — их создаёт SqlAlchemyUnitOfWork или фабрика сервиса.
 
 H2.2: фабрики по-прежнему создают concrete SQLAlchemy-репозитории,
 но передают их сервисам как значения, удовлетворяющие доменным портам.
 Типы аннотаций в фабриках оставлены конкретными — FastAPI DI не понимает
-Protocol для Depends, зато mypy/pyright проверят, что concrete-репозитории
+ Protocol для Depends, зато mypy/pyright проверят, что concrete-репозитории
 действительно реализуют порты через @runtime_checkable.
 
 CRIT-D4 (этот раунд):
@@ -225,13 +225,8 @@ def get_project_repository(
 
 def get_login_rate_limiter() -> LoginRateLimiter:
     # M-6: get_redis_client() — sync def, await здесь недопустим (TypeError в рантайме).
-    redis = get_redis_client()
-    settings = get_settings()
-    return LoginRateLimiter(
-        redis_client=redis,
-        max_attempts=settings.login_max_attempts,
-        lockout_seconds=settings.login_lockout_seconds,
-    )
+    # Сигнатура LoginRateLimiter(redis, settings) — раньше здесь были несуществующие kwargs.
+    return LoginRateLimiter(get_redis_client(), get_settings())
 
 
 def get_refresh_token_store() -> RefreshTokenStore:
