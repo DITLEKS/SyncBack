@@ -5,6 +5,7 @@ TODO перед запуском:
   - Заполнить TEST_DATABASE_URL в .env.test
   - pip install httpx pytest-asyncio
 """
+
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport

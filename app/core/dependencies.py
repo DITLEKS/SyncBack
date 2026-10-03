@@ -65,10 +65,10 @@ from app.infrastructure.security.password_hasher import PasswordHasher
 from app.infrastructure.security.refresh_token_store import RefreshTokenStore
 from app.infrastructure.storage.minio_storage import MinioStorage
 
-
 # ---------------------------------------------------------------------------
 # Singleton-like infrastructure (one instance per process)
 # ---------------------------------------------------------------------------
+
 
 @lru_cache
 def _get_minio_storage() -> MinioStorage:
@@ -94,6 +94,7 @@ def _get_jwt_handler() -> JWTHandler:
 # Unit of Work (per-request)
 # ---------------------------------------------------------------------------
 
+
 def get_uow(
     session: AsyncSession = Depends(get_db_session),
 ) -> SqlAlchemyUnitOfWork:
@@ -108,6 +109,7 @@ def get_uow(
 # ---------------------------------------------------------------------------
 # Services — все используют UoW
 # ---------------------------------------------------------------------------
+
 
 def get_suggestion_service(
     uow: SqlAlchemyUnitOfWork = Depends(get_uow),
@@ -166,7 +168,6 @@ def get_document_export_service(
         uow=uow,
         file_storage=_get_minio_storage(),
         exporter_registry=_get_exporter_registry(),
-        parser_registry=_get_parser_registry(),
     )
 
 
@@ -179,6 +180,7 @@ def get_document_export_service(
 # (eventual consistency). Если нужна видимость uncommitted данных
 # текущего запроса — передать session из get_uow явно.
 # ---------------------------------------------------------------------------
+
 
 def get_dashboard_query_service(
     session: AsyncSession = Depends(get_db_session),
@@ -205,6 +207,7 @@ def get_dashboard_service(
 # Per-request repositories (используются в deps.py для auth/authz)
 # ---------------------------------------------------------------------------
 
+
 def get_user_repository(
     session: AsyncSession = Depends(get_db_session),
 ) -> UserRepository:
@@ -223,15 +226,9 @@ def get_project_repository(
 # Auth (UserRepository живёт вне UoW — отдельная сессия по дизайну)
 # ---------------------------------------------------------------------------
 
+
 def get_login_rate_limiter() -> LoginRateLimiter:
-    # M-6: get_redis_client() — sync def, await здесь недопустим (TypeError в рантайме).
-    redis = get_redis_client()
-    settings = get_settings()
-    return LoginRateLimiter(
-        redis_client=redis,
-        max_attempts=settings.login_max_attempts,
-        lockout_seconds=settings.login_lockout_seconds,
-    )
+    return LoginRateLimiter(get_redis_client(), get_settings())
 
 
 def get_refresh_token_store() -> RefreshTokenStore:

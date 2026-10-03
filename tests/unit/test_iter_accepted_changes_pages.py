@@ -9,6 +9,7 @@
   5. Количество вызовов репозитория — верифицируем точное число round-trip.
   6. OFFSET растёт правильно: 0, PAGE_SIZE, 2*PAGE_SIZE.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -28,6 +29,7 @@ from app.domain.value_objects import SuggestionStatusVO
 # ---------------------------------------------------------------------------
 # Хелперы
 # ---------------------------------------------------------------------------
+
 
 def _make_suggestion(section_ref: str = "s1") -> MagicMock:
     """Минимальный стаб Suggestion-ORM-объекта."""
@@ -76,6 +78,7 @@ def _make_service(pages: list[list]) -> tuple[DocumentExportService, AsyncMock]:
 # ---------------------------------------------------------------------------
 # Тесты
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_no_job_id_returns_empty() -> None:
@@ -157,6 +160,7 @@ async def test_offset_increments_correctly() -> None:
 
     calls = repo.list_by_analysis_job_and_status_page.call_args_list
     assert calls[0].kwargs["offset"] == 0 or calls[0].args[2] == 0
+
     # Проверяем через keyword или positional
     def _get_offset(call, pos=3):
         if "offset" in call.kwargs:

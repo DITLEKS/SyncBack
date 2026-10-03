@@ -31,6 +31,7 @@
     чтобы editor.py мог читать suggestions_reset_count и review_version без
     второго SELECT.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -45,35 +46,45 @@ from app.domain.exceptions import (
     InvalidDocumentStatusError,
 )
 from app.domain.interfaces.unit_of_work import IUnitOfWork
-from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO, SuggestionStatusVO
+from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models.analysis_job import AnalysisJob
 
 # FIX-P0: ERROR/CANCELLED удалены — они не существуют в DocumentStatusVO (4STATUS).
-_ANALYSIS_ALLOWED_STATUSES = frozenset({
-    DocumentStatusVO.DRAFT,
-    DocumentStatusVO.AWAITING_APPROVAL,
-    DocumentStatusVO.READY,
-})
+_ANALYSIS_ALLOWED_STATUSES = frozenset(
+    {
+        DocumentStatusVO.DRAFT,
+        DocumentStatusVO.AWAITING_APPROVAL,
+        DocumentStatusVO.READY,
+    }
+)
 
-_FORCE_CONFIRM_STATUSES = frozenset({
-    DocumentStatusVO.READY,
-})
+_FORCE_CONFIRM_STATUSES = frozenset(
+    {
+        DocumentStatusVO.READY,
+    }
+)
 
-_CANCELLABLE_JOB_STATUSES = frozenset({
-    AnalysisJobStatusVO.PENDING,
-    AnalysisJobStatusVO.PROCESSING,
-})
+_CANCELLABLE_JOB_STATUSES = frozenset(
+    {
+        AnalysisJobStatusVO.PENDING,
+        AnalysisJobStatusVO.PROCESSING,
+    }
+)
 
-_DISPATCHABLE_JOB_STATUSES = frozenset({
-    AnalysisJobStatusVO.PENDING,
-})
+_DISPATCHABLE_JOB_STATUSES = frozenset(
+    {
+        AnalysisJobStatusVO.PENDING,
+    }
+)
 
-_RESET_ALLOWED_STATUSES = frozenset({
-    DocumentStatusVO.AWAITING_APPROVAL,
-    DocumentStatusVO.READY,
-})
+_RESET_ALLOWED_STATUSES = frozenset(
+    {
+        DocumentStatusVO.AWAITING_APPROVAL,
+        DocumentStatusVO.READY,
+    }
+)
 
 
 @dataclass
@@ -86,6 +97,7 @@ class ResetResult:
     Позволяет editor.py читать suggestions_reset_count и review_version
     без второго SELECT к БД.
     """
+
     reset_count: int
     document: object  # DocumentProtocol — избегаем кросс-импорта на верхнем уровне
 
@@ -103,22 +115,18 @@ class AnalysisJobService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         idempotency_key: str,
-    ) -> "AnalysisJob | None":
+    ) -> AnalysisJob | None:
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
             if document is None or document.project_id != project_id:
                 return None
-            return await self._uow.jobs.get_by_idempotency_key(
-                document_id, idempotency_key
-            )
+            return await self._uow.jobs.get_by_idempotency_key(document_id, idempotency_key)
 
     # ------------------------------------------------------------------
     # Document helpers
     # ------------------------------------------------------------------
 
-    async def check_document_is_ready(
-        self, project_id: uuid.UUID, document_id: uuid.UUID
-    ) -> bool:
+    async def check_document_is_ready(self, project_id: uuid.UUID, document_id: uuid.UUID) -> bool:
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
             if document is None or document.project_id != project_id:
@@ -158,7 +166,7 @@ class AnalysisJobService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         idempotency_key: str | None = None,
-    ) -> "AnalysisJob":
+    ) -> AnalysisJob:
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
             if document is None or document.project_id != project_id:
@@ -167,9 +175,7 @@ class AnalysisJobService:
                 )
 
             if idempotency_key is not None:
-                existing = await self._uow.jobs.get_by_idempotency_key(
-                    document_id, idempotency_key
-                )
+                existing = await self._uow.jobs.get_by_idempotency_key(document_id, idempotency_key)
                 if existing is not None:
                     return existing
 
@@ -181,14 +187,10 @@ class AnalysisJobService:
                 )
 
             if await self._uow.jobs.get_active_by_document_id(document.id) is not None:
-                raise AnalysisAlreadyRunningError(
-                    "Для документа уже выполняется анализ"
-                )
+                raise AnalysisAlreadyRunningError("Для документа уже выполняется анализ")
 
             if document.status != DocumentStatusVO.DRAFT:
-                document = await self._uow.documents.update_status(
-                    document, DocumentStatusVO.DRAFT
-                )
+                document = await self._uow.documents.update_status(document, DocumentStatusVO.DRAFT)
 
             job = await self._uow.jobs.create_for_document(
                 document,
@@ -204,7 +206,7 @@ class AnalysisJobService:
             await self._uow.commit()
         return job
 
-    async def dispatch_job(self, job: "AnalysisJob") -> None:
+    async def dispatch_job(self, job: AnalysisJob) -> None:
         """Отправить job в очередь Celery.
 
         FIX-P0-DISPATCH: метод, который ранее отсутствовал и вызывался
@@ -217,6 +219,7 @@ class AnalysisJobService:
             )
 
         from celery import chord  # noqa: PLC0415
+
         from app.workers.tasks import (  # noqa: PLC0415
             finalize_analysis_job,
             process_source_for_analysis_job,
@@ -224,23 +227,18 @@ class AnalysisJobService:
 
         job_id_str = str(job.id)
         source_tasks = [
-            process_source_for_analysis_job.si(job_id_str, str(source.id))
-            for source in job.sources
+            process_source_for_analysis_job.si(job_id_str, str(source.id)) for source in job.sources
         ]
 
         if source_tasks:
-            result = chord(source_tasks)(
-                finalize_analysis_job.si(job_id_str)
-            )
+            result = chord(source_tasks)(finalize_analysis_job.si(job_id_str))
         else:
             result = finalize_analysis_job.delay(job_id_str)
 
         task_id = result.id
         await self.mark_dispatched(job, task_id)
 
-    async def mark_dispatched(
-        self, job: "AnalysisJob", task_id: str
-    ) -> "AnalysisJob":
+    async def mark_dispatched(self, job: AnalysisJob, task_id: str) -> AnalysisJob:
         if job.status not in _DISPATCHABLE_JOB_STATUSES:
             raise InvalidDocumentStatusError(
                 f"Диспатч недопустим для задачи в статусе {job.status!r}. "
@@ -249,9 +247,7 @@ class AnalysisJobService:
         async with self._uow:
             document = await self._uow.documents.get_by_id(job.document_id)
             if document is None:
-                raise DocumentNotFoundError(
-                    f"Документ {job.document_id} не найден"
-                )
+                raise DocumentNotFoundError(f"Документ {job.document_id} не найден")
             job, new_doc_status = await self._uow.jobs.mark_dispatched(job, task_id)
             if new_doc_status is not None and document.current_analysis_job_id == job.id:
                 await self._uow.documents.update_status(document, new_doc_status)
@@ -259,14 +255,12 @@ class AnalysisJobService:
         return job
 
     async def mark_job_queue_unavailable(
-        self, job: "AnalysisJob", error_message: str | None = None
-    ) -> "AnalysisJob":
+        self, job: AnalysisJob, error_message: str | None = None
+    ) -> AnalysisJob:
         async with self._uow:
             document = await self._uow.documents.get_by_id(job.document_id)
             if document is None:
-                raise DocumentNotFoundError(
-                    f"Документ {job.document_id} не найден"
-                )
+                raise DocumentNotFoundError(f"Документ {job.document_id} не найден")
             job, new_doc_status = await self._uow.jobs.mark_failed_queue_unavailable(
                 job, error_message
             )
@@ -280,20 +274,16 @@ class AnalysisJobService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         job_id: uuid.UUID,
-    ) -> "AnalysisJob":
+    ) -> AnalysisJob:
         async with self._uow:
             job = await self._get_job(project_id, document_id, job_id)
             if job.status == AnalysisJobStatusVO.CANCELLED:
                 return job
             if job.status not in _CANCELLABLE_JOB_STATUSES:
-                raise AnalysisJobNotCancellableError(
-                    "Завершённую задачу анализа отменить нельзя"
-                )
+                raise AnalysisJobNotCancellableError("Завершённую задачу анализа отменить нельзя")
             document = await self._uow.documents.get_by_id(document_id)
             if document is None:
-                raise DocumentNotFoundError(
-                    f"Документ {document_id} не найден"
-                )
+                raise DocumentNotFoundError(f"Документ {document_id} не найден")
             job, new_doc_status = await self._uow.jobs.cancel(job)
             if document.current_analysis_job_id == job.id:
                 await self._uow.documents.update_status(document, new_doc_status)
@@ -302,13 +292,14 @@ class AnalysisJobService:
 
     async def revoke_celery_task(self, celery_task_id: str) -> None:
         from app.workers.celery_app import celery_app  # noqa: PLC0415
+
         celery_app.control.revoke(celery_task_id, terminate=False)
 
     async def get_active_for_document(
         self,
         project_id: uuid.UUID,
         document_id: uuid.UUID,
-    ) -> "AnalysisJob | None":
+    ) -> AnalysisJob | None:
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
             if document is None or document.project_id != project_id:
@@ -320,7 +311,7 @@ class AnalysisJobService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         job_id: uuid.UUID,
-    ) -> "AnalysisJob":
+    ) -> AnalysisJob:
         async with self._uow:
             return await self._get_job(project_id, document_id, job_id)
 
@@ -345,13 +336,10 @@ class AnalysisJobService:
             if document.status not in _RESET_ALLOWED_STATUSES:
                 raise InvalidDocumentStatusError(
                     f"Сброс невозможен для документа в статусе {document.status.value}. "
-                    f"Допустимые статусы: "
-                    + ", ".join(s.value for s in _RESET_ALLOWED_STATUSES)
+                    f"Допустимые статусы: " + ", ".join(s.value for s in _RESET_ALLOWED_STATUSES)
                 )
             if document.current_analysis_job_id is None:
-                raise AnalysisJobNotFoundError(
-                    "У документа нет активного анализа для сброса"
-                )
+                raise AnalysisJobNotFoundError("У документа нет активного анализа для сброса")
 
             reset_count = await self._uow.suggestions.reset_to_pending_by_job(
                 document.current_analysis_job_id
@@ -371,10 +359,7 @@ class AnalysisJobService:
         """CRIT-1: загружаем только document.id (UUID), не ORM-объекты."""
         async with self._uow:
             all_analyzable: list[uuid.UUID] = [
-                doc.id
-                for doc in await self._uow.documents.list_analyzable_for_project(
-                    project_id
-                )
+                doc.id for doc in await self._uow.documents.list_analyzable_for_project(project_id)
             ]
 
         if document_ids is not None:
@@ -405,12 +390,10 @@ class AnalysisJobService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         job_id: uuid.UUID,
-    ) -> "AnalysisJob":
+    ) -> AnalysisJob:
         document = await self._uow.documents.get_by_id(document_id)
         if document is None or document.project_id != project_id:
-            raise DocumentNotFoundError(
-                f"Документ {document_id} не найден в проекте {project_id}"
-            )
+            raise DocumentNotFoundError(f"Документ {document_id} не найден в проекте {project_id}")
         job = await self._uow.jobs.get_by_id(job_id)
         if job is None or job.document_id != document_id:
             raise AnalysisJobNotFoundError(

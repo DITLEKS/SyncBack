@@ -12,6 +12,7 @@ FIX-7: assert_awaited_once_with(PROJECT_A, [DOC_1, DOC_2]) заменён
   Порядок doc_ids в defaultdict-итерации недетерминирован —
   сравниваем set(doc_ids), а не list.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -133,9 +134,7 @@ async def test_sources_happy_path(mock_current_user, mock_doc_svc, mock_src_svc)
         DOC_2: [],
     }
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         resp = await ac.get("/api/v1/documents")
 
     assert resp.status_code == 200
@@ -159,9 +158,7 @@ async def test_sources_no_sources(mock_current_user, mock_doc_svc, mock_src_svc)
     mock_doc_svc.list_all_for_user.return_value = ([_row(doc1)], 1)
     mock_src_svc.list_sources_for_documents.return_value = {}
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         resp = await ac.get("/api/v1/documents")
 
     assert resp.status_code == 200
@@ -186,9 +183,7 @@ async def test_sources_two_projects(mock_current_user, mock_doc_svc, mock_src_sv
 
     mock_src_svc.list_sources_for_documents.side_effect = _batch_side_effect
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         resp = await ac.get("/api/v1/documents")
 
     assert resp.status_code == 200
@@ -207,7 +202,8 @@ async def test_sources_two_projects(mock_current_user, mock_doc_svc, mock_src_sv
 
     # FIX-7: 2 вызова, проверяем через call_args_list
     assert mock_src_svc.list_sources_for_documents.await_count == 2
-    calls = {c.args[0]: set(c.args[1])
-             for c in mock_src_svc.list_sources_for_documents.call_args_list}
+    calls = {
+        c.args[0]: set(c.args[1]) for c in mock_src_svc.list_sources_for_documents.call_args_list
+    }
     assert calls[PROJECT_A] == {DOC_1}
     assert calls[PROJECT_B] == {DOC_2, DOC_3}

@@ -3,6 +3,7 @@ On-premise реализация LLMClient — после NDA. Намеренно
 контракт запроса/ответа on-prem-модели, скорее всего, будет другим. Общее — только
 сетевая устойчивость (HttpConnectionRetryMixin), не бизнес-контракт.
 """
+
 import httpx
 from pydantic import ValidationError
 
@@ -18,7 +19,9 @@ class OnPremLLMClient(HttpConnectionRetryMixin):
     def __init__(self, settings: Settings | None = None):
         self._settings = settings or get_settings()
 
-    async def generate_suggestions(self, document_text: str, source_text: str, document_format: str) -> LLMSuggestionBatch:
+    async def generate_suggestions(
+        self, document_text: str, source_text: str, document_format: str
+    ) -> LLMSuggestionBatch:
         prompt = build_prompt(document_text, source_text, document_format)
         # TODO: заменить на реальный формат запроса on-prem API, когда он будет известен
         response = await self._post_with_connection_retry(
@@ -30,9 +33,16 @@ class OnPremLLMClient(HttpConnectionRetryMixin):
         try:
             parsed = LLMHttpSuggestionResponse.model_validate_json(response.text)
         except ValidationError as exc:
-            raise LLMInvalidResponseError(f"On-prem LLM вернула ответ, не соответствующий ожидаемой схеме: {exc}") from exc
+            raise LLMInvalidResponseError(
+                f"On-prem LLM вернула ответ, не соответствующий ожидаемой схеме: {exc}"
+            ) from exc
         items = [
-            LLMSuggestionItem(section_ref=item.section_ref, change_type=item.change_type, old_text=item.old_text, new_text=item.new_text)
+            LLMSuggestionItem(
+                section_ref=item.section_ref,
+                change_type=item.change_type,
+                old_text=item.old_text,
+                new_text=item.new_text,
+            )
             for item in parsed.suggestions
         ]
         return LLMSuggestionBatch(items=items, raw_response=response.text)

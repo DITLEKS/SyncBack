@@ -4,6 +4,7 @@ IDashboardQueryService. Делегирует все вызовы DashboardReposi
 
 L-C: не импортирует IUnitOfWork и не вызывает commit()/rollback().
 """
+
 from __future__ import annotations
 
 import uuid
@@ -37,17 +38,11 @@ class SqlAlchemyDashboardQueryService(IDashboardQueryService):
             owner_id, snapshot_date, total_count, awaiting_count, relevance_percent
         )
 
-    async def get_attention_documents(
-        self, owner_id: uuid.UUID, limit: int = 4
-    ) -> list[dict]:
+    async def get_attention_documents(self, owner_id: uuid.UUID, limit: int = 4) -> list[dict]:
         return await self._repo.get_attention_documents(owner_id, limit)
 
-    async def get_recent_documents(
-        self, user_id: uuid.UUID, limit: int = 5
-    ) -> list[dict]:
+    async def get_recent_documents(self, user_id: uuid.UUID, limit: int = 5) -> list[dict]:
         return await self._repo.get_recent_documents(user_id, limit)
 
-    async def upsert_open(
-        self, user_id: uuid.UUID, document_id: uuid.UUID
-    ) -> None:
+    async def upsert_open(self, user_id: uuid.UUID, document_id: uuid.UUID) -> None:
         await self._repo.upsert_open(user_id, document_id)

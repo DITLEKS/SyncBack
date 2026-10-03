@@ -2,6 +2,7 @@
 Применяет принятые правки к txt/markdown простой текстовой заменой. Посимвольный diff
 сознательно не делаем на этой итерации.
 """
+
 from app.domain.interfaces.document_exporter import AppliedChange
 
 

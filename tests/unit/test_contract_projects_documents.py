@@ -16,6 +16,7 @@ P2: добавлен тест shape SourceBadge — проверяет, что �
 
 Все тесты работают через мок — реальная БД не нужна.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -32,16 +33,19 @@ from app.main import app
 # Общие фикстуры
 # ---------------------------------------------------------------------------
 
-USER_ID    = uuid.uuid4()
+USER_ID = uuid.uuid4()
 PROJECT_ID = uuid.uuid4()
-DOC_ID     = uuid.uuid4()
-SOURCE_ID  = uuid.uuid4()
+DOC_ID = uuid.uuid4()
+SOURCE_ID = uuid.uuid4()
 
 
 def _make_user() -> SimpleNamespace:
     return SimpleNamespace(
-        id=USER_ID, email="bob@example.com", username="bob",
-        is_active=True, created_at=datetime.now(timezone.utc),
+        id=USER_ID,
+        email="bob@example.com",
+        username="bob",
+        is_active=True,
+        created_at=datetime.now(timezone.utc),
     )
 
 
@@ -50,7 +54,9 @@ def _make_project(
     name: str = "My project",
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        id=pid, name=name, owner_id=USER_ID,
+        id=pid,
+        name=name,
+        owner_id=USER_ID,
         created_at=datetime.now(timezone.utc),
         document_count=0,
     )
@@ -62,8 +68,10 @@ def _make_document(
     status: str = "draft",
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        id=doc_id, project_id=project_id,
-        name="spec.docx", format="docx",
+        id=doc_id,
+        project_id=project_id,
+        name="spec.docx",
+        format="docx",
         size_bytes=2048,
         status=status,
         uploaded_at=datetime.now(timezone.utc),
@@ -87,6 +95,7 @@ def _patch_user():
 # ---------------------------------------------------------------------------
 # Projects
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.anyio
 async def test_list_projects_returns_200():
@@ -163,6 +172,7 @@ async def test_get_project_unknown_returns_404():
 # ---------------------------------------------------------------------------
 # Documents
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.anyio
 async def test_list_documents_returns_200():
@@ -255,6 +265,7 @@ async def test_delete_document_returns_204():
 # P2: SourceBadge shape contract
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.anyio
 async def test_my_documents_source_badge_shape():
     """P2: каждый элемент sources в DocumentListItem содержит поля id, name, type.
@@ -316,7 +327,7 @@ async def test_my_documents_source_badge_shape():
 
     badge = sources[0]
     # P2: контракт shape SourceBadge
-    assert "id" in badge,   "SourceBadge must have 'id'"
+    assert "id" in badge, "SourceBadge must have 'id'"
     assert "name" in badge, "SourceBadge must have 'name'"
     assert "type" in badge, "SourceBadge must have 'type'"
     assert badge["id"] == str(SOURCE_ID)

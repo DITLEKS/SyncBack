@@ -14,6 +14,7 @@ I-1: после list_all_for_user делается один батч-запро�
   так как батч-запрос делается всегда. None используется будущими
   лёгкими GET /documents?include_sources=false эндпоинтами.
 """
+
 import uuid
 from collections import defaultdict
 from typing import Literal

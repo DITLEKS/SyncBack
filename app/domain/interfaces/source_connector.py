@@ -18,7 +18,7 @@ from typing import Protocol
 
 class SourceKind(enum.StrEnum):
     FILE = "file"
-    URL  = "url"
+    URL = "url"
 
 
 @dataclass

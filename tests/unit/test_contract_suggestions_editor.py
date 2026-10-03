@@ -11,6 +11,7 @@ F-2: Contract-тесты роутеров suggestions и editor.
 
 Все тесты работают через мок — реальная БД не нужна.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -27,24 +28,29 @@ from app.main import app
 # Общие фикстуры
 # ---------------------------------------------------------------------------
 
-USER_ID     = uuid.uuid4()
-PROJECT_ID  = uuid.uuid4()
-DOC_ID      = uuid.uuid4()
-SUGG_ID     = uuid.uuid4()
+USER_ID = uuid.uuid4()
+PROJECT_ID = uuid.uuid4()
+DOC_ID = uuid.uuid4()
+SUGG_ID = uuid.uuid4()
 
 AUTH_HEADERS = {"Authorization": "Bearer fake.jwt.token"}
 
 
 def _make_user() -> SimpleNamespace:
     return SimpleNamespace(
-        id=USER_ID, email="carol@example.com", username="carol",
-        is_active=True, created_at=datetime.now(timezone.utc),
+        id=USER_ID,
+        email="carol@example.com",
+        username="carol",
+        is_active=True,
+        created_at=datetime.now(timezone.utc),
     )
 
 
 def _make_project() -> SimpleNamespace:
     return SimpleNamespace(
-        id=PROJECT_ID, name="Docs project", owner_id=USER_ID,
+        id=PROJECT_ID,
+        name="Docs project",
+        owner_id=USER_ID,
         created_at=datetime.now(timezone.utc),
     )
 
@@ -91,6 +97,7 @@ def _patch_project():
 # ---------------------------------------------------------------------------
 # Suggestions
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.anyio
 async def test_list_suggestions_returns_200():
@@ -181,6 +188,7 @@ async def test_accept_unknown_suggestion_returns_404():
 # ---------------------------------------------------------------------------
 # Editor
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.anyio
 async def test_get_editor_state_returns_200():

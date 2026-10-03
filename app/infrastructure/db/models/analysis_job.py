@@ -39,7 +39,10 @@ class AnalysisJob(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     document_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     status: Mapped[AnalysisJobStatus] = mapped_column(
         sa.Enum(
@@ -65,5 +68,9 @@ class AnalysisJob(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    document: Mapped["Document"] = relationship(back_populates="analysis_jobs", foreign_keys=[document_id])
-    suggestions: Mapped[list["Suggestion"]] = relationship(back_populates="analysis_job", cascade="all, delete-orphan")
+    document: Mapped["Document"] = relationship(
+        back_populates="analysis_jobs", foreign_keys=[document_id]
+    )
+    suggestions: Mapped[list["Suggestion"]] = relationship(
+        back_populates="analysis_job", cascade="all, delete-orphan"
+    )

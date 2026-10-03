@@ -49,13 +49,17 @@ async def get_current_user(
 
     user = await user_repository.get_by_id(uuid.UUID(payload["sub"]))
     if user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Пользователь не найден")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Пользователь не найден"
+        )
     return user
 
 
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
     if current_user.role != UserRole.ADMIN:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Требуются права администратора")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Требуются права администратора"
+        )
     return current_user
 
 
@@ -69,6 +73,8 @@ async def get_allowed_project(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Проект не найден")
 
     if current_user.role != UserRole.ADMIN and project.owner_id != current_user.id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к этому проекту")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к этому проекту"
+        )
 
     return project

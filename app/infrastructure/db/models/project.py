@@ -26,7 +26,9 @@ class Project(Base):
         nullable=False,
         index=True,
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -35,5 +37,9 @@ class Project(Base):
     )
 
     owner: Mapped["User"] = relationship(back_populates="projects")
-    documents: Mapped[list["Document"]] = relationship(back_populates="project", cascade="all, delete-orphan")
-    sources: Mapped[list["Source"]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    documents: Mapped[list["Document"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+    sources: Mapped[list["Source"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )

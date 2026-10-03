@@ -6,12 +6,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import ProjectNotFoundError
+from app.domain.interfaces.repositories import IProjectRepository
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.source import Source
 
 
-class ProjectRepository:
+class ProjectRepository(IProjectRepository):
     def __init__(self, session: AsyncSession):
         self._session = session
 
@@ -48,9 +49,7 @@ class ProjectRepository:
         result = await self._session.execute(select(func.count()).select_from(Project))
         return result.scalar_one()
 
-    async def list_by_owner(
-        self, owner_id: uuid.UUID, limit: int, offset: int
-    ) -> list[Project]:
+    async def list_by_owner(self, owner_id: uuid.UUID, limit: int, offset: int) -> list[Project]:
         result = await self._session.execute(
             select(Project)
             .where(Project.owner_id == owner_id)
@@ -62,9 +61,7 @@ class ProjectRepository:
 
     async def count_by_owner(self, owner_id: uuid.UUID) -> int:
         result = await self._session.execute(
-            select(func.count())
-            .select_from(Project)
-            .where(Project.owner_id == owner_id)
+            select(func.count()).select_from(Project).where(Project.owner_id == owner_id)
         )
         return result.scalar_one()
 

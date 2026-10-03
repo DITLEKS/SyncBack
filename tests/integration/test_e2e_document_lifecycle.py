@@ -19,6 +19,7 @@ PR5 — E2E-тесты: upload → analysis → review → delete.
 Тесты маркированы @pytest.mark.integration — запускаются только
 в integration-окружении с настоящим PostgreSQL.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -35,6 +36,7 @@ pytestmark = pytest.mark.integration
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -101,9 +103,7 @@ async def _insert_analysis_job(
     )
     # set current_analysis_job_id on document
     await session.execute(
-        text(
-            "UPDATE documents SET current_analysis_job_id = :job WHERE id = :doc"
-        ),
+        text("UPDATE documents SET current_analysis_job_id = :job WHERE id = :doc"),
         {"job": str(job_id), "doc": str(document_id)},
     )
     return job_id
@@ -133,6 +133,7 @@ async def _insert_suggestion(
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest_asyncio.fixture()
 async def db_session(pg_session):  # pg_session из integration/conftest.py
     yield pg_session
@@ -141,6 +142,7 @@ async def db_session(pg_session):  # pg_session из integration/conftest.py
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 class TestUploadCreatesDocumentWithSizeBytes:
     """Сценарий 1: upload заполняет size_bytes."""

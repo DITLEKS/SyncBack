@@ -6,12 +6,23 @@ C-1 (issue #37): добавлены колонки decided_by (FK -> users.id, n
       и заполняются при update_status() / bulk_accept_all / bulk_reject_all.
       reviewed_at оставлен для обратной совместимости (старые миграции).
 """
+
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 

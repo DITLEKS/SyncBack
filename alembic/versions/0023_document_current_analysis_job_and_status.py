@@ -14,6 +14,7 @@ removed again in 0020a. This migration no longer touches the enum.
 
 downgrade: DROP COLUMN + DROP INDEX only.
 """
+
 from __future__ import annotations
 
 import sqlalchemy as sa

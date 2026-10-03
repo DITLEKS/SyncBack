@@ -7,6 +7,7 @@ Unit-тесты для DocumentService.list_all_for_user.
 3. P1: row-структура содержит все поля, необходимые роутеру my_documents
    (document, project_name, suggestions_*).
 """
+
 from __future__ import annotations
 
 import uuid

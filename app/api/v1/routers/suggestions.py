@@ -18,7 +18,6 @@ OPT-S5: audit_decisions строится через itertools.chain (без O(N)
 import itertools
 import logging
 import uuid
-from dataclasses import dataclass
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import TypeAdapter
@@ -73,6 +72,7 @@ router = APIRouter(
 # Logging helpers
 # ---------------------------------------------------------------------------
 
+
 async def _safe_bulk_log(
     audit_log_service: AuditLogService,
     user_id: uuid.UUID,
@@ -123,6 +123,7 @@ def _parse_if_match(if_match: str | None) -> int | None:
 # GET /suggestions
 # ---------------------------------------------------------------------------
 
+
 @router.get("", response_model=PageSuggestionResponse)
 async def list_suggestions(
     document_id: uuid.UUID,
@@ -171,6 +172,7 @@ async def list_suggestions(
 # GET /suggestions/{suggestion_id}
 # ---------------------------------------------------------------------------
 
+
 @router.get("/{suggestion_id}", response_model=SuggestionResponse)
 async def get_suggestion(
     document_id: uuid.UUID,
@@ -191,6 +193,7 @@ async def get_suggestion(
 # ---------------------------------------------------------------------------
 # PATCH /suggestions — единственный endpoint изменения статуса (single + bulk)
 # ---------------------------------------------------------------------------
+
 
 @router.patch(
     "",
@@ -270,6 +273,7 @@ async def patch_suggestions(
 # ---------------------------------------------------------------------------
 # PUT /review — батч accept/reject с optimistic locking
 # ---------------------------------------------------------------------------
+
 
 @router.put("/review", response_model=ReviewSaveResponse)
 async def review_save(
@@ -356,6 +360,7 @@ async def review_save(
 # POST /{suggestion_id}/reset — alias поверх PATCH (OPT-S4)
 # ---------------------------------------------------------------------------
 
+
 @router.post("/{suggestion_id}/reset", response_model=SuggestionResponse)
 async def reset_suggestion(
     document_id: uuid.UUID,
@@ -380,7 +385,5 @@ async def reset_suggestion(
     except (InvalidDocumentStatusError, SuggestionResetNotAllowedError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    await _safe_single_log(
-        audit_log_service, current_user.id, suggestion.id, AuditActionVO.RESET
-    )
+    await _safe_single_log(audit_log_service, current_user.id, suggestion.id, AuditActionVO.RESET)
     return SuggestionResponse.model_validate(suggestion)

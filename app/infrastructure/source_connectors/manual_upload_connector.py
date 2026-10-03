@@ -5,6 +5,7 @@ ManualUploadConnector — скачивает файл из MinIO и парсит
 Текстовые заметки (бывший NOTE) теперь сохраняются в MinIO как .txt
 и попадают сюда как обычные файлы с source_type=FILE.
 """
+
 from app.domain.interfaces.source_connector import SourceKind, SourceMetadata, SourceRef
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 from app.infrastructure.storage.minio_storage import MinioStorage

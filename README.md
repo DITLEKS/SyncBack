@@ -121,7 +121,7 @@ CI (`.github/workflows/ci.yml`) запускает оба набора авто�
 |---|---|---|
 | БД | `DATABASE_URL` | Строка подключения PostgreSQL (async, `postgresql+asyncpg://`) |
 | Redis | `REDIS_URL` | Брокер и result backend Celery, кэш rate limiting |
-| Redis SSE | `REDIS_SSE_PUBSUB_CHANNEL` | Канал Redis Pub/Sub для SSE (опционально; при отсутствии — in-memory fallback) |
+| Redis SSE | `REDIS_SSE_CHANNEL` | Канал Redis Pub/Sub для SSE (опционально; при отсутствии — in-memory fallback) |
 | Minio | `MINIO_ENDPOINT`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `MINIO_BUCKET`, `MINIO_SECURE`, `MINIO_PRESIGNED_URL_EXPIRE_SECONDS` | Файловое хранилище документов и источников |
 | JWT | `JWT_SECRET`, `JWT_ALGORITHM`, `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | Подпись и срок жизни токенов доступа. **`JWT_SECRET` должен быть ≥ 32 байт** для HS256 |
 | Логин | `LOGIN_MAX_ATTEMPTS`, `LOGIN_LOCKOUT_SECONDS` | Защита от брутфорса (счётчик в Redis) |
@@ -295,8 +295,9 @@ Query-параметры пагинации правок:
 
 ```python
 import app.workers.tasks.analysis_tasks as t
-t._get_storage    = lambda: FakeStorage()
-t._get_connector  = lambda: FakeConnector()
+
+t._get_storage = lambda: FakeStorage()
+t._get_connector = lambda: FakeConnector()
 t._get_llm_client = lambda: FakeLLMClient()
 ```
 

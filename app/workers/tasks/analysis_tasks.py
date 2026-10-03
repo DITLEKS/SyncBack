@@ -16,27 +16,23 @@ C-3: _run_async упрощён до asyncio.run().
 4STATUS: _finalize при ошибке переводит документ в DRAFT (не в ERROR),
     при отмене — тоже в DRAFT. ERROR/CANCELLED удалены из DocumentStatusVO.
 """
+
 from __future__ import annotations
 
 import asyncio
 import functools
 import logging
 import uuid
-from typing import Any
 
 from app.domain.exceptions import (
     DocumentParseError,
-    SourceNotFoundError,
 )
 from app.domain.interfaces.source_connector import SourceKind, SourceRef
-from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO
 from app.infrastructure.cache.redis_client import get_redis_client
-from app.infrastructure.cache.sync_redis_client import get_sync_redis_client
 from app.infrastructure.db.session import isolated_uow
 from app.infrastructure.llm.factory import get_llm_client
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
-from app.infrastructure.queue.dead_letter_store import DeadLetterStore
 from app.infrastructure.source_connectors.manual_upload_connector import ManualUploadConnector
 from app.infrastructure.source_connectors.url_connector import UrlConnector
 from app.infrastructure.storage.minio_storage import MinioStorage
@@ -52,6 +48,7 @@ _PARSED_DOC_KEY_PREFIX = "parsed_doc:"
 # Безопасный запуск async из синхронного Celery-таска
 # ---------------------------------------------------------------------------
 
+
 def _run_async(coro):
     """Запускает корутину из синхронного Celery-таска.
 
@@ -66,6 +63,7 @@ def _run_async(coro):
 # ---------------------------------------------------------------------------
 # Синглтоны инфраструктуры (per-process)
 # ---------------------------------------------------------------------------
+
 
 @functools.cache
 def _get_storage() -> MinioStorage:
@@ -105,6 +103,7 @@ def _get_llm_client():
 # Построение SourceRef из ORM-модели
 # ---------------------------------------------------------------------------
 
+
 def _build_source_ref(source) -> SourceRef:
     """Конвертация ORM Source → domain SourceRef.
 
@@ -113,7 +112,7 @@ def _build_source_ref(source) -> SourceRef:
     """
     kind_map = {
         "file": SourceKind.FILE,
-        "url":  SourceKind.URL,
+        "url": SourceKind.URL,
     }
     source_kind = kind_map.get(source.source_type.value)
     if source_kind is None:
@@ -132,6 +131,7 @@ def _build_source_ref(source) -> SourceRef:
 # ---------------------------------------------------------------------------
 # Вспомогательные async-функции пайплайна
 # ---------------------------------------------------------------------------
+
 
 async def _get_cached_plain_text(job_id: str) -> str | None:
     try:
@@ -181,9 +181,7 @@ async def _generate_suggestions_for_source(
 
     connector = _get_connector_for(source_ref.type)
     source_text = await connector.fetch(source_ref)
-    batch = await _get_llm_client().generate_suggestions(
-        plain_text, source_text, document_format
-    )
+    batch = await _get_llm_client().generate_suggestions(plain_text, source_text, document_format)
     return map_to_suggestions(batch, job_id, source_reference=source_ref.name)
 
 
@@ -195,21 +193,33 @@ async def _process_source(job_id: str, source_id: str) -> dict:
                 "process_source: job не найден",
                 extra={"job_id": job_id, "source_id": source_id},
             )
-            return {"source_id": source_id, "status": "failed",
-                    "error_code": "JOB_NOT_FOUND", "error_message": "Задача анализа не найдена"}
+            return {
+                "source_id": source_id,
+                "status": "failed",
+                "error_code": "JOB_NOT_FOUND",
+                "error_message": "Задача анализа не найдена",
+            }
 
         if _is_cancelled(job):
             return {"source_id": source_id, "status": "cancelled"}
 
         source = await uow.sources.get_by_id(uuid.UUID(source_id))
         if source is None:
-            return {"source_id": source_id, "status": "failed",
-                    "error_code": "SOURCE_NOT_FOUND", "error_message": "Источник не найден"}
+            return {
+                "source_id": source_id,
+                "status": "failed",
+                "error_code": "SOURCE_NOT_FOUND",
+                "error_message": "Источник не найден",
+            }
 
         document = await uow.documents.get_by_id(job.document_id)
         if document is None:
-            return {"source_id": source_id, "status": "failed",
-                    "error_code": "DOCUMENT_NOT_FOUND", "error_message": "Документ не найден"}
+            return {
+                "source_id": source_id,
+                "status": "failed",
+                "error_code": "DOCUMENT_NOT_FOUND",
+                "error_message": "Документ не найден",
+            }
 
         source_ref = _build_source_ref(source)
 
@@ -225,8 +235,12 @@ async def _process_source(job_id: str, source_id: str) -> dict:
             "Ошибка генерации suggestions для источника",
             extra={"job_id": job_id, "source_id": source_id, "exc": str(exc)},
         )
-        return {"source_id": source_id, "status": "failed",
-                "error_code": "GENERATION_ERROR", "error_message": str(exc)}
+        return {
+            "source_id": source_id,
+            "status": "failed",
+            "error_code": "GENERATION_ERROR",
+            "error_message": str(exc),
+        }
 
     async with isolated_uow() as uow:
         for s in suggestions:
@@ -239,6 +253,7 @@ async def _process_source(job_id: str, source_id: str) -> dict:
 # ---------------------------------------------------------------------------
 # Celery tasks
 # ---------------------------------------------------------------------------
+
 
 @celery_app.task(name="process_source_for_analysis_job", bind=True, max_retries=3)
 def process_source_for_analysis_job(self, job_id: str, source_id: str) -> dict:

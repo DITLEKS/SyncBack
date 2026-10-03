@@ -18,6 +18,7 @@ FIX-review-4: DELETE /{source_id} — guard и удаление атомарны
     Удалён вызов source_service.get_primary_document_id() (метод не существует).
 FIX-review-6: /note помечен deprecated=True в регистрации роутера.
 """
+
 from __future__ import annotations
 
 import uuid as _uuid
@@ -66,6 +67,7 @@ async def _guard_no_active_job(
 # URL-источник
 # ------------------------------------------------------------------
 
+
 @router.post("", response_model=SourceResponse, status_code=status.HTTP_201_CREATED)
 async def create_url_source(
     payload: SourceCreateRequest,
@@ -91,6 +93,7 @@ async def create_url_source(
 # Текстовая заметка (P2: сохраняется как .txt в MinIO)
 # FIX-review-6: deprecated=True — эндпоинт internal-only, не для внешнего API.
 # ------------------------------------------------------------------
+
 
 @router.post(
     "/note",
@@ -126,6 +129,7 @@ async def create_note_source(
 # Файловый источник
 # ------------------------------------------------------------------
 
+
 @router.post("/file", response_model=SourceResponse, status_code=status.HTTP_201_CREATED)
 async def upload_file_source(
     name: str = Form(..., min_length=1, max_length=255),
@@ -141,9 +145,7 @@ async def upload_file_source(
     settings: Settings = Depends(get_settings),
 ) -> SourceResponse:
     """Загрузить файловый источник."""
-    parsed_doc_id: _uuid.UUID | None = (
-        _uuid.UUID(document_id) if document_id else None
-    )
+    parsed_doc_id: _uuid.UUID | None = _uuid.UUID(document_id) if document_id else None
     await _guard_no_active_job(project.id, parsed_doc_id, job_service)
     content = await read_upload_within_limit(file, settings.max_upload_size_bytes)
     try:
@@ -157,13 +159,16 @@ async def upload_file_source(
             document_id=parsed_doc_id,
         )
     except FileTooLargeError as exc:
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)
+        ) from exc
     return SourceResponse.model_validate(source)
 
 
 # ------------------------------------------------------------------
 # List
 # ------------------------------------------------------------------
+
 
 @router.get("", response_model=Page[SourceResponse])
 async def list_sources(
@@ -186,6 +191,7 @@ async def list_sources(
 # Delete
 # ------------------------------------------------------------------
 
+
 @router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_source(
     source_id: _uuid.UUID,
@@ -206,6 +212,7 @@ async def delete_source(
       2. Сервис: загрузить source, получить document_id из M2M, вызвать
          checker, удалить запись, сделать commit, затем best-effort MinIO delete.
     """
+
     async def active_job_checker(document_id: _uuid.UUID) -> None:
         active = await job_service.get_active_for_document(project.id, document_id)
         if active is not None:
@@ -224,4 +231,4 @@ async def delete_source(
             active_job_checker=active_job_checker,
         )
     except SourceNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

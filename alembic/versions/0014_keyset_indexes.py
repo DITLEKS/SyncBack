@@ -19,6 +19,8 @@ Create Date: 2026-09-26
 обычный CREATE INDEX. На продакшн-базе с большими таблицами лучше применить
 вручную через CONCURRENTLY без Alembic, чтобы не блокировать таблицу.
 """
+
+import sqlalchemy as sa
 from alembic import op
 
 revision = "0014"
@@ -31,7 +33,7 @@ def upgrade() -> None:
     op.create_index(
         "ix_documents_project_created_at_id",
         "documents",
-        ["project_id", op.f("created_at DESC"), op.f("id DESC")],
+        ["project_id", sa.text("created_at DESC"), sa.text("id DESC")],
         unique=False,
     )
     op.create_index(

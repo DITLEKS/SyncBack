@@ -3,10 +3,10 @@
 """
 
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -39,6 +39,10 @@ class Settings(BaseSettings):
 
     max_upload_size_mb: int = 50
 
+    @property
+    def max_upload_size_bytes(self) -> int:
+        return self.max_upload_size_mb * 1024 * 1024
+
     llm_provider: Literal["stub", "remote_http", "onprem"] = "stub"
     llm_endpoint: str = ""
     llm_api_key: str = ""
@@ -48,16 +52,33 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: Literal["json", "text"] = "json"
 
-    # C-1: дефолт ["*"] убран — поле обязательно.
-    cors_allowed_origins: list[str]
+    # NoDecode: pydantic-settings иначе пытается разобрать значение как JSON
+    # и падает на обычной строке «a,b» ещё до валидатора.
+    cors_allowed_origins: Annotated[list[str], NoDecode]
 
     @field_validator("cors_allowed_origins", mode="before")
     @classmethod
     def _parse_cors_origins(cls, v: object) -> list[str]:
-        """Принимает строку (из .env) или уже готовый список."""
+        """Принимает строку с origin через запятую или готовый список."""
         if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",") if origin.strip()]
-        return v  # type: ignore[return-value]
+            v = [origin.strip() for origin in v.split(",") if origin.strip()]
+        if not isinstance(v, list):
+            raise ValueError("cors_allowed_origins должен быть списком origin")
+        return v
+
+    @field_validator("cors_allowed_origins")
+    @classmethod
+    def _forbid_wildcard_origin(cls, v: list[str]) -> list[str]:
+        # CORS включён с allow_credentials=True; в этом режиме «*» заставляет
+        # Starlette отражать любой Origin, и cookie-сессии становятся доступны
+        # произвольному сайту.
+        if "*" in v:
+            raise ValueError(
+                "cors_allowed_origins не может содержать «*»: укажите явные origin фронтенда"
+            )
+        if not v:
+            raise ValueError("cors_allowed_origins не может быть пустым")
+        return v
 
     # M-3: jwt_secret обязан быть не менее 32 символов.
     # Слабый секрет (например, "secret" или пустая строка) позволяет

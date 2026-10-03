@@ -26,6 +26,7 @@ SOURCE-CLEANUP: delete_document и delete_document_by_id вызывают
   uow.documents.delete_document_scoped_sources() до коммита, чтобы
   источники scope=DOCUMENT не оставались orphan-строками в таблице sources.
 """
+
 from __future__ import annotations
 
 import functools
@@ -61,6 +62,7 @@ def _get_format_map() -> dict[str, object]:
     единственное создание словаря при первом вызове.
     """
     from app.infrastructure.db.models.enums import DocumentFormat  # noqa: PLC0415
+
     return {
         ".docx": DocumentFormat.DOCX,
         ".txt": DocumentFormat.TXT,
@@ -106,16 +108,14 @@ class DocumentService:
         filename: str,
         content: bytes,
         content_type: str,
-    ) -> "Document":
+    ) -> Document:
         """Загрузить документ в MinIO и создать запись в БД.
 
         M-3: принимает project_id: UUID, а не ORM-объект Project.
         BUG-FIX-1: передаёт name=filename (было title=filename).
         """
         if len(content) > self._settings.max_upload_size_bytes:
-            raise FileTooLargeError(
-                f"Файл превышает лимит {self._settings.max_upload_size_mb} МБ"
-            )
+            raise FileTooLargeError(f"Файл превышает лимит {self._settings.max_upload_size_mb} МБ")
         document_format = self._resolve_format(filename)
         document_id = uuid.uuid4()
         storage_key = f"projects/{project_id}/documents/{document_id}/{filename}"
@@ -146,7 +146,7 @@ class DocumentService:
         pagination: PaginationParams | KeysetPage,
         *,
         status_filter: DocumentStatusVO | None = None,
-    ) -> tuple[list["Document"], int]:
+    ) -> tuple[list[Document], int]:
         """Постраничный список документов проекта.
 
         status_filter — опциональный фильтр по статусу (пробрасывается в репозиторий).
@@ -156,22 +156,18 @@ class DocumentService:
             items = await self._uow.documents.list_for_project(
                 project_id, pagination, status=status_filter
             )
-            total = await self._uow.documents.count_for_project(
-                project_id, status=status_filter
-            )
+            total = await self._uow.documents.count_for_project(project_id, status=status_filter)
         return items, total
 
     async def get_document(
         self,
         project_id: uuid.UUID,
         document_id: uuid.UUID,
-    ) -> "Document":
+    ) -> Document:
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
         if document is None or document.project_id != project_id:
-            raise DocumentNotFoundError(
-                f"Документ {document_id} не найден в проекте {project_id}"
-            )
+            raise DocumentNotFoundError(f"Документ {document_id} не найден в проекте {project_id}")
         return document
 
     async def list_all_for_user(
@@ -208,7 +204,7 @@ class DocumentService:
     # File operations
     # ------------------------------------------------------------------
 
-    async def delete_document(self, document: "Document") -> None:
+    async def delete_document(self, document: Document) -> None:
         """
         HIGH-2: удаление документа.
 
@@ -284,16 +280,16 @@ class DocumentService:
                     extra={"storage_key": key, "document_id": str(document_id)},
                 )
 
-    async def get_download_url(self, document: "Document") -> tuple[str, int]:
+    async def get_download_url(self, document: Document) -> tuple[str, int]:
         expires_in = self._settings.minio_presigned_url_expire_seconds
         url = await self._storage.get_presigned_url(document.storage_key, expires_in)
         return url, expires_in
 
-    async def get_document_content(self, document: "Document") -> ParsedDocument:
+    async def get_document_content(self, document: Document) -> ParsedDocument:
         raw_bytes = await self._storage.download(document.storage_key)
         return self._parser_registry.parse_by_filename(document.storage_key, raw_bytes)
 
-    async def get_original_content(self, document: "Document") -> ParsedDocument:
+    async def get_original_content(self, document: Document) -> ParsedDocument:
         """Режим «Оригинал» (#7): вернуть текст до правок."""
         original_key: str | None = getattr(document, "original_storage_key", None)
         storage_key = original_key or document.storage_key

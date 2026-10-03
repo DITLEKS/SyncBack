@@ -8,8 +8,8 @@ FIX-review-2: добавлена колонка current_analysis_job_id (nullabl
     Требует миграции: ALTER TABLE documents ADD COLUMN current_analysis_job_id UUID
     REFERENCES analysis_jobs(id) ON DELETE SET NULL;
 """
+
 import uuid
-from datetime import datetime
 
 from sqlalchemy import CheckConstraint, Column, DateTime, Enum, ForeignKey, Integer, String, func
 from sqlalchemy.dialects.postgresql import UUID

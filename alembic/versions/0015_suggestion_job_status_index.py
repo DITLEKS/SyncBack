@@ -35,6 +35,7 @@ Create Date: 2026-09-26
     ON suggestions(analysis_job_id, status);
 вручную вне Alembic, чтобы не блокировать записи.
 """
+
 from alembic import op
 
 revision = "0015"

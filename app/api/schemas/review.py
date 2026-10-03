@@ -7,6 +7,7 @@ PUT /projects/{project_id}/documents/{document_id}/review
 - Допускает смешанные решения: часть accepted, часть rejected.
 - После успешного сохранения документ переходит в READY, если pending == 0.
 """
+
 from __future__ import annotations
 
 import uuid

@@ -3,7 +3,8 @@
 import enum
 import uuid
 
-from sqlalchemy import CheckConstraint, Enum as SAEnum, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -11,12 +12,12 @@ from app.infrastructure.db.base import Base
 
 
 class BlockType(enum.StrEnum):
-    HEADING   = "heading"
+    HEADING = "heading"
     PARAGRAPH = "paragraph"
     LIST_ITEM = "list_item"
-    CODE      = "code"
-    TABLE     = "table"
-    OTHER     = "other"
+    CODE = "code"
+    TABLE = "table"
+    OTHER = "other"
 
 
 class DocumentBlock(Base):

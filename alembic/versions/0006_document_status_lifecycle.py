@@ -23,7 +23,9 @@ def upgrade() -> None:
       ELSE 'ready' END""")
     op.execute("ALTER TABLE documents ALTER COLUMN status DROP DEFAULT")
     op.execute("ALTER TYPE document_status RENAME TO document_status_old")
-    op.execute("CREATE TYPE document_status AS ENUM ('draft','in_progress','awaiting_approval','ready')")
+    op.execute(
+        "CREATE TYPE document_status AS ENUM ('draft','in_progress','awaiting_approval','ready')"
+    )
     op.execute(
         "ALTER TABLE documents ALTER COLUMN status TYPE document_status USING target_status::document_status"
     )
@@ -48,7 +50,9 @@ def downgrade() -> None:
     op.execute("UPDATE analysis_jobs SET status='failed' WHERE status='cancelled'")
     op.execute("ALTER TABLE analysis_jobs ALTER COLUMN status DROP DEFAULT")
     op.execute("ALTER TYPE analysis_job_status RENAME TO analysis_job_status_old")
-    op.execute("CREATE TYPE analysis_job_status AS ENUM ('pending','processing','success','failed')")
+    op.execute(
+        "CREATE TYPE analysis_job_status AS ENUM ('pending','processing','success','failed')"
+    )
     op.execute(
         "ALTER TABLE analysis_jobs ALTER COLUMN status TYPE analysis_job_status USING status::text::analysis_job_status"
     )

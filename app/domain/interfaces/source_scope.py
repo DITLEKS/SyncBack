@@ -10,5 +10,6 @@ app/infrastructure/db/models/source_scope.py (SHA bbc0380c).
 с существующими импортами — они должны быть переведены на
 канонический источник.
 """
+
 # Реэкспорт для обратной совместимости — уберите после обновления всех импортов.
-from app.infrastructure.db.models.source_scope import SourceScope as SourceScope  # noqa: F401
+from app.infrastructure.db.models.source_scope import SourceScope  # noqa: F401

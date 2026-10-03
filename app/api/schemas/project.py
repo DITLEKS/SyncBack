@@ -11,13 +11,11 @@ I-4: GET /projects/{id}?include=documents,sources расширяет ProjectResp
 
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
-if TYPE_CHECKING:
-    from app.api.schemas.document import DocumentListItem
-    from app.api.schemas.source import SourceResponse
+from app.api.schemas.document import DocumentListItem
+from app.api.schemas.source import SourceResponse
 
 # Допустимые цвета карточки проекта (hex без #, 6 символов).
 # Фронт использует их для визуального различения карточек (#11).
@@ -78,7 +76,7 @@ class ProjectResponse(BaseModel):
     # Заполняются только при явном запросе — не влияют на GET /projects (список).
     # None  = не запрошено (поле отсутствует в ответе при сериализации exclude_none).
     # []    = запрошено, данных нет.
-    sources: list["SourceResponse"] | None = None
-    documents: list["DocumentListItem"] | None = None
+    sources: list[SourceResponse] | None = None
+    documents: list[DocumentListItem] | None = None
 
     model_config = {"from_attributes": True}

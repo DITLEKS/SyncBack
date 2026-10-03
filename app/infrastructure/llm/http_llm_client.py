@@ -2,6 +2,7 @@
 Реализация LLMClient для любого внешнего HTTP-провайдера инференса — конкретный вендор
 не зафиксирован, endpoint/ключ настраиваются только через LLM_ENDPOINT/LLM_API_KEY в .env.
 """
+
 import httpx
 from pydantic import ValidationError
 
@@ -17,7 +18,9 @@ class HttpLLMClient(HttpConnectionRetryMixin):
     def __init__(self, settings: Settings | None = None):
         self._settings = settings or get_settings()
 
-    async def generate_suggestions(self, document_text: str, source_text: str, document_format: str) -> LLMSuggestionBatch:
+    async def generate_suggestions(
+        self, document_text: str, source_text: str, document_format: str
+    ) -> LLMSuggestionBatch:
         prompt = build_prompt(document_text, source_text, document_format)
         response = await self._post_with_connection_retry(
             url=self._settings.llm_endpoint,
@@ -28,9 +31,16 @@ class HttpLLMClient(HttpConnectionRetryMixin):
         try:
             parsed = LLMHttpSuggestionResponse.model_validate_json(response.text)
         except ValidationError as exc:
-            raise LLMInvalidResponseError(f"LLM вернула ответ, не соответствующий ожидаемой схеме: {exc}") from exc
+            raise LLMInvalidResponseError(
+                f"LLM вернула ответ, не соответствующий ожидаемой схеме: {exc}"
+            ) from exc
         items = [
-            LLMSuggestionItem(section_ref=item.section_ref, change_type=item.change_type, old_text=item.old_text, new_text=item.new_text)
+            LLMSuggestionItem(
+                section_ref=item.section_ref,
+                change_type=item.change_type,
+                old_text=item.old_text,
+                new_text=item.new_text,
+            )
             for item in parsed.suggestions
         ]
         return LLMSuggestionBatch(items=items, raw_response=response.text)

@@ -16,7 +16,12 @@ depends_on = None
 
 def upgrade() -> None:
     block_type = postgresql.ENUM(
-        "heading", "paragraph", "list_item", "code", "table", "other",
+        "heading",
+        "paragraph",
+        "list_item",
+        "code",
+        "table",
+        "other",
         name="block_type_enum",
     )
     block_type.create(op.get_bind(), checkfirst=True)

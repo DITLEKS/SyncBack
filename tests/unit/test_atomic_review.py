@@ -6,6 +6,7 @@ Unit-тесты PUT /editor/{document_id}/review  (atomic_review_save).
 Используют FakeUnitOfWork — реальная БД не нужна.
 Каждый тест проверяет одну ветку логики SuggestionService.atomic_review_save.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -31,6 +32,7 @@ from app.domain.value_objects import (
 # Minimal stubs
 # ---------------------------------------------------------------------------
 
+
 def _make_document(
     document_id: uuid.UUID,
     project_id: uuid.UUID,
@@ -39,8 +41,10 @@ def _make_document(
     review_version: int = 0,
 ):
     """Фабрика простого объекта-заглушки для Document."""
+
     class _Doc:
         pass
+
     doc = _Doc()
     doc.id = document_id
     doc.project_id = project_id
@@ -50,9 +54,12 @@ def _make_document(
     return doc
 
 
-def _make_suggestion(suggestion_id: uuid.UUID, job_id: uuid.UUID, status=SuggestionStatusVO.PENDING):
+def _make_suggestion(
+    suggestion_id: uuid.UUID, job_id: uuid.UUID, status=SuggestionStatusVO.PENDING
+):
     class _Sug:
         pass
+
     s = _Sug()
     s.id = suggestion_id
     s.analysis_job_id = job_id
@@ -136,6 +143,7 @@ class FakeUnitOfWork:
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture()
 def ids():
     return {
@@ -181,6 +189,7 @@ def service(uow):
 # ---------------------------------------------------------------------------
 # Tests: wrong review_version → OptimisticLockError
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.anyio
 async def test_wrong_version_raises_optimistic_lock(service, ids):

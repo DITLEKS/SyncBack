@@ -6,11 +6,20 @@
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
+
+if TYPE_CHECKING:
+    from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 
 engine: AsyncEngine | None = None
 AsyncSessionLocal: async_sessionmaker[AsyncSession] | None = None
@@ -88,7 +97,9 @@ async def isolated_db_session() -> AsyncGenerator[AsyncSession, None]:
     local_engine = create_async_engine(
         local_settings.database_url, poolclass=NullPool, echo=local_settings.debug
     )
-    local_sessionmaker = async_sessionmaker(local_engine, expire_on_commit=False, class_=AsyncSession)
+    local_sessionmaker = async_sessionmaker(
+        local_engine, expire_on_commit=False, class_=AsyncSession
+    )
     try:
         async with local_sessionmaker() as session:
             yield session

@@ -1,9 +1,14 @@
-"""P0: add review_version to documents, block_id to suggestions
+"""P0: add review_version to documents
 
 Revision ID: 0004b
 Revises: 0004a
 Create Date: 2026-09-26
+
+suggestions.block_id из прежней версии этой ревизии (UUID → document_blocks.id)
+убран: колонка добавляется в 0013 как varchar-ссылка на document_blocks.block_ref,
+как в ORM-модели.
 """
+
 import sqlalchemy as sa
 from alembic import op
 
@@ -18,21 +23,7 @@ def upgrade() -> None:
         "documents",
         sa.Column("review_version", sa.Integer(), nullable=False, server_default="0"),
     )
-    op.add_column(
-        "suggestions",
-        sa.Column("block_id", sa.UUID(), nullable=True),
-    )
-    op.create_foreign_key(
-        "fk_suggestions_block_id",
-        "suggestions",
-        "document_blocks",
-        ["block_id"],
-        ["id"],
-        ondelete="SET NULL",
-    )
 
 
 def downgrade() -> None:
-    op.drop_constraint("fk_suggestions_block_id", "suggestions", type_="foreignkey")
-    op.drop_column("suggestions", "block_id")
     op.drop_column("documents", "review_version")

@@ -7,7 +7,7 @@ P0-7 (#7): режим «Оригинал» — сохранение снапшо
 фоллбэчится на storage_key (текущий файл).
 
 Revision ID: 0011
-Revises:     0010
+Revises:     0010b
 Create Date: 2026-09-20
 """
 
@@ -15,7 +15,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "0011"
-down_revision = "0010"
+down_revision = "0010b"
 branch_labels = None
 depends_on = None
 

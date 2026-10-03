@@ -14,6 +14,7 @@ Value-объекты доменного слоя — иммутабельные 
     Миграция 0020 переводит существующие строки error/cancelled → draft
     и удаляет эти значения из PostgreSQL enum document_status.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -21,34 +22,34 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 
-
 # ---------------------------------------------------------------------------
 # Перечисления
 # ---------------------------------------------------------------------------
 
+
 class DocumentStatusVO(StrEnum):
-    DRAFT             = "draft"
-    IN_PROGRESS       = "in_progress"
+    DRAFT = "draft"
+    IN_PROGRESS = "in_progress"
     AWAITING_APPROVAL = "awaiting_approval"
-    READY             = "ready"
+    READY = "ready"
     # ERROR и CANCELLED удалены из публичного статуса документа (4STATUS).
     # Техническое состояние анализа хранится в AnalysisJobStatusVO.
 
 
 class SuggestionStatusVO(StrEnum):
-    PENDING  = "pending"
+    PENDING = "pending"
     ACCEPTED = "accepted"
     REJECTED = "rejected"
 
 
 class AnalysisJobStatusVO(StrEnum):
-    PENDING         = "pending"
-    DISPATCHED      = "dispatched"   # синхронизировано с enums.AnalysisJobStatus
-    PROCESSING      = "processing"
-    SUCCESS         = "success"
+    PENDING = "pending"
+    DISPATCHED = "dispatched"  # синхронизировано с enums.AnalysisJobStatus
+    PROCESSING = "processing"
+    SUCCESS = "success"
     PARTIAL_SUCCESS = "partial_success"
-    FAILED          = "failed"
-    CANCELLED       = "cancelled"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 # Обратная совместимость
@@ -56,9 +57,8 @@ AnalysisJobState = AnalysisJobStatusVO
 
 
 class UserRoleVO(StrEnum):
-    ADMIN  = "admin"
-    EDITOR = "editor"
-    VIEWER = "viewer"
+    ADMIN = "admin"
+    USER = "user"
 
 
 class SourceTypeVO(StrEnum):
@@ -67,41 +67,44 @@ class SourceTypeVO(StrEnum):
     После P2 (миграция 0018) в БД существуют только 'file' и 'url'.
     TEXT/NOTION/GDOC удалены — использование вызовет ошибку маппинга.
     """
+
     FILE = "file"
-    URL  = "url"
+    URL = "url"
 
 
 class SourceScopeVO(StrEnum):
-    PROJECT  = "project"
+    PROJECT = "project"
     DOCUMENT = "document"
 
 
 class DocumentFormatVO(StrEnum):
-    DOCX     = "docx"
-    DOC      = "doc"
-    TXT      = "txt"
+    DOCX = "docx"
+    DOC = "doc"
+    TXT = "txt"
     MARKDOWN = "markdown"
 
 
 class AuditActionVO(StrEnum):
-    ACCEPT          = "accept"
-    REJECT          = "reject"
-    BULK_ACCEPT     = "bulk_accept"
-    BULK_REJECT     = "bulk_reject"      # M-3 (issue #37)
-    FINALIZE        = "finalize"         # kept for backward compat
+    ACCEPT = "accept"
+    REJECT = "reject"
+    BULK_ACCEPT = "bulk_accept"
+    BULK_REJECT = "bulk_reject"  # M-3 (issue #37)
+    FINALIZE = "finalize"  # kept for backward compat
     FINALIZE_REVIEW = "finalize_review"  # S-3 (issue #37) — used by router
-    REOPEN          = "reopen"
-    RESET           = "reset"            # отмена ранее принятого/отклонённого решения
-    DOWNLOAD        = "download"         # синхронизировано с enums.AuditAction
+    REOPEN = "reopen"
+    RESET = "reset"  # отмена ранее принятого/отклонённого решения
+    DOWNLOAD = "download"  # синхронизировано с enums.AuditAction
 
 
 # ---------------------------------------------------------------------------
 # Compound value objects
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class PaginationParams:
     """Параметры постраничной навигации на основе OFFSET."""
+
     limit: int
     offset: int
 
@@ -115,6 +118,7 @@ class PaginationParams:
 @dataclass(frozen=True)
 class KeysetPage:
     """Параметры курсорной (keyset) пагинации."""
+
     limit: int
     before_created_at: datetime | None = None
     before_id: uuid.UUID | None = None
@@ -125,9 +129,7 @@ class KeysetPage:
         has_ts = self.before_created_at is not None
         has_id = self.before_id is not None
         if has_ts != has_id:
-            raise ValueError(
-                "KeysetPage: before_created_at и before_id должны быть заданы вместе"
-            )
+            raise ValueError("KeysetPage: before_created_at и before_id должны быть заданы вместе")
 
 
 @dataclass(frozen=True)

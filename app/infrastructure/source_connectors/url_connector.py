@@ -10,6 +10,7 @@ UrlConnector — скачивает текст по HTTP(S)-ссылке.
     убирает теги и возвращает чистый текст. Иначе — декодирует как UTF-8.
   - Лимит: 5 МБ на ответ.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -79,7 +80,7 @@ class UrlConnector:
                 asyncio.to_thread(self._read_robots_sync, url),
                 timeout=_ROBOTS_TIMEOUT,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.debug("robots.txt check timed out, продолжаем", extra={"url": url})
         except Exception as exc:
             logger.debug("robots.txt check failed, продолжаем", extra={"url": url, "exc": str(exc)})
@@ -101,7 +102,8 @@ class UrlConnector:
     @staticmethod
     def _strip_html(raw: bytes) -> str:
         try:
-            from bs4 import BeautifulSoup
+            from bs4 import BeautifulSoup  # noqa: PLC0415
+
             soup = BeautifulSoup(raw, "html.parser")
             for tag in soup(["script", "style", "noscript", "head"]):
                 tag.decompose()

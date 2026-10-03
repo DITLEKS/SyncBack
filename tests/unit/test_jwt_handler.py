@@ -14,7 +14,11 @@ from app.infrastructure.security.jwt_handler import JWTHandler
 
 
 def _make_settings(expire_minutes: int = 60):
-    return SimpleNamespace(jwt_secret="test-secret", jwt_algorithm="HS256", jwt_access_token_expire_minutes=expire_minutes)
+    return SimpleNamespace(
+        jwt_secret="test-secret",
+        jwt_algorithm="HS256",
+        jwt_access_token_expire_minutes=expire_minutes,
+    )
 
 
 def test_create_and_decode_token_roundtrip():
@@ -47,7 +51,11 @@ def test_decode_garbage_token_raises_invalid_token_error():
 
 def test_decode_token_signed_with_different_secret_raises():
     handler_a = JWTHandler(_make_settings())
-    handler_b = JWTHandler(SimpleNamespace(jwt_secret="another-secret", jwt_algorithm="HS256", jwt_access_token_expire_minutes=60))
+    handler_b = JWTHandler(
+        SimpleNamespace(
+            jwt_secret="another-secret", jwt_algorithm="HS256", jwt_access_token_expire_minutes=60
+        )
+    )
     token, _ = handler_a.create_access_token(uuid.uuid4(), "user")
 
     with pytest.raises(InvalidTokenError):

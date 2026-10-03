@@ -11,6 +11,7 @@ FIX-review-3: status: AnalysisJobStatus (инфра-enum) → AnalysisJobStatusV
     AnalysisJobStatusVO и AnalysisJobStatus имеют идентичные строковые значения,
     поэтому from_attributes=True продолжает работать без изменений.
 """
+
 import uuid
 from datetime import datetime
 
@@ -25,6 +26,7 @@ class AnalysisJobCreateRequest(BaseModel):
     force=True обязателен, если документ в статусе READY.
     Опущен — флаг просто игнорируется для не-READY документов.
     """
+
     force: bool = False
 
 
@@ -50,5 +52,6 @@ class AnalysisJobConflictResponse(BaseModel):
     Фронт получает этот ответ и должен показать диалог
     "Документ уже Готов. Перезапустить анализ?"
     """
+
     detail: str
     confirmation_required: bool = True

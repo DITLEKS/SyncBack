@@ -27,11 +27,12 @@ SQLAlchemy-адаптер для Suggestion.
 - NEW-2: reset_to_pending_by_job — bulk UPDATE всех правок job → PENDING;
   вызывался в reset_analysis() но отсутствовал в реализации.
 """
+
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Sequence
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
 
 def _status_to_orm(vo: SuggestionStatusVO):
     from app.infrastructure.db.models.enums import SuggestionStatus
+
     return SuggestionStatus(vo.value)
 
 
@@ -60,10 +62,9 @@ class SuggestionRepository(ISuggestionRepository):
     # Read
     # ------------------------------------------------------------------
 
-    async def get_by_id(
-        self, suggestion_id: uuid.UUID
-    ) -> "Suggestion | None":
+    async def get_by_id(self, suggestion_id: uuid.UUID) -> Suggestion | None:
         from app.infrastructure.db.models.suggestion import Suggestion as M
+
         return await self._session.get(M, suggestion_id)
 
     async def list_by_analysis_job(
@@ -73,8 +74,9 @@ class SuggestionRepository(ISuggestionRepository):
         limit: int | None = None,
         offset: int = 0,
         status: SuggestionStatusVO | None = None,
-    ) -> "list[Suggestion]":
+    ) -> list[Suggestion]:
         from app.infrastructure.db.models.suggestion import Suggestion as M
+
         q = select(M).where(M.analysis_job_id == analysis_job_id)
         if status is not None:
             q = q.where(M.status == _status_to_orm(status))
@@ -91,7 +93,7 @@ class SuggestionRepository(ISuggestionRepository):
         limit: int,
         offset: int,
         status: SuggestionStatusVO | None = None,
-    ) -> "tuple[list[Suggestion], int]":
+    ) -> tuple[list[Suggestion], int]:
         """OPT-1: один SELECT с window-функцией вместо двух запросов.
 
         func.count().over() вычисляется ДО применения LIMIT/OFFSET в PostgreSQL,
@@ -99,17 +101,20 @@ class SuggestionRepository(ISuggestionRepository):
         Поведение покрыто тестом test_list_with_total_window_count.
         """
         from app.infrastructure.db.models.suggestion import Suggestion as M
+
         where_clauses = [M.analysis_job_id == analysis_job_id]
         if status is not None:
             where_clauses.append(M.status == _status_to_orm(status))
 
-        rows = (await self._session.execute(
-            select(M, func.count().over().label("total"))
-            .where(*where_clauses)
-            .order_by(M.created_at.asc())
-            .limit(limit)
-            .offset(offset)
-        )).all()
+        rows = (
+            await self._session.execute(
+                select(M, func.count().over().label("total"))
+                .where(*where_clauses)
+                .order_by(M.created_at.asc())
+                .limit(limit)
+                .offset(offset)
+            )
+        ).all()
 
         if not rows:
             return [], 0
@@ -119,10 +124,9 @@ class SuggestionRepository(ISuggestionRepository):
 
     async def count_by_analysis_job(self, analysis_job_id: uuid.UUID) -> int:
         from app.infrastructure.db.models.suggestion import Suggestion as M
+
         result = await self._session.execute(
-            select(func.count()).select_from(M).where(
-                M.analysis_job_id == analysis_job_id
-            )
+            select(func.count()).select_from(M).where(M.analysis_job_id == analysis_job_id)
         )
         return result.scalar_one()
 
@@ -132,8 +136,11 @@ class SuggestionRepository(ISuggestionRepository):
         status: SuggestionStatusVO,
     ) -> int:
         from app.infrastructure.db.models.suggestion import Suggestion as M
+
         result = await self._session.execute(
-            select(func.count()).select_from(M).where(
+            select(func.count())
+            .select_from(M)
+            .where(
                 M.analysis_job_id == analysis_job_id,
                 M.status == _status_to_orm(status),
             )
@@ -144,13 +151,16 @@ class SuggestionRepository(ISuggestionRepository):
         self,
         analysis_job_id: uuid.UUID,
         status: SuggestionStatusVO,
-    ) -> "list[Suggestion]":
+    ) -> list[Suggestion]:
         from app.infrastructure.db.models.suggestion import Suggestion as M
+
         result = await self._session.execute(
-            select(M).where(
+            select(M)
+            .where(
                 M.analysis_job_id == analysis_job_id,
                 M.status == _status_to_orm(status),
-            ).order_by(M.created_at.asc())
+            )
+            .order_by(M.created_at.asc())
         )
         return list(result.scalars().all())
 
@@ -160,17 +170,22 @@ class SuggestionRepository(ISuggestionRepository):
         status: SuggestionStatusVO,
         limit: int,
         offset: int = 0,
-    ) -> "list[Suggestion]":
+    ) -> list[Suggestion]:
         """
         Постраничный вариант list_by_analysis_job_and_status для стримингового
         экспорта. Покрывается индексом ix_suggestions_job_status (миграция 0015).
         """
         from app.infrastructure.db.models.suggestion import Suggestion as M
+
         result = await self._session.execute(
-            select(M).where(
+            select(M)
+            .where(
                 M.analysis_job_id == analysis_job_id,
                 M.status == _status_to_orm(status),
-            ).order_by(M.created_at.asc()).limit(limit).offset(offset)
+            )
+            .order_by(M.created_at.asc())
+            .limit(limit)
+            .offset(offset)
         )
         return list(result.scalars().all())
 
@@ -180,6 +195,7 @@ class SuggestionRepository(ISuggestionRepository):
         status: SuggestionStatusVO,
     ) -> list[uuid.UUID]:
         from app.infrastructure.db.models.suggestion import Suggestion as M
+
         result = await self._session.execute(
             select(M.id).where(
                 M.analysis_job_id == analysis_job_id,
@@ -192,9 +208,7 @@ class SuggestionRepository(ISuggestionRepository):
     # Write
     # ------------------------------------------------------------------
 
-    async def bulk_create(
-        self, suggestions: "list[Suggestion]"
-    ) -> "list[Suggestion]":
+    async def bulk_create(self, suggestions: list[Suggestion]) -> list[Suggestion]:
         if not suggestions:
             return []
         self._session.add_all(suggestions)
@@ -203,7 +217,7 @@ class SuggestionRepository(ISuggestionRepository):
 
     async def update_status(
         self,
-        suggestion: "Suggestion",
+        suggestion: Suggestion,
         decision: SuggestionDecision,
     ) -> None:
         """
@@ -211,7 +225,8 @@ class SuggestionRepository(ISuggestionRepository):
         Raises SuggestionAlreadyDecidedError если строка не затронута.
         """
         from app.infrastructure.db.models.enums import SuggestionStatus
-        now = datetime.now(timezone.utc)
+
+        now = datetime.now(UTC)
         stmt = (
             update(type(suggestion))
             .where(
@@ -230,9 +245,8 @@ class SuggestionRepository(ISuggestionRepository):
         await self._session.flush()
         if updated is None:
             from app.domain.exceptions import SuggestionAlreadyDecidedError
-            raise SuggestionAlreadyDecidedError(
-                "Правка уже была принята или отклонена"
-            )
+
+            raise SuggestionAlreadyDecidedError("Правка уже была принята или отклонена")
 
     async def bulk_update_status(
         self,
@@ -246,21 +260,18 @@ class SuggestionRepository(ISuggestionRepository):
         с M.analysis_job_id (что было семантически неверно).
         """
         from app.infrastructure.db.models.enums import SuggestionStatus
+
         all_decisions = decisions.decisions
         if not all_decisions:
             return 0
 
         accepted_ids = [
-            d.suggestion_id for d in all_decisions
-            if d.status == SuggestionStatusVO.ACCEPTED
-        ]
-        rejected_ids = [
-            d.suggestion_id for d in all_decisions
-            if d.status == SuggestionStatusVO.REJECTED
+            d.suggestion_id for d in all_decisions if d.status == SuggestionStatusVO.ACCEPTED
         ]
         all_ids = [d.suggestion_id for d in all_decisions]
 
         from app.infrastructure.db.models.suggestion import Suggestion as M
+
         stmt = (
             update(M)
             .where(
@@ -285,11 +296,12 @@ class SuggestionRepository(ISuggestionRepository):
         self,
         analysis_job_id: uuid.UUID,
         user_id: uuid.UUID,
-    ) -> "list[Suggestion]":
+    ) -> list[Suggestion]:
         """Принять все PENDING-правки одним UPDATE, вернуть обновлённые объекты."""
         from app.infrastructure.db.models.enums import SuggestionStatus
         from app.infrastructure.db.models.suggestion import Suggestion as M
-        now = datetime.now(timezone.utc)
+
+        now = datetime.now(UTC)
         stmt = (
             update(M)
             .where(
@@ -308,16 +320,14 @@ class SuggestionRepository(ISuggestionRepository):
         await self._session.flush()
         if not updated_ids:
             return []
-        rows = await self._session.execute(
-            select(M).where(M.id.in_(updated_ids))
-        )
+        rows = await self._session.execute(select(M).where(M.id.in_(updated_ids)))
         return list(rows.scalars().all())
 
     async def bulk_reject_all(
         self,
         analysis_job_id: uuid.UUID,
         user_id: uuid.UUID,
-    ) -> "list[Suggestion]":
+    ) -> list[Suggestion]:
         """C-3 (issue #37): отклонить все PENDING-правки одним UPDATE.
 
         Зеркало bulk_accept_all — один UPDATE WHERE status=PENDING,
@@ -325,7 +335,8 @@ class SuggestionRepository(ISuggestionRepository):
         """
         from app.infrastructure.db.models.enums import SuggestionStatus
         from app.infrastructure.db.models.suggestion import Suggestion as M
-        now = datetime.now(timezone.utc)
+
+        now = datetime.now(UTC)
         stmt = (
             update(M)
             .where(
@@ -344,15 +355,13 @@ class SuggestionRepository(ISuggestionRepository):
         await self._session.flush()
         if not updated_ids:
             return []
-        rows = await self._session.execute(
-            select(M).where(M.id.in_(updated_ids))
-        )
+        rows = await self._session.execute(select(M).where(M.id.in_(updated_ids)))
         return list(rows.scalars().all())
 
     async def reset_status(
         self,
-        suggestion: "Suggestion",
-    ) -> "Suggestion | None":
+        suggestion: Suggestion,
+    ) -> Suggestion | None:
         """Сбросить решение правки обратно в PENDING.
 
         Атомарный UPDATE ... WHERE status != 'pending' AND id = ?.
@@ -362,6 +371,7 @@ class SuggestionRepository(ISuggestionRepository):
         """
         from app.infrastructure.db.models.enums import SuggestionStatus
         from app.infrastructure.db.models.suggestion import Suggestion as M
+
         stmt = (
             update(M)
             .where(
@@ -397,6 +407,7 @@ class SuggestionRepository(ISuggestionRepository):
         анализа (статус документа ERROR или CANCELLED), до создания новой job.
         """
         from app.infrastructure.db.models.suggestion import Suggestion as M
+
         stmt = delete(M).where(M.analysis_job_id == analysis_job_id)
         result = await self._session.execute(stmt)
         await self._session.flush()
@@ -418,6 +429,7 @@ class SuggestionRepository(ISuggestionRepository):
         """
         from app.infrastructure.db.models.enums import SuggestionStatus
         from app.infrastructure.db.models.suggestion import Suggestion as M
+
         stmt = (
             update(M)
             .where(

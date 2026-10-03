@@ -1,6 +1,7 @@
 """
 P0-11: Тесты GET /api/v1/system/capabilities.
 """
+
 import pytest
 
 

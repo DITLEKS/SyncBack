@@ -10,6 +10,7 @@ NOTE: этот роутер только POST (upload) и возвращает D
 а не DocumentListItem. sources=None здесь не актуален —
 свежезагруженный документ ещё не имеет источников.
 """
+
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status

@@ -5,9 +5,9 @@ C-3: CancelAllSuggestionsResponse добавлена для DELETE /editor/sugge
 FIX-review-1: EditorSectionResponse → DocumentSectionResponse (правильное имя класса
     в document.py; EditorSectionResponse никогда не существовал → ImportError при старте).
 """
+
 import uuid
 from datetime import datetime
-from typing import Optional
 
 from pydantic import BaseModel
 
@@ -21,7 +21,7 @@ class EditorDocumentMeta(BaseModel):
     title: str
     format: str
     status: DocumentStatusVO
-    current_analysis_job_id: Optional[uuid.UUID] = None
+    current_analysis_job_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
     review_version: int = 0
@@ -44,8 +44,8 @@ class EditorPermissions(BaseModel):
 
 class EditorAggregateResponse(BaseModel):
     document: EditorDocumentMeta
-    content: Optional[EditorContent] = None
-    original_content: Optional[EditorContent] = None
+    content: EditorContent | None = None
+    original_content: EditorContent | None = None
     suggestions: list[SuggestionResponse] = []
     suggestions_total: int = 0
     counters: SuggestionCounters
@@ -64,5 +64,6 @@ class CancelAllSuggestionsResponse(BaseModel):
 
     cancelled_count — число pending-правок, переведённых в rejected.
     """
+
     document_id: uuid.UUID
     cancelled_count: int

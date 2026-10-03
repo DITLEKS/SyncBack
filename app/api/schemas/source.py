@@ -47,6 +47,7 @@ class SourceCreateRequest(BaseModel):
     указать документ, к которому привязывается источник.
     Если scope='project', document_id игнорируется (должен быть None).
     """
+
     name: str = Field(min_length=1, max_length=255)
     type: Literal["url"]
     url: str = Field(min_length=1, max_length=2048)
@@ -67,6 +68,7 @@ class NoteCreateRequest(BaseModel):
     FIX-9: добавлено document_id — при scope='document' необходимо
     указать документ, к которому привязывается источник.
     """
+
     name: str = Field(min_length=1, max_length=255)
     text_content: str = Field(min_length=1, max_length=200_000)
     scope: Literal["project", "document"] = "project"
@@ -111,6 +113,7 @@ class SourceBadge(BaseModel):
     такое значение никогда не приходило из БД.
     field_validator нормализует SourceTypeVO enum → строку.
     """
+
     id: uuid.UUID
     name: str
     type: Literal["url", "file"]

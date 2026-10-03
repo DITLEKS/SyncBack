@@ -2,6 +2,7 @@
 Порт для сборки финального документа с учётом принятых правок. Работает с лёгким DTO
 AppliedChange, а не с ORM-моделью Suggestion напрямую.
 """
+
 from dataclasses import dataclass
 from typing import Protocol
 

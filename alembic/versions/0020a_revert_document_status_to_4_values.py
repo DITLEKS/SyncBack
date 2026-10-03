@@ -12,6 +12,7 @@ This migration:
 ODOWN: restores 'error' and 'cancelled' in the enum but does NOT convert rows back
 (rows remain 'draft' — previous status was not persisted separately).
 """
+
 from alembic import op
 import sqlalchemy as sa
 

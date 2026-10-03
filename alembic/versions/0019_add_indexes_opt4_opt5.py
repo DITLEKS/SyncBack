@@ -15,6 +15,7 @@ outside Alembic.
 Revision ID: 0019
 Down revision: 0018b
 """
+
 import sqlalchemy as sa
 from alembic import op
 

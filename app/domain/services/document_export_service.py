@@ -16,6 +16,7 @@ DocumentExportService — скачивает исходный файл из MinI
   - _iter_accepted_changes_pages НЕ управляет контекстом UoW —
     вызывающий обязан открыть `async with self._uow` до вызова.
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -48,15 +49,13 @@ class DocumentExportService:
         self,
         uow: IUnitOfWork,
         file_storage: FileStorage,
-        exporter_registry: "DocumentExporterRegistry",
+        exporter_registry: DocumentExporterRegistry,
     ) -> None:
         self._uow = uow
         self._storage = file_storage
         self._exporters = exporter_registry
 
-    async def export_document(
-        self, document: "Document"
-    ) -> tuple[bytes, str, str]:
+    async def export_document(self, document: Document) -> tuple[bytes, str, str]:
         """Вернуть (bytes, filename, media_type) финального документа.
 
         Открывает единственный UoW-контекст для чтения принятых правок.
@@ -73,9 +72,7 @@ class DocumentExportService:
         media_type = _MEDIA_TYPES.get(document.format, "application/octet-stream")
         return exported_bytes, document.title, media_type
 
-    async def export_and_save(
-        self, document: "Document"
-    ) -> None:
+    async def export_and_save(self, document: Document) -> None:
         """Применить правки, загрузить результат в MinIO и обновить storage_key.
 
         Структура:
@@ -113,9 +110,7 @@ class DocumentExportService:
     # Internal
     # ------------------------------------------------------------------
 
-    async def _iter_accepted_changes_pages(
-        self, document: "Document"
-    ) -> list[AppliedChange]:
+    async def _iter_accepted_changes_pages(self, document: Document) -> list[AppliedChange]:
         """Курсорный обход принятых правок страницами по _EXPORT_PAGE_SIZE.
 
         ВАЖНО: метод НЕ открывает `async with self._uow`.

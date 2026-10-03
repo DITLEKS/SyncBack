@@ -24,6 +24,7 @@ SQLAlchemy-адаптер для AnalysisJob.
   update_status(), а не оставляет job в PENDING до момента когда воркер вызовет
   mark_processing_if_active(). Это закрывает окно в несколько секунд когда status врал.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
 
 def _status_to_orm(vo: AnalysisJobStatusVO):
     from app.infrastructure.db.models.enums import AnalysisJobStatus
+
     return AnalysisJobStatus(vo.value)
 
 
@@ -54,14 +56,16 @@ class AnalysisJobRepository(IAnalysisJobRepository):
     # Read
     # ------------------------------------------------------------------
 
-    async def get_by_id(self, job_id: uuid.UUID) -> "AnalysisJob | None":
+    async def get_by_id(self, job_id: uuid.UUID) -> AnalysisJob | None:
         from app.infrastructure.db.models.analysis_job import AnalysisJob as M
+
         return await self._session.get(M, job_id)
 
     async def get_by_idempotency_key(
         self, document_id: uuid.UUID, idempotency_key: str
-    ) -> "AnalysisJob | None":
+    ) -> AnalysisJob | None:
         from app.infrastructure.db.models.analysis_job import AnalysisJob as M
+
         result = await self._session.execute(
             select(M).where(
                 M.document_id == document_id,
@@ -70,18 +74,15 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         )
         return result.scalar_one_or_none()
 
-    async def get_active_by_document_id(
-        self, document_id: uuid.UUID
-    ) -> "AnalysisJob | None":
+    async def get_active_by_document_id(self, document_id: uuid.UUID) -> AnalysisJob | None:
         from app.infrastructure.db.models.analysis_job import AnalysisJob as M
         from app.infrastructure.db.models.enums import AnalysisJobStatus
+
         result = await self._session.execute(
             select(M)
             .where(
                 M.document_id == document_id,
-                M.status.in_(
-                    (AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING)
-                ),
+                M.status.in_((AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING)),
             )
             .order_by(M.created_at.desc())
             .limit(1)
@@ -92,14 +93,11 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         self,
         document_id: uuid.UUID,
         pagination,
-    ) -> "list[AnalysisJob]":
+    ) -> list[AnalysisJob]:
+        from app.domain.value_objects import KeysetPage
         from app.infrastructure.db.models.analysis_job import AnalysisJob as M
-        from app.domain.value_objects import PaginationParams, KeysetPage
-        stmt = (
-            select(M)
-            .where(M.document_id == document_id)
-            .order_by(M.created_at.desc())
-        )
+
+        stmt = select(M).where(M.document_id == document_id).order_by(M.created_at.desc())
         if isinstance(pagination, KeysetPage):
             if pagination.has_cursor:
                 stmt = stmt.where(
@@ -121,12 +119,12 @@ class AnalysisJobRepository(IAnalysisJobRepository):
 
     async def create_for_document(
         self,
-        document: "Document",
+        document: Document,
         *,
         job_id: uuid.UUID | None = None,
         status: AnalysisJobStatusVO = AnalysisJobStatusVO.PENDING,
         idempotency_key: str | None = None,
-    ) -> "AnalysisJob":
+    ) -> AnalysisJob:
         """Фабричный метод: создаёт ORM-объект AnalysisJob внутри репозитория.
 
         CRIT-1: репозиторий НЕ мутирует document.current_analysis_job_id.
@@ -139,6 +137,7 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         Commit — ответственность вызывающего UoW.
         """
         from app.infrastructure.db.models.analysis_job import AnalysisJob as M
+
         job = M(
             id=job_id or uuid.uuid4(),
             document_id=document.id,
@@ -151,9 +150,9 @@ class AnalysisJobRepository(IAnalysisJobRepository):
 
     async def mark_dispatched(
         self,
-        job: "AnalysisJob",
+        job: AnalysisJob,
         task_id: str,
-    ) -> "tuple[AnalysisJob, DocumentStatusVO | None]":
+    ) -> tuple[AnalysisJob, DocumentStatusVO | None]:
         """Пометить задачу как отправленную в Celery и перевести в PROCESSING.
 
         FIX-DISPATCH: теперь явно вызывает update_status(PROCESSING), а не только
@@ -186,9 +185,9 @@ class AnalysisJobRepository(IAnalysisJobRepository):
 
     async def mark_failed_queue_unavailable(
         self,
-        job: "AnalysisJob",
+        job: AnalysisJob,
         message: str | None,
-    ) -> "tuple[AnalysisJob, DocumentStatusVO]":
+    ) -> tuple[AnalysisJob, DocumentStatusVO]:
         """CRIT-B / HIGH-B: делегирует update_status(), не мутирует document.
 
         Возвращает (job, DocumentStatusVO.DRAFT) — вызывающий код обновляет документ.
@@ -203,8 +202,8 @@ class AnalysisJobRepository(IAnalysisJobRepository):
 
     async def cancel(
         self,
-        job: "AnalysisJob",
-    ) -> "tuple[AnalysisJob, DocumentStatusVO]":
+        job: AnalysisJob,
+    ) -> tuple[AnalysisJob, DocumentStatusVO]:
         """CRIT-B / HIGH-B: делегирует update_status(), не мутирует document.
 
         Возвращает (job, DocumentStatusVO.DRAFT) — вызывающий код обновляет документ.
@@ -225,13 +224,12 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         """
         from app.infrastructure.db.models.analysis_job import AnalysisJob as M
         from app.infrastructure.db.models.enums import AnalysisJobStatus
+
         result = await self._session.execute(
             update(M)
             .where(
                 M.id == job_id,
-                M.status.in_(
-                    (AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING)
-                ),
+                M.status.in_((AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING)),
             )
             .values(
                 status=AnalysisJobStatus.PROCESSING,
@@ -244,13 +242,14 @@ class AnalysisJobRepository(IAnalysisJobRepository):
 
     async def update_status(
         self,
-        job: "AnalysisJob",
+        job: AnalysisJob,
         status: AnalysisJobStatusVO,
         error_code: str | None = None,
         error_message: str | None = None,
-    ) -> "AnalysisJob":
+    ) -> AnalysisJob:
         """H-NEW-1: удалён session.refresh(job) — flush() достаточен."""
         from app.infrastructure.db.models.enums import AnalysisJobStatus
+
         _terminal = {
             AnalysisJobStatus.SUCCESS,
             AnalysisJobStatus.FAILED,

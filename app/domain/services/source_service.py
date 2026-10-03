@@ -37,10 +37,12 @@ review #1: _LOCKED_STATUSES не включает ERROR/CANCELLED намерен
         до повторного запуска анализа. IN_PROGRESS и AWAITING_APPROVAL
         блокируют изменения пока идёт активная обработка/ревью.
 """
+
 from __future__ import annotations
 
 import uuid
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from app.core.config import Settings, get_settings
@@ -54,16 +56,21 @@ if TYPE_CHECKING:
     from app.infrastructure.db.models.project import Project
     from app.infrastructure.db.models.source import Source
 
+# Колбэк, который бросает исключение, если у документа идёт активный анализ.
+_ActiveJobChecker = Callable[[uuid.UUID], Awaitable[None]]
+
 # review #1: ERROR и CANCELLED намеренно НЕ включены в _LOCKED_STATUSES.
 # Пользователь должен иметь возможность редактировать/удалять источники
 # документа, завершившегося с ошибкой или отменённого, перед повторным
 # запуском анализа. Блокируем только активную обработку (IN_PROGRESS)
 # и этап ревью (AWAITING_APPROVAL), когда изменение источников нарушило
 # бы целостность текущего job.
-_LOCKED_STATUSES: frozenset[DocumentStatusVO] = frozenset({
-    DocumentStatusVO.IN_PROGRESS,
-    DocumentStatusVO.AWAITING_APPROVAL,
-})
+_LOCKED_STATUSES: frozenset[DocumentStatusVO] = frozenset(
+    {
+        DocumentStatusVO.IN_PROGRESS,
+        DocumentStatusVO.AWAITING_APPROVAL,
+    }
+)
 
 
 class SourceService:
@@ -82,7 +89,7 @@ class SourceService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _assert_sources_mutable(document: "Document") -> None:
+    def _assert_sources_mutable(document: Document) -> None:
         if document.status in _LOCKED_STATUSES:
             raise SourceLockError(
                 f"Нельзя изменить источники документа в статусе '{document.status.value}'. "
@@ -113,12 +120,12 @@ class SourceService:
 
     async def create_note_source(
         self,
-        project: "Project",
+        project: Project,
         name: str,
         text_content: str,
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
         document_id: uuid.UUID | None = None,
-    ) -> "Source":
+    ) -> Source:
         """Сохраняет текстовую заметку как .txt в MinIO.
 
         FIX-6: storage.upload перенесён внутрь async with uow — если UoW
@@ -128,9 +135,7 @@ class SourceService:
         WARN-2: при scope=DOCUMENT + document_id вставляет M2M-запись.
         """
         if len(text_content.encode()) > self._settings.max_upload_size_bytes:
-            raise FileTooLargeError(
-                f"Текст превышает лимит {self._settings.max_upload_size_mb} МБ"
-            )
+            raise FileTooLargeError(f"Текст превышает лимит {self._settings.max_upload_size_mb} МБ")
 
         source_id = uuid.uuid4()
         storage_key = f"projects/{project.id}/sources/{source_id}/note.txt"
@@ -163,12 +168,12 @@ class SourceService:
 
     async def create_url_source(
         self,
-        project: "Project",
+        project: Project,
         name: str,
         url: str,
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
         document_id: uuid.UUID | None = None,
-    ) -> "Source":
+    ) -> Source:
         """WARN-2: при scope=DOCUMENT + document_id вставляет M2M-запись."""
         async with self._uow:
             source = await self._uow.sources.create_url(
@@ -187,14 +192,14 @@ class SourceService:
 
     async def create_file_source(
         self,
-        project: "Project",
+        project: Project,
         name: str,
         filename: str,
         content: bytes,
         content_type: str,
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
         document_id: uuid.UUID | None = None,
-    ) -> "Source":
+    ) -> Source:
         """FIX-6b (review #4): storage.upload перенесён внутрь async with uow —
         симметрично с create_note_source (FIX-6).
 
@@ -204,9 +209,7 @@ class SourceService:
         WARN-2: при scope=DOCUMENT + document_id вставляет M2M-запись.
         """
         if len(content) > self._settings.max_upload_size_bytes:
-            raise FileTooLargeError(
-                f"Файл превышает лимит {self._settings.max_upload_size_mb} МБ"
-            )
+            raise FileTooLargeError(f"Файл превышает лимит {self._settings.max_upload_size_mb} МБ")
         source_id = uuid.uuid4()
         storage_key = f"projects/{project.id}/sources/{source_id}/{filename}"
         try:
@@ -237,7 +240,7 @@ class SourceService:
         limit: int,
         offset: int,
         scope: SourceScopeVO | None = None,
-    ) -> "tuple[list[Source], int]":
+    ) -> tuple[list[Source], int]:
         """R-5: опциональная фильтрация по scope передаётся в репозиторий."""
         async with self._uow:
             items = await self._uow.sources.list_by_project(
@@ -246,21 +249,17 @@ class SourceService:
             total = await self._uow.sources.count_by_project(project_id)
         return items, total
 
-    async def get_source(
-        self, project_id: uuid.UUID, source_id: uuid.UUID
-    ) -> "Source":
+    async def get_source(self, project_id: uuid.UUID, source_id: uuid.UUID) -> Source:
         """Получить источник. Бросает SourceNotFoundError если не найден."""
         async with self._uow:
             source = await self._uow.sources.get_by_id(source_id)
         if source is None or source.project_id != project_id:
-            raise SourceNotFoundError(
-                f"Источник {source_id} не найден в проекте {project_id}"
-            )
+            raise SourceNotFoundError(f"Источник {source_id} не найден в проекте {project_id}")
         return source
 
     async def get_sources_for_project(
         self, project_id: uuid.UUID, source_ids: list[uuid.UUID]
-    ) -> "list[Source]":
+    ) -> list[Source]:
         async with self._uow:
             sources = await self._uow.sources.get_many_by_ids(source_ids)
 
@@ -271,16 +270,14 @@ class SourceService:
 
         foreign = [s.id for s in sources if s.project_id != project_id]
         if foreign:
-            raise SourceNotFoundError(
-                f"Источники не принадлежат проекту {project_id}: {foreign}"
-            )
+            raise SourceNotFoundError(f"Источники не принадлежат проекту {project_id}: {foreign}")
         return sources
 
     async def list_sources_for_documents(
         self,
         project_id: uuid.UUID,
         document_ids: list[uuid.UUID],
-    ) -> "dict[uuid.UUID, list[Source]]":
+    ) -> dict[uuid.UUID, list[Source]]:
         """I-1: батч-загрузка document-scope источников для списка документов.
 
         FIX-1: репозиторий возвращает list[tuple[Source, document_id]];
@@ -292,10 +289,8 @@ class SourceService:
         if not document_ids:
             return {}
         async with self._uow:
-            pairs = await self._uow.sources.list_by_document_ids(
-                project_id, document_ids
-            )
-        result: dict[uuid.UUID, list["Source"]] = defaultdict(list)
+            pairs = await self._uow.sources.list_by_document_ids(project_id, document_ids)
+        result: dict[uuid.UUID, list[Source]] = defaultdict(list)
         for source, doc_id in pairs:
             result[doc_id].append(source)
         return dict(result)
@@ -308,7 +303,7 @@ class SourceService:
         self,
         project_id: uuid.UUID,
         source_id: uuid.UUID,
-        active_job_checker: "_ActiveJobChecker | None" = None,
+        active_job_checker: _ActiveJobChecker | None = None,
     ) -> None:
         """Атомарное удаление источника с guard-проверкой активного job.
 
@@ -322,15 +317,11 @@ class SourceService:
         async with self._uow:
             source = await self._uow.sources.get_by_id(source_id)
             if source is None or source.project_id != project_id:
-                raise SourceNotFoundError(
-                    f"Источник {source_id} не найден в проекте {project_id}"
-                )
+                raise SourceNotFoundError(f"Источник {source_id} не найден в проекте {project_id}")
 
             # review #6: получаем document_id и проверяем active job
             # в рамках той же транзакции — нет TOCTOU.
-            document_id = await self._uow.sources.get_primary_document_id_for_source(
-                source_id
-            )
+            document_id = await self._uow.sources.get_primary_document_id_for_source(source_id)
             if document_id is not None and active_job_checker is not None:
                 await active_job_checker(document_id)
 

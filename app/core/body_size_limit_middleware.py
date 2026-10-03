@@ -27,10 +27,15 @@ class BodySizeLimitMiddleware(BaseHTTPMiddleware):
             except ValueError:
                 size = None
 
-            if size is not None and size > settings.max_upload_size_bytes + _MULTIPART_OVERHEAD_BYTES:
+            if (
+                size is not None
+                and size > settings.max_upload_size_bytes + _MULTIPART_OVERHEAD_BYTES
+            ):
                 return JSONResponse(
                     status_code=413,
-                    content={"detail": f"Тело запроса превышает допустимый размер ({settings.max_upload_size_mb} МБ)"},
+                    content={
+                        "detail": f"Тело запроса превышает допустимый размер ({settings.max_upload_size_mb} МБ)"
+                    },
                 )
 
         return await call_next(request)

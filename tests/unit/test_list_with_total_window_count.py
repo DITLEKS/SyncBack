@@ -9,6 +9,7 @@ M-2 — тест: COUNT(*) OVER() с LIMIT в list_with_total.
      На пустом результате обращение к первой строке для чтения total
      вызовет IndexError — этот тест отловит такую реализацию.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -31,6 +32,7 @@ from app.domain.value_objects import (
 # ---------------------------------------------------------------------------
 # Helpers — minimal fakes
 # ---------------------------------------------------------------------------
+
 
 def _make_suggestion(analysis_job_id: uuid.UUID) -> SuggestionProtocol:
     """Возвращает объект, удовлетворяющий SuggestionProtocol."""
@@ -128,6 +130,7 @@ class _FakeUoW:
 # Tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_list_with_total_partial_page():
     """
@@ -168,7 +171,7 @@ async def test_list_with_total_empty_result():
     """
     job_id = uuid.uuid4()
     doc = _make_document(job_id)
-    uow = _FakeUoW(document=doc, suggestions=[])   # нет правок
+    uow = _FakeUoW(document=doc, suggestions=[])  # нет правок
     service = SuggestionService(uow)
 
     pagination = PaginationParams(limit=10, offset=0)

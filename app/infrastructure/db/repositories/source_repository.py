@@ -30,6 +30,7 @@ FIX-review-4: get_primary_document_id_for_source — один SELECT из
     document_sources WHERE source_id = :id LIMIT 1. Закрывает открытый
     контракт из коммита 7d92cb0.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -48,11 +49,13 @@ if TYPE_CHECKING:
 
 def _scope_to_orm(vo: SourceScopeVO):
     from app.infrastructure.db.models.enums import SourceScope
+
     return SourceScope(vo.value)
 
 
 def _type_to_orm(vo: SourceTypeVO):
     from app.infrastructure.db.models.enums import SourceType
+
     return SourceType(vo.value)
 
 
@@ -64,15 +67,15 @@ class SourceRepository(ISourceRepository):
     # Read
     # ------------------------------------------------------------------
 
-    async def get_by_id(self, source_id: uuid.UUID) -> "Source | None":
+    async def get_by_id(self, source_id: uuid.UUID) -> Source | None:
         from app.infrastructure.db.models.source import Source as M
+
         return await self._session.get(M, source_id)
 
-    async def get_many_by_ids(self, source_ids: list[uuid.UUID]) -> "list[Source]":
+    async def get_many_by_ids(self, source_ids: list[uuid.UUID]) -> list[Source]:
         from app.infrastructure.db.models.source import Source as M
-        result = await self._session.execute(
-            select(M).where(M.id.in_(source_ids))
-        )
+
+        result = await self._session.execute(select(M).where(M.id.in_(source_ids)))
         return list(result.scalars().all())
 
     async def list_by_project(
@@ -81,7 +84,7 @@ class SourceRepository(ISourceRepository):
         limit: int,
         offset: int,
         scope: SourceScopeVO | None = None,
-    ) -> "list[Source]":
+    ) -> list[Source]:
         """R-5: опциональная фильтрация по scope.
 
         scope=None  — вернуть все источники проекта (старое поведение).
@@ -89,6 +92,7 @@ class SourceRepository(ISourceRepository):
         scope=DOCUMENT — только документные (нетипичный случай).
         """
         from app.infrastructure.db.models.source import Source as M
+
         # R-4: сортировка по created_at вместо удалённого uploaded_at.
         stmt = (
             select(M)
@@ -104,6 +108,7 @@ class SourceRepository(ISourceRepository):
 
     async def count_by_project(self, project_id: uuid.UUID) -> int:
         from app.infrastructure.db.models.source import Source as M
+
         result = await self._session.execute(
             select(func.count()).select_from(M).where(M.project_id == project_id)
         )
@@ -113,7 +118,7 @@ class SourceRepository(ISourceRepository):
         self,
         project_id: uuid.UUID,
         document_ids: list[uuid.UUID],
-    ) -> "list[tuple[Source, uuid.UUID]]":
+    ) -> list[tuple[Source, uuid.UUID]]:
         """I-1 / FIX-1 / FIX-3: батч-запрос document-scope источников через M2M.
 
         Source не имеет колонки document_id — связь идёт через таблицу
@@ -138,6 +143,7 @@ class SourceRepository(ISourceRepository):
         from app.infrastructure.db.models.document_source import document_sources as DS
         from app.infrastructure.db.models.enums import SourceScope
         from app.infrastructure.db.models.source import Source as M
+
         stmt = (
             select(M, DS.c.document_id)
             .join(DS, DS.c.source_id == M.id)
@@ -154,7 +160,7 @@ class SourceRepository(ISourceRepository):
     async def get_primary_document_id_for_source(
         self,
         source_id: uuid.UUID,
-    ) -> "uuid.UUID | None":
+    ) -> uuid.UUID | None:
         """FIX-review-4: первый document_id из M2M-таблицы document_sources.
 
         Один SELECT без JOIN на sources — нет необходимости в полном
@@ -167,10 +173,9 @@ class SourceRepository(ISourceRepository):
              LIMIT 1
         """
         from app.infrastructure.db.models.document_source import document_sources as DS
+
         result = await self._session.execute(
-            select(DS.c.document_id)
-            .where(DS.c.source_id == source_id)
-            .limit(1)
+            select(DS.c.document_id).where(DS.c.source_id == source_id).limit(1)
         )
         row = result.one_or_none()
         return row[0] if row is not None else None
@@ -193,6 +198,7 @@ class SourceRepository(ISourceRepository):
         Безопасно вызывать повторно — повторная пара игнорируется.
         """
         from app.infrastructure.db.models.document_source import document_sources as DS
+
         stmt = (
             pg_insert(DS)
             .values(document_id=document_id, source_id=source_id)
@@ -209,12 +215,13 @@ class SourceRepository(ISourceRepository):
         source_type: SourceTypeVO,
         storage_key: str,
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
-    ) -> "Source":
+    ) -> Source:
         """Файловый источник (включая бывшие note, сохранённые как .txt).
 
         FIX-2: исправлено source_type= → type= (имя колонки ORM-модели).
         """
         from app.infrastructure.db.models.source import Source as M
+
         source = M(
             id=source_id,
             project_id=project_id,
@@ -233,13 +240,14 @@ class SourceRepository(ISourceRepository):
         name: str,
         url: str,
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
-    ) -> "Source":
+    ) -> Source:
         """URL-источник — только url, без storage_key.
 
         FIX-2: исправлено source_type= → type= (имя колонки ORM-модели).
         """
         from app.infrastructure.db.models.enums import SourceType
         from app.infrastructure.db.models.source import Source as M
+
         source = M(
             id=uuid.uuid4(),
             project_id=project_id,
@@ -255,8 +263,8 @@ class SourceRepository(ISourceRepository):
     async def replace_document_sources(
         self,
         document_id: uuid.UUID,
-        sources: "list[Source]",
-    ) -> "list[Source]":
+        sources: list[Source],
+    ) -> list[Source]:
         """FIX-1 / FIX-4: удаление и вставка через M2M таблицу document_sources.
 
         Source не имеет колонки document_id — операции идут через
@@ -271,9 +279,7 @@ class SourceRepository(ISourceRepository):
         from app.infrastructure.db.models.enums import SourceScope
 
         # Удаляем все текущие связи документа с источниками
-        await self._session.execute(
-            delete(DS).where(DS.c.document_id == document_id)
-        )
+        await self._session.execute(delete(DS).where(DS.c.document_id == document_id))
 
         # Вставляем новые связи и выставляем scope=DOCUMENT на источниках
         for source in sources:
@@ -291,7 +297,7 @@ class SourceRepository(ISourceRepository):
         self,
         project_id: uuid.UUID,
         source_id: uuid.UUID,
-    ) -> "Source | None":
+    ) -> Source | None:
         """OPT-S2: атомарное удаление источника принадлежащего проекту.
 
         FIX-1: убрано обращение к Source.document_id (колонки нет).
@@ -299,6 +305,7 @@ class SourceRepository(ISourceRepository):
         storage_key доступен на объекте для последующего удаления из MinIO.
         """
         from app.infrastructure.db.models.source import Source as M
+
         source = await self._session.get(M, source_id)
         if source is None or source.project_id != project_id:
             return None
