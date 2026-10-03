@@ -41,6 +41,10 @@ class UnsupportedFormatError(DomainError):
 UnsupportedFileFormatError = UnsupportedFormatError
 
 
+class UnsupportedExportFormatError(DomainError):
+    """Запрошенный формат экспорта невозможен для этого документа."""
+
+
 # ---------------------------------------------------------------------------
 # Document status transitions
 # ---------------------------------------------------------------------------

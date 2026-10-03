@@ -114,6 +114,22 @@ class SourceService:
         if scope is SourceScopeVO.DOCUMENT and document_id is not None:
             await self._uow.sources.attach_to_document(source_id, document_id)
 
+    async def attach_sources_to_document(
+        self, document: Document, sources: list[Source]
+    ) -> list[Source]:
+        """Прикрепить источники проекта к документу (M2M, повтор безопасен).
+
+        Источники должны быть уже проверены на принадлежность проекту документа
+        (см. get_sources_for_project). Бросает SourceLockError, если документ
+        сейчас анализируется или находится на ревью.
+        """
+        self._assert_sources_mutable(document)
+        async with self._uow:
+            for source in sources:
+                await self._uow.sources.attach_to_document(source.id, document.id)
+            await self._uow.commit()
+        return sources
+
     # ------------------------------------------------------------------
     # Create — note (P2: текст → MinIO как .txt)
     # ------------------------------------------------------------------

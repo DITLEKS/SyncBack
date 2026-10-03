@@ -1,26 +1,8 @@
-"""
-Загрузка и просмотр документов внутри проекта, привязка источников к документу.
-
-ДОБАВЛЕНО:
-- DELETE /{document_id} — удаление документа + MinIO-файл + каскад suggestions/jobs.
-- GET /{document_id}/export?export_format=md|docx|txt — экспорт в конкретный формат.
-  Является каноническим endpoint экспорта (POST /editor/export удалён).
-- GET /?status=draft|in_progress|... — фильтрация по статусу документа.
-ОПТИМИЗИРОВАНО (PERF-4):
-- list_documents: TypeAdapter для пакетной сериализации вместо N model_validate.
-M-BLOCK:
-- delete_document: убран лишний SELECT get_document.
-M-5: get_document_content ловит конкретные ошибки:
-- DocumentParseError → 422
-- StorageError (OSError/IOError от MinIO-адаптера) → 502
-- Остальные Exception логируются → 500
-R-1: POST /{id}/sources возвращает AttachSourcesResponse(document, sources)
-     вместо голого DocumentResponse — фронт не делает лишний GET /sources.
-"""
+"""Документы внутри проекта: загрузка, список, содержимое, скачивание, экспорт,
+прикрепление источников."""
 
 import logging
 import uuid
-from typing import Literal  # noqa: F401
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from pydantic import TypeAdapter
@@ -48,7 +30,9 @@ from app.domain.exceptions import (
     DocumentNotFoundError,
     DocumentParseError,
     FileTooLargeError,
+    SourceLockError,
     SourceNotFoundError,
+    UnsupportedExportFormatError,
     UnsupportedFileFormatError,
 )
 from app.domain.services.audit_log_service import AuditLogService
@@ -105,7 +89,7 @@ async def upload_document(
         ) from exc
     try:
         document = await document_service.upload_document(
-            project, file.filename, content, file.content_type or "application/octet-stream"
+            project.id, file.filename, content, file.content_type or "application/octet-stream"
         )
     except UnsupportedFileFormatError as exc:
         raise HTTPException(
@@ -273,9 +257,12 @@ async def export_document(
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
-    content, filename, media_type = await export_service.export_document(
-        document, target_format=target_format
-    )
+    try:
+        content, filename, media_type = await export_service.export_document(
+            document, target_format=target_format
+        )
+    except UnsupportedExportFormatError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     await _log_download(audit_log_service, current_user.id, document.id)
     return Response(
         content=content,
@@ -296,19 +283,21 @@ async def attach_sources(
     document_service: DocumentService = Depends(get_document_service),
     source_service: SourceService = Depends(get_source_service),
 ) -> AttachSourcesResponse:
-    """Прикрепить источники к документу.
+    """Прикрепить источники проекта к документу.
 
-    R-1: возвращает document + sources, чтобы фронт не делал лишний
-    GET /sources после операции attach.
+    Возвращает документ вместе с прикреплёнными источниками, чтобы фронту
+    не требовался отдельный GET /sources.
     """
     try:
         document = await document_service.get_document(project.id, document_id)
         sources = await source_service.get_sources_for_project(project.id, payload.source_ids)
     except (DocumentNotFoundError, SourceNotFoundError) as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    document = await document_service.attach_sources(document, sources)
-    source_responses = [SourceResponse.model_validate(s) for s in sources]
+    try:
+        sources = await source_service.attach_sources_to_document(document, sources)
+    except SourceLockError as exc:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail=str(exc)) from exc
     return AttachSourcesResponse(
         document=DocumentResponse.model_validate(document),
-        sources=source_responses,
+        sources=[SourceResponse.model_validate(s) for s in sources],
     )
