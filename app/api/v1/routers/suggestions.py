@@ -15,12 +15,16 @@ OPT-S4: POST /{id}/reset — alias поверх patch_suggestions;
 OPT-S5: audit_decisions строится через itertools.chain (единый проход по спискам).
 
 MYPY-FIX: явные аннотации возвращаемых типов для всех хелперов и роутер-функций.
+
+AUDIT-FIX: роутер раньше вызывал несуществующие методы
+  AuditLogService.bulk_log_suggestion_decisions / log_suggestion_decision
+  (ошибка проглатывалась _safe_*, аудит не писался). Теперь используется
+  log_suggestion_decisions(document_id, user_id, decisions).
 """
 
 import itertools
 import logging
 import uuid
-from dataclasses import dataclass
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import TypeAdapter
@@ -77,33 +81,28 @@ router = APIRouter(
 
 async def _safe_bulk_log(
     audit_log_service: AuditLogService,
+    document_id: uuid.UUID,
     user_id: uuid.UUID,
     decisions: list[tuple[uuid.UUID, AuditActionVO]],
 ) -> None:
     try:
-        await audit_log_service.bulk_log_suggestion_decisions(user_id, decisions)
+        await audit_log_service.log_suggestion_decisions(document_id, user_id, decisions)
     except Exception:  # noqa: BLE001
         logger.warning(
             "Не удалось записать bulk audit_log для решений по правкам",
             exc_info=True,
-            extra={"user_id": str(user_id)},
+            extra={"user_id": str(user_id), "document_id": str(document_id)},
         )
 
 
 async def _safe_single_log(
     audit_log_service: AuditLogService,
+    document_id: uuid.UUID,
     user_id: uuid.UUID,
     suggestion_id: uuid.UUID,
     action: AuditActionVO,
 ) -> None:
-    try:
-        await audit_log_service.log_suggestion_decision(user_id, suggestion_id, action)
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "Не удалось записать audit_log для решения по правке",
-            exc_info=True,
-            extra={"suggestion_id": str(suggestion_id), "user_id": str(user_id)},
-        )
+    await _safe_bulk_log(audit_log_service, document_id, user_id, [(suggestion_id, action)])
 
 
 def _parse_if_match(if_match: str | None) -> int | None:
@@ -259,6 +258,7 @@ async def patch_suggestions(
     if updated_ids:
         await _safe_bulk_log(
             audit_log_service,
+            document_id,
             current_user.id,
             [(sid, audit_action) for sid in updated_ids],
         )
@@ -342,7 +342,7 @@ async def review_save(
     except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    await _safe_bulk_log(audit_log_service, current_user.id, audit_decisions)
+    await _safe_bulk_log(audit_log_service, document_id, current_user.id, audit_decisions)
 
     doc = result.document
     return ReviewSaveResponse(
@@ -385,6 +385,6 @@ async def reset_suggestion(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     await _safe_single_log(
-        audit_log_service, current_user.id, suggestion.id, AuditActionVO.RESET
+        audit_log_service, document_id, current_user.id, suggestion.id, AuditActionVO.RESET
     )
     return SuggestionResponse.model_validate(suggestion)
