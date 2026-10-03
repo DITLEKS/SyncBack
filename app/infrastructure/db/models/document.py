@@ -41,6 +41,13 @@ class Document(Base):
             text("created_at DESC"),
             text("id DESC"),
         ),
+        # Поиск по подстроке имени (ILIKE '%...%') в «Моих документах»; требует pg_trgm.
+        Index(
+            "ix_documents_name_trgm",
+            "name",
+            postgresql_using="gin",
+            postgresql_ops={"name": "gin_trgm_ops"},
+        ),
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
