@@ -263,3 +263,26 @@ async def test_delete_source_removes_file_and_is_scoped_to_project(
     assert key not in file_storage.files
     assert (await client.delete(f"{base}/{note['id']}", headers=headers)).status_code == 404
     assert (await client.delete(f"{base}/{uuid.uuid4()}", headers=headers)).status_code == 404
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1/admin",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://localhost:8000/",
+        "ftp://example.com/file",
+        "http://user:pass@example.com/",
+    ],
+)
+async def test_unsafe_source_url_is_rejected(client: AsyncClient, url: str) -> None:
+    headers = await register_and_login(client, f"ssrf-{abs(hash(url))}@example.com")
+    project_id = await create_project(client, headers)
+
+    response = await client.post(
+        f"/api/v1/projects/{project_id}/sources",
+        headers=headers,
+        json={"name": "x", "type": "url", "url": url},
+    )
+
+    assert response.status_code == 422, response.text

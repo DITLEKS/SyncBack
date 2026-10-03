@@ -34,6 +34,14 @@ class InvalidSourceScopeError(DomainError):
     """Источник со scope=document нельзя создать без документа."""
 
 
+class InvalidSourceUrlError(DomainError):
+    """Ссылка на источник не проходит правила домена: схема, хост, приватный адрес."""
+
+
+class SourceFetchError(DomainError):
+    """Содержимое источника по ссылке получить не удалось: редиректы, размер, ответ сервера."""
+
+
 class FileTooLargeError(DomainError):
     pass
 

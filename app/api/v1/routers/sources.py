@@ -26,6 +26,7 @@ from app.domain.exceptions import (
     DocumentNotFoundError,
     FileTooLargeError,
     InvalidSourceScopeError,
+    InvalidSourceUrlError,
     SourceLockError,
     SourceNotFoundError,
 )
@@ -43,7 +44,7 @@ def _to_http(exc: Exception) -> HTTPException:
         return HTTPException(status_code=status.HTTP_423_LOCKED, detail=str(exc))
     if isinstance(exc, FileTooLargeError):
         return HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc))
-    if isinstance(exc, InvalidSourceScopeError):
+    if isinstance(exc, InvalidSourceScopeError | InvalidSourceUrlError):
         return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
     raise exc
 
@@ -54,6 +55,7 @@ _SOURCE_ERRORS = (
     SourceLockError,
     FileTooLargeError,
     InvalidSourceScopeError,
+    InvalidSourceUrlError,
 )
 
 
