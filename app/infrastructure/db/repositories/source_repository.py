@@ -1,34 +1,8 @@
-"""
-SQLAlchemy-адаптер для Source.
+"""SQLAlchemy-адаптер для Source.
 
-Правило: НИКАКИХ session.commit() / session.rollback() здесь.
-Все изменения фиксирует SqlAlchemyUnitOfWork через uow.commit().
-
-P2: метод create() (принимал text_content) удалён.
-    Добавлен create_url() — для источников типа URL (только url, без storage_key).
-    create_with_id() теперь единственный путь для FILE-источников.
-R-4: uploaded_at удалён из модели Source; list_by_project теперь
-    сортирует по created_at DESC (семантически эквивалентно).
-I-1: добавлен list_by_document_ids — батч-запрос document-scope источников
-    для нескольких документов через JOIN на document_sources (M2M).
-    Возвращает list[tuple[Source, document_id]] чтобы сервис
-    мог строить dict без обращения к несуществующей Source.document_id.
-
-FIX-1: list_by_document_ids и replace_document_sources переписаны
-    через JOIN на document_sources — Source.document_id не существует.
-FIX-2: create_with_id и create_url: source_type= → type= (имя колонки).
-FIX-3: list_by_document_ids — добавлен фильтр scope=DOCUMENT чтобы
-    PROJECT-scope источники не попадали в document-список.
-FIX-4: replace_document_sources — DS.insert() заменён на
-    pg_insert(...).on_conflict_do_nothing() — защита от concurrent вставок.
-WARN-2: attach_to_document — идемпотентная M2M-вставка в document_sources
-    без полного replace. Используется при создании scope=DOCUMENT источника.
-R-5: list_by_project принимает опциональный параметр scope: SourceScopeVO | None.
-    None (по умолчанию) — без фильтра. Передача конкретного scope ограничивает
-    результат источниками нужного scope (используется для PROJECT-only эндпоинта).
-FIX-review-4: get_primary_document_id_for_source — один SELECT из
-    document_sources WHERE source_id = :id LIMIT 1. Закрывает открытый
-    контракт из коммита 7d92cb0.
+Изменения не фиксируются здесь: commit делает SqlAlchemyUnitOfWork.
+Связь источника с документами идёт через таблицу document_sources,
+у Source нет колонки document_id.
 """
 
 from __future__ import annotations
@@ -36,7 +10,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,10 +37,6 @@ class SourceRepository(ISourceRepository):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    # ------------------------------------------------------------------
-    # Read
-    # ------------------------------------------------------------------
-
     async def get_by_id(self, source_id: uuid.UUID) -> Source | None:
         from app.infrastructure.db.models.source import Source as M
 
@@ -75,6 +45,8 @@ class SourceRepository(ISourceRepository):
     async def get_many_by_ids(self, source_ids: list[uuid.UUID]) -> list[Source]:
         from app.infrastructure.db.models.source import Source as M
 
+        if not source_ids:
+            return []
         result = await self._session.execute(select(M).where(M.id.in_(source_ids)))
         return list(result.scalars().all())
 
@@ -85,19 +57,12 @@ class SourceRepository(ISourceRepository):
         offset: int,
         scope: SourceScopeVO | None = None,
     ) -> list[Source]:
-        """R-5: опциональная фильтрация по scope.
-
-        scope=None  — вернуть все источники проекта (старое поведение).
-        scope=PROJECT  — только проектные (для /sources эндпоинта).
-        scope=DOCUMENT — только документные (нетипичный случай).
-        """
         from app.infrastructure.db.models.source import Source as M
 
-        # R-4: сортировка по created_at вместо удалённого uploaded_at.
         stmt = (
             select(M)
             .where(M.project_id == project_id)
-            .order_by(M.created_at.desc())
+            .order_by(M.created_at.desc(), M.id.desc())
             .limit(limit)
             .offset(offset)
         )
@@ -125,12 +90,15 @@ class SourceRepository(ISourceRepository):
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
-    async def count_by_project(self, project_id: uuid.UUID) -> int:
+    async def count_by_project(
+        self, project_id: uuid.UUID, scope: SourceScopeVO | None = None
+    ) -> int:
         from app.infrastructure.db.models.source import Source as M
 
-        result = await self._session.execute(
-            select(func.count()).select_from(M).where(M.project_id == project_id)
-        )
+        stmt = select(func.count()).select_from(M).where(M.project_id == project_id)
+        if scope is not None:
+            stmt = stmt.where(M.scope == _scope_to_orm(scope))
+        result = await self._session.execute(stmt)
         return result.scalar_one()
 
     async def list_by_document_ids(
@@ -138,25 +106,6 @@ class SourceRepository(ISourceRepository):
         project_id: uuid.UUID,
         document_ids: list[uuid.UUID],
     ) -> list[tuple[Source, uuid.UUID]]:
-        """I-1 / FIX-1 / FIX-3: батч-запрос document-scope источников через M2M.
-
-        Source не имеет колонки document_id — связь идёт через таблицу
-        document_sources. Возвращаем list[(Source, document_id)] чтобы
-        вызывающий код (SourceService) мог группировать без AttrError.
-
-        FIX-3: добавлен фильтр M.scope == SourceScope.DOCUMENT чтобы исключить
-        PROJECT-scope источники, которые могли бы попасть через document_sources
-        в результате ручных миграций или ошибок данных.
-
-        SQL:
-            SELECT s.*, ds.document_id
-              FROM sources s
-              JOIN document_sources ds ON ds.source_id = s.id
-             WHERE ds.document_id IN (:ids)
-               AND s.project_id = :pid
-               AND s.scope = 'document'
-             ORDER BY s.created_at DESC
-        """
         if not document_ids:
             return []
         from app.infrastructure.db.models.document_source import document_sources as DS
@@ -169,53 +118,22 @@ class SourceRepository(ISourceRepository):
             .where(
                 DS.c.document_id.in_(document_ids),
                 M.project_id == project_id,
-                M.scope == SourceScope.DOCUMENT,  # FIX-3
+                M.scope == SourceScope.DOCUMENT,
             )
-            .order_by(M.created_at.desc())
+            .order_by(M.created_at.desc(), M.id.desc())
         )
         result = await self._session.execute(stmt)
         return [(row.Source, row.document_id) for row in result]
 
-    async def get_primary_document_id_for_source(
-        self,
-        source_id: uuid.UUID,
-    ) -> uuid.UUID | None:
-        """FIX-review-4: первый document_id из M2M-таблицы document_sources.
-
-        Один SELECT без JOIN на sources — нет необходимости в полном
-        объекте Source, нужен только связь.
-
-        SQL:
-            SELECT document_id
-              FROM document_sources
-             WHERE source_id = :source_id
-             LIMIT 1
-        """
+    async def list_attached_document_ids(self, source_id: uuid.UUID) -> list[uuid.UUID]:
         from app.infrastructure.db.models.document_source import document_sources as DS
 
         result = await self._session.execute(
-            select(DS.c.document_id).where(DS.c.source_id == source_id).limit(1)
+            select(DS.c.document_id).where(DS.c.source_id == source_id)
         )
-        row = result.one_or_none()
-        return row[0] if row is not None else None
+        return list(result.scalars().all())
 
-    # ------------------------------------------------------------------
-    # Write
-    # ------------------------------------------------------------------
-
-    async def attach_to_document(
-        self,
-        source_id: uuid.UUID,
-        document_id: uuid.UUID,
-    ) -> None:
-        """WARN-2: идемпотентная M2M-вставка в document_sources.
-
-        INSERT INTO document_sources (document_id, source_id)
-        VALUES (:doc_id, :src_id)
-        ON CONFLICT DO NOTHING
-
-        Безопасно вызывать повторно — повторная пара игнорируется.
-        """
+    async def attach_to_document(self, source_id: uuid.UUID, document_id: uuid.UUID) -> None:
         from app.infrastructure.db.models.document_source import document_sources as DS
 
         stmt = (
@@ -235,10 +153,7 @@ class SourceRepository(ISourceRepository):
         storage_key: str,
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
     ) -> Source:
-        """Файловый источник (включая бывшие note, сохранённые как .txt).
-
-        FIX-2: исправлено source_type= → type= (имя колонки ORM-модели).
-        """
+        """Файловый источник; id задаётся заранее, потому что входит в ключ в хранилище."""
         from app.infrastructure.db.models.source import Source as M
 
         source = M(
@@ -260,10 +175,6 @@ class SourceRepository(ISourceRepository):
         url: str,
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
     ) -> Source:
-        """URL-источник — только url, без storage_key.
-
-        FIX-2: исправлено source_type= → type= (имя колонки ORM-модели).
-        """
         from app.infrastructure.db.models.enums import SourceType
         from app.infrastructure.db.models.source import Source as M
 
@@ -279,55 +190,6 @@ class SourceRepository(ISourceRepository):
         await self._session.flush()
         return source
 
-    async def replace_document_sources(
-        self,
-        document_id: uuid.UUID,
-        sources: list[Source],
-    ) -> list[Source]:
-        """FIX-1 / FIX-4: удаление и вставка через M2M таблицу document_sources.
-
-        Source не имеет колонки document_id — операции идут через
-        document_sources (JOIN-таблица). Скоуп источников не меняется
-        (scope уже выставлен на DOCUMENT при создании либо обновляется здесь).
-
-        FIX-4: вставка через pg_insert(...).on_conflict_do_nothing() вместо
-        DS.insert() — защита от concurrent вызовов которые могут вставить
-        ту же пару между DELETE и INSERT.
-        """
-        from app.infrastructure.db.models.document_source import document_sources as DS
-        from app.infrastructure.db.models.enums import SourceScope
-
-        # Удаляем все текущие связи документа с источниками
-        await self._session.execute(delete(DS).where(DS.c.document_id == document_id))
-
-        # Вставляем новые связи и выставляем scope=DOCUMENT на источниках
-        for source in sources:
-            source.scope = SourceScope.DOCUMENT
-            await self._session.execute(
-                pg_insert(DS)  # FIX-4: идемпотентная вставка
-                .values(document_id=document_id, source_id=source.id)
-                .on_conflict_do_nothing()
-            )
-
-        await self._session.flush()
-        return sources
-
-    async def delete_if_owned(
-        self,
-        project_id: uuid.UUID,
-        source_id: uuid.UUID,
-    ) -> Source | None:
-        """OPT-S2: атомарное удаление источника принадлежащего проекту.
-
-        FIX-1: убрано обращение к Source.document_id (колонки нет).
-        Возвращает удалённый объект или None если не найден / чужой.
-        storage_key доступен на объекте для последующего удаления из MinIO.
-        """
-        from app.infrastructure.db.models.source import Source as M
-
-        source = await self._session.get(M, source_id)
-        if source is None or source.project_id != project_id:
-            return None
+    async def delete(self, source: Source) -> None:
         await self._session.delete(source)
         await self._session.flush()
-        return source

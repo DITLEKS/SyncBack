@@ -66,6 +66,14 @@ class DocumentRepository(IDocumentRepository):
 
         return await self._session.get(M, document_id)
 
+    async def get_many_by_ids(self, document_ids: list[uuid.UUID]) -> list[Document]:
+        from app.infrastructure.db.models.document import Document as M
+
+        if not document_ids:
+            return []
+        result = await self._session.execute(select(M).where(M.id.in_(document_ids)))
+        return list(result.scalars().all())
+
     async def list_for_project(
         self,
         project_id: uuid.UUID,

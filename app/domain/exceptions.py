@@ -30,6 +30,10 @@ class SourceNotFoundError(DomainError):
     pass
 
 
+class InvalidSourceScopeError(DomainError):
+    """Источник со scope=document нельзя создать без документа."""
+
+
 class FileTooLargeError(DomainError):
     pass
 
