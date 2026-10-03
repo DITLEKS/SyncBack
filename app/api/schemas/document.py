@@ -24,15 +24,11 @@ FIX-review-4: DocumentListItem.created_at → uploaded_at.
 
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from pydantic import BaseModel
 
-from app.api.schemas.source import SourceBadge
-
-if TYPE_CHECKING:
-    from app.api.schemas.source import SourceResponse
-
+from app.api.schemas.source import SourceBadge, SourceResponse
 
 # ---------------------------------------------------------------------------
 # Техническое состояние анализа (не путать с публичным статусом документа)
@@ -180,7 +176,7 @@ class AttachSourcesResponse(BaseModel):
     """
 
     document: DocumentResponse
-    sources: list["SourceResponse"]
+    sources: list[SourceResponse]
 
     model_config = {"from_attributes": True}
 
