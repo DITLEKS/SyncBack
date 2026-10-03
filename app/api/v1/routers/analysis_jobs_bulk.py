@@ -16,6 +16,7 @@ REFACTOR: dispatch делегирован в service.dispatch_job() —
   роутер не импортирует Celery-задачи напрямую.
 """
 
+import logging
 import uuid
 
 from fastapi import APIRouter, Body, Depends, status
@@ -27,6 +28,8 @@ from app.api.schemas.analysis_job import AnalysisJobResponse
 from app.core.dependencies import get_analysis_job_service
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.infrastructure.db.models.project import Project
+
+logger = logging.getLogger("syncscribe.api.analysis_jobs")
 
 router = APIRouter(
     prefix="/projects/{project_id}/documents",
@@ -101,14 +104,20 @@ async def bulk_start_analysis_jobs(
             results.append(BulkJobResult(document_id=doc_id, error=err))
             skipped += 1
         else:
-            job_schema = AnalysisJobResponse.model_validate(job)
-            results.append(BulkJobResult(document_id=doc_id, job=job_schema))
-            started += 1
-            # REFACTOR: dispatch делегирован в сервис — роутер не знает о Celery
+            # Сбой очереди не блокирует ответ: сервис сам помечает задачу FAILED,
+            # и клиент видит это в статусе job.
             try:
-                await service.dispatch_job(job)
+                job = await service.dispatch_job(job)
             except Exception:  # noqa: BLE001
-                pass  # задача создана; dispatcher-failure не блокирует ответ
+                logger.warning(
+                    "Не удалось отправить задачу анализа в очередь",
+                    exc_info=True,
+                    extra={"job_id": str(job.id), "document_id": str(doc_id)},
+                )
+            results.append(
+                BulkJobResult(document_id=doc_id, job=AnalysisJobResponse.model_validate(job))
+            )
+            started += 1
 
     response_body = BulkAnalysisJobsResponse(
         started=started,

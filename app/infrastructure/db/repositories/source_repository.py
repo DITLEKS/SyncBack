@@ -106,6 +106,25 @@ class SourceRepository(ISourceRepository):
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_for_analysis(
+        self, project_id: uuid.UUID, document_id: uuid.UUID
+    ) -> list[Source]:
+        from app.infrastructure.db.models.document_source import document_sources as DS
+        from app.infrastructure.db.models.enums import SourceScope
+        from app.infrastructure.db.models.source import Source as M
+
+        attached = select(DS.c.source_id).where(DS.c.document_id == document_id)
+        stmt = (
+            select(M)
+            .where(
+                M.project_id == project_id,
+                (M.scope == SourceScope.PROJECT) | M.id.in_(attached),
+            )
+            .order_by(M.created_at.asc(), M.id.asc())
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def count_by_project(self, project_id: uuid.UUID) -> int:
         from app.infrastructure.db.models.source import Source as M
 

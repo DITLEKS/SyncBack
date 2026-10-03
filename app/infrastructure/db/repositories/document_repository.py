@@ -262,6 +262,11 @@ class DocumentRepository(IDocumentRepository):
         await self._session.flush()
         return document
 
+    async def set_current_job(self, document: Document, job_id: uuid.UUID | None) -> Document:
+        document.current_analysis_job_id = job_id
+        await self._session.flush()
+        return document
+
     async def update_exported_key(
         self,
         document: Document,

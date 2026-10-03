@@ -1,39 +1,7 @@
-"""
-Абстрактные интерфейсы репозиториев (порты в гексагональной архитектуре).
+"""Порты репозиториев.
 
-Правило: только чистые Python-типы и доменные value-objects.
-Никаких импортов из app.infrastructure.*.
-
-FIX-1: ISourceRepository.list_by_document_ids возвращает
-  list[tuple[Source, uuid.UUID]] — кортеж (Source, document_id),
-  чтобы сервисный слой мог группировать без обращения к несуществующей
-  колонке Source.document_id (связь через M2M document_sources).
-FIX-B1: удалён @abstractmethod delete(source_id) — метод никогда не был
-  реализован в SourceRepository (единственный рабочий путь — delete_if_owned).
-FIX-2 (ревю): IDocumentRepository.list_all_for_user сигнатура обновлена под
-  реальный возвращаемый тип tuple[list[DocumentRow], int].
-  DocumentRow — TypedDict с явным контрактом ключей.
-CRIT-1: list_all_for_user расширен параметрами status/outdated/search/sort_by/sort_dir
-  — приведён к реализации DocumentRepository.
-CRIT-2: count_for_user и update удалены — не реализованы и не используются.
-  Изменения документа идут через update_status / update_exported_key /
-  compare_and_increment_review_version (объявлены явно ниже).
-CRIT-3: delete принимает Document, а не UUID — приведён к реализации
-  (session.delete(document)).
-WARN-2: ISourceRepository.attach_to_document добавлен — M2M-вставка
-  в document_sources при scope=DOCUMENT без полного replace.
-R-5: ISourceRepository.list_by_project — добавлен опциональный параметр
-  scope: SourceScopeVO | None = None для фильтрации по scope.
-FIX-review-4: get_primary_document_id_for_source — M2M-запрос первого
-  document_id для источника; используется в DELETE /sources/{id} guard.
-C-2 (issue #37): ISuggestionRepository дополнен абстрактными методами
-  reset_status() и bulk_reject_all() — приведён к реализации.
-NEW-1: ISuggestionRepository.delete_by_analysis_job() — bulk DELETE всех
-  правок job одним запросом; вызывается в create_job при повторном анализе
-  (статус документа ERROR/CANCELLED) чтобы не оставлять мусор в БД.
-NEW-2: ISuggestionRepository.reset_to_pending_by_job() — bulk UPDATE
-  всех правок job обратно в PENDING; уже вызывался в reset_analysis(),
-  но отсутствовал в интерфейсе и реализации — критический пробел.
+Только чистые Python-типы и доменные value objects; ORM-модели упоминаются лишь
+в аннотациях под TYPE_CHECKING. Реализации — app/infrastructure/db/repositories.
 """
 
 from __future__ import annotations
@@ -117,25 +85,27 @@ class IDocumentRepository(ABC):
     ) -> Document: ...
 
     @abstractmethod
-    async def update_status(
-        self,
-        document_id: uuid.UUID,
-        status: DocumentStatusVO,
-    ) -> Document | None: ...
+    async def update_status(self, document: Document, status: DocumentStatusVO) -> Document: ...
 
     @abstractmethod
-    async def update_exported_key(
-        self,
-        document_id: uuid.UUID,
-        storage_key: str,
-    ) -> None: ...
+    async def set_current_job(self, document: Document, job_id: uuid.UUID | None) -> Document:
+        """Назначить документу текущий (последний запущенный) анализ."""
+        ...
+
+    @abstractmethod
+    async def update_exported_key(self, document: Document, export_key: str) -> None: ...
 
     @abstractmethod
     async def compare_and_increment_review_version(
         self,
         document_id: uuid.UUID,
         expected_version: int,
-    ) -> bool: ...
+    ) -> Document | None:
+        """Инкрементировать review_version, если она равна expected_version.
+
+        Возвращает обновлённый документ или None при расхождении версий.
+        """
+        ...
 
     @abstractmethod
     async def delete(self, document: Document) -> None:
@@ -184,6 +154,14 @@ class ISourceRepository(ABC):
 
     @abstractmethod
     async def get_many_by_ids(self, source_ids: list[uuid.UUID]) -> list[Source]: ...
+
+    @abstractmethod
+    async def list_for_analysis(
+        self, project_id: uuid.UUID, document_id: uuid.UUID
+    ) -> list[Source]:
+        """Источники, по которым анализируется документ: базовые источники проекта
+        (scope=project) и прикреплённые к документу."""
+        ...
 
     @abstractmethod
     async def list_by_project(
@@ -447,25 +425,6 @@ class ISuggestionRepository(ABC):
         """
         ...
 
-    @abstractmethod
-    async def reset_to_pending_by_job(
-        self,
-        analysis_job_id: uuid.UUID,
-    ) -> int:
-        """NEW-2: bulk UPDATE всех правок job обратно в PENDING.
-
-        UPDATE suggestions
-           SET status = 'pending', decided_by = NULL, decided_at = NULL
-         WHERE analysis_job_id = ? AND status != 'pending'.
-        Возвращает количество затронутых строк.
-
-        Уже вызывался в AnalysisJobService.reset_analysis(), но отсутствовал
-        в интерфейсе и реализации — критический пробел.
-
-        Идемпотентен: если все правки уже PENDING — возвращает 0.
-        """
-        ...
-
 
 class IAnalysisJobRepository(ABC):
     @abstractmethod
@@ -496,8 +455,16 @@ class IAnalysisJobRepository(ABC):
 
     @abstractmethod
     async def mark_dispatched(
-        self, job: AnalysisJob, task_id: str
-    ) -> tuple[AnalysisJob, DocumentStatusVO | None]: ...
+        self, job: AnalysisJob
+    ) -> tuple[AnalysisJob, DocumentStatusVO | None]:
+        """Перевести задачу в PROCESSING перед отправкой в очередь.
+
+        Возвращает (job, новый статус документа | None).
+        """
+        ...
+
+    @abstractmethod
+    async def set_celery_task_id(self, job: AnalysisJob, task_id: str) -> AnalysisJob: ...
 
     @abstractmethod
     async def mark_failed_queue_unavailable(

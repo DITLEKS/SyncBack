@@ -1,28 +1,8 @@
-"""
-SQLAlchemy-адаптер для AnalysisJob.
+"""SQLAlchemy-адаптер для AnalysisJob.
 
-Правило: НИКАКИХ session.commit() / session.rollback() здесь.
-Все изменения фиксирует SqlAlchemyUnitOfWork через uow.commit().
-
-ИЗМЕНЕНИЯ:
-- Публичные методы принимают / возвращают AnalysisJobStatusVO вместо ORM-enum.
-- Конвертация инкапсулирована в _status_to_orm / _status_from_orm.
-- Импорты ORM-моделей отложены (TYPE_CHECKING / локальные) — домен не зависит от инфры.
-- H-2: create_for_document принимает параметры, а не готовый ORM-инстанс.
-- CRIT-A/B: AnalysisJobRepository больше НЕ мутирует document.status напрямую.
-  mark_dispatched / mark_failed_queue_unavailable / cancel возвращают DocumentStatusVO,
-  которую вызывающий код применяет через uow.documents.update_status().
-- M-B: mark_processing_if_active → добавлен RETURNING для надёжного rowcount.
-- H-NEW-1: убраны все session.refresh() из create_for_document, mark_dispatched
-  и update_status — flush() достаточен в рамках текущей транзакции.
-  Если вызывающему коду нужны lazy-атрибуты — он использует uow.refresh(job).
-- CRIT-1: create_for_document больше НЕ мутирует document.current_analysis_job_id.
-  Вызывающий сервис обязан явно выполнить uow.documents.set_current_job(document, job.id).
-- M-2: mark_dispatched сравнивает статус через VO-значения (.value), а не ORM-enum
-  напрямую — устраняет течь абстракции при потенциальном переименовании ORM-enum.
-- FIX-DISPATCH: mark_dispatched теперь явно переводит job.status → PROCESSING через
-  update_status(), а не оставляет job в PENDING до момента когда воркер вызовет
-  mark_processing_if_active(). Это закрывает окно в несколько секунд когда status врал.
+Репозиторий не трогает статус документа: методы переходов возвращают
+DocumentStatusVO, который сервис применяет через uow.documents.update_status.
+Фиксация транзакции — на стороне UoW.
 """
 
 from __future__ import annotations
@@ -149,39 +129,23 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         return job
 
     async def mark_dispatched(
-        self,
-        job: AnalysisJob,
-        task_id: str,
+        self, job: AnalysisJob
     ) -> tuple[AnalysisJob, DocumentStatusVO | None]:
-        """Пометить задачу как отправленную в Celery и перевести в PROCESSING.
+        """PENDING → PROCESSING до отправки в очередь.
 
-        FIX-DISPATCH: теперь явно вызывает update_status(PROCESSING), а не только
-        пишет celery_task_id. Это закрывает окно в несколько секунд когда job
-        оставался в PENDING после диспатча до момента когда воркер вызывал
-        mark_processing_if_active() самостоятельно.
-
-        CRIT-A: не мутирует document напрямую.
-        M-2: сравнение статуса через .value (VO-семантика), а не ORM-enum напрямую —
-        устраняет течь абстракции при переименовании ORM-enum.
-        H-NEW-1: flush() делается внутри update_status() — отдельный flush не нужен.
-        Возвращает (job, new_doc_status | None) — вызывающий код применяет
-        изменение документа через uow.documents.update_status().
+        Статусы выставляются заранее, чтобы быстрый воркер не был перезаписан
+        более поздней записью «в обработке». Если задача уже не PENDING —
+        ничего не меняем.
         """
-        _dispatchable_values = {
-            AnalysisJobStatusVO.PENDING.value,
-            AnalysisJobStatusVO.PROCESSING.value,
-        }
+        if job.status.value != AnalysisJobStatusVO.PENDING.value:
+            return job, None
+        job = await self.update_status(job, AnalysisJobStatusVO.PROCESSING)
+        return job, DocumentStatusVO.IN_PROGRESS
+
+    async def set_celery_task_id(self, job: AnalysisJob, task_id: str) -> AnalysisJob:
         job.celery_task_id = task_id
-        new_doc_status: DocumentStatusVO | None = None
-        if job.status.value in _dispatchable_values:
-            # FIX-DISPATCH: явный переход → PROCESSING через update_status().
-            # update_status() ставит started_at (если ещё не установлен) и делает flush().
-            job = await self.update_status(job, AnalysisJobStatusVO.PROCESSING)
-            new_doc_status = DocumentStatusVO.IN_PROGRESS
-        else:
-            # Нет изменения статуса — только flush для celery_task_id.
-            await self._session.flush()
-        return job, new_doc_status
+        await self._session.flush()
+        return job
 
     async def mark_failed_queue_unavailable(
         self,
@@ -247,11 +211,12 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> AnalysisJob:
-        """H-NEW-1: удалён session.refresh(job) — flush() достаточен."""
+        """Сменить статус задачи, проставив started_at/finished_at по переходу."""
         from app.infrastructure.db.models.enums import AnalysisJobStatus
 
         _terminal = {
             AnalysisJobStatus.SUCCESS,
+            AnalysisJobStatus.PARTIAL_SUCCESS,
             AnalysisJobStatus.FAILED,
             AnalysisJobStatus.CANCELLED,
         }
