@@ -41,12 +41,21 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, TypedDict
 
-from app.domain.value_objects import DocumentStatusVO, SourceScopeVO, SuggestionStatusVO
+from app.domain.value_objects import (
+    AnalysisJobStatusVO,
+    DocumentStatusVO,
+    SourceScopeVO,
+    SuggestionStatusVO,
+)
 
 if TYPE_CHECKING:
+    from app.infrastructure.db.models.analysis_job import AnalysisJob
+    from app.infrastructure.db.models.audit_log import AuditLog
     from app.infrastructure.db.models.document import Document
+    from app.infrastructure.db.models.project import Project
     from app.infrastructure.db.models.source import Source
     from app.infrastructure.db.models.suggestion import Suggestion
+    from app.infrastructure.db.models.user import User
 
 
 class DocumentRow(TypedDict):
@@ -444,3 +453,122 @@ class ISuggestionRepository(ABC):
         Идемпотентен: если все правки уже PENDING — возвращает 0.
         """
         ...
+
+
+class IAnalysisJobRepository(ABC):
+    @abstractmethod
+    async def get_by_id(self, job_id: uuid.UUID) -> "AnalysisJob | None": ...
+
+    @abstractmethod
+    async def get_by_idempotency_key(
+        self, document_id: uuid.UUID, idempotency_key: str
+    ) -> "AnalysisJob | None": ...
+
+    @abstractmethod
+    async def get_active_by_document_id(self, document_id: uuid.UUID) -> "AnalysisJob | None": ...
+
+    @abstractmethod
+    async def list_by_document(self, document_id: uuid.UUID, pagination: Any) -> "list[AnalysisJob]": ...
+
+    @abstractmethod
+    async def create_for_document(
+        self,
+        document: "Document",
+        *,
+        job_id: uuid.UUID | None = None,
+        status: AnalysisJobStatusVO = AnalysisJobStatusVO.PENDING,
+        idempotency_key: str | None = None,
+    ) -> "AnalysisJob": ...
+
+    @abstractmethod
+    async def mark_dispatched(
+        self, job: "AnalysisJob", task_id: str
+    ) -> "tuple[AnalysisJob, DocumentStatusVO | None]": ...
+
+    @abstractmethod
+    async def mark_failed_queue_unavailable(
+        self, job: "AnalysisJob", message: str | None
+    ) -> "tuple[AnalysisJob, DocumentStatusVO]": ...
+
+    @abstractmethod
+    async def cancel(self, job: "AnalysisJob") -> "tuple[AnalysisJob, DocumentStatusVO]": ...
+
+    @abstractmethod
+    async def mark_processing_if_active(self, job_id: uuid.UUID) -> bool: ...
+
+    @abstractmethod
+    async def update_status(
+        self,
+        job: "AnalysisJob",
+        status: AnalysisJobStatusVO,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> "AnalysisJob": ...
+
+
+class IAuditLogRepository(ABC):
+    @abstractmethod
+    async def create(
+        self,
+        *,
+        document_id: uuid.UUID,
+        user_id: uuid.UUID | None,
+        action: str,
+        details: Any | None = None,
+    ) -> "AuditLog": ...
+
+    @abstractmethod
+    async def list_for_document(
+        self, document_id: uuid.UUID, limit: int, offset: int
+    ) -> "list[AuditLog]": ...
+
+
+class IProjectRepository(ABC):
+    @abstractmethod
+    async def get_by_id(self, project_id: uuid.UUID) -> "Project | None": ...
+
+    @abstractmethod
+    async def get_for_user(self, project_id: uuid.UUID, owner_id: uuid.UUID) -> "Project":
+        """Проект владельца; если не найден или чужой — ProjectNotFoundError."""
+
+    @abstractmethod
+    async def create(self, project: "Project") -> "Project": ...
+
+    @abstractmethod
+    async def list_all(self, limit: int, offset: int) -> "list[Project]": ...
+
+    @abstractmethod
+    async def count_all(self) -> int: ...
+
+    @abstractmethod
+    async def list_by_owner(
+        self, owner_id: uuid.UUID, limit: int, offset: int
+    ) -> "list[Project]": ...
+
+    @abstractmethod
+    async def count_by_owner(self, owner_id: uuid.UUID) -> int: ...
+
+    @abstractmethod
+    async def update(
+        self,
+        project: "Project",
+        name: str | None = None,
+        description: str | None = None,
+    ) -> "Project": ...
+
+    @abstractmethod
+    async def collect_storage_keys(self, project_id: uuid.UUID) -> list[str]: ...
+
+    @abstractmethod
+    async def delete(self, project: "Project") -> None: ...
+
+
+class IUserRepository(ABC):
+    @abstractmethod
+    async def get_by_email(self, email: str) -> "User | None": ...
+
+    @abstractmethod
+    async def get_by_id(self, user_id: uuid.UUID) -> "User | None": ...
+
+    @abstractmethod
+    async def create(self, user: "User") -> "User": ...

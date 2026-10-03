@@ -14,9 +14,8 @@ from app.domain.value_objects import DocumentFormatVO as DocumentFormat  # noqa:
 
 
 class UserRole(enum.StrEnum):
-    ADMIN  = "admin"
-    EDITOR = "editor"
-    VIEWER = "viewer"
+    ADMIN = "admin"
+    USER = "user"
 
 
 class DocumentStatus(enum.StrEnum):

@@ -36,17 +36,20 @@ jobs:
           pip install -e ".[dev]"
 
       # Secrets задаются в Settings → Environments → production.
-      # Минимально нужен DATABASE_URL (postgresql+asyncpg://...).
-      # Остальные переменные — чтобы alembic env.py мог инициализировать config.
+      # alembic/env.py строит Settings целиком, поэтому нужны все обязательные
+      # поля (имена совпадают с app/core/config.py); реально используется
+      # только DATABASE_URL.
       - name: Write .env from secrets
         run: |
           cat > .env <<EOF
           DATABASE_URL=${{ secrets.DATABASE_URL }}
-          SECRET_KEY=${{ secrets.SECRET_KEY }}
-          S3_ENDPOINT=${{ secrets.S3_ENDPOINT }}
-          S3_ACCESS_KEY=${{ secrets.S3_ACCESS_KEY }}
-          S3_SECRET_KEY=${{ secrets.S3_SECRET_KEY }}
           REDIS_URL=${{ secrets.REDIS_URL }}
+          MINIO_ENDPOINT=${{ secrets.MINIO_ENDPOINT }}
+          MINIO_ROOT_USER=${{ secrets.MINIO_ROOT_USER }}
+          MINIO_ROOT_PASSWORD=${{ secrets.MINIO_ROOT_PASSWORD }}
+          MINIO_BUCKET=${{ secrets.MINIO_BUCKET }}
+          JWT_SECRET=${{ secrets.JWT_SECRET }}
+          CORS_ALLOWED_ORIGINS=${{ secrets.CORS_ALLOWED_ORIGINS }}
           EOF
 
       - name: Show pending migrations (dry-run info)

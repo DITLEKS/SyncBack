@@ -56,9 +56,8 @@ AnalysisJobState = AnalysisJobStatusVO
 
 
 class UserRoleVO(StrEnum):
-    ADMIN  = "admin"
-    EDITOR = "editor"
-    VIEWER = "viewer"
+    ADMIN = "admin"
+    USER = "user"
 
 
 class SourceTypeVO(StrEnum):

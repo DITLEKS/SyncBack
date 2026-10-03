@@ -1,14 +1,14 @@
 """audit_logs: make suggestion_id nullable
 
 Revision ID: 0004a
-Revises: 0003
+Revises: 0003_audit_logs_columns
 Create Date: 2026-09-26
 """
 import sqlalchemy as sa
 from alembic import op
 
 revision = "0004a"
-down_revision = "0003"
+down_revision = "0003_audit_logs_columns"
 branch_labels = None
 depends_on = None
 

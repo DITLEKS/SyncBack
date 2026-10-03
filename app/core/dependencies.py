@@ -166,7 +166,6 @@ def get_document_export_service(
         uow=uow,
         file_storage=_get_minio_storage(),
         exporter_registry=_get_exporter_registry(),
-        parser_registry=_get_parser_registry(),
     )
 
 
@@ -224,14 +223,7 @@ def get_project_repository(
 # ---------------------------------------------------------------------------
 
 def get_login_rate_limiter() -> LoginRateLimiter:
-    # M-6: get_redis_client() — sync def, await здесь недопустим (TypeError в рантайме).
-    redis = get_redis_client()
-    settings = get_settings()
-    return LoginRateLimiter(
-        redis_client=redis,
-        max_attempts=settings.login_max_attempts,
-        lockout_seconds=settings.login_lockout_seconds,
-    )
+    return LoginRateLimiter(get_redis_client(), get_settings())
 
 
 def get_refresh_token_store() -> RefreshTokenStore:

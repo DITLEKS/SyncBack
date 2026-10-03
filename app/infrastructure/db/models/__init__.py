@@ -8,7 +8,7 @@ from app.infrastructure.db.models.dashboard_snapshot import DashboardSnapshot  #
 from app.infrastructure.db.models.document import Document  # noqa: F401
 from app.infrastructure.db.models.document_block import DocumentBlock  # noqa: F401
 from app.infrastructure.db.models.document_open import DocumentOpen  # noqa: F401
-from app.infrastructure.db.models.document_source import DocumentSource  # noqa: F401
+from app.infrastructure.db.models.document_source import document_sources  # noqa: F401
 from app.infrastructure.db.models.enums import (  # noqa: F401
     AnalysisJobStatus,
     DocumentStatus,
