@@ -24,6 +24,7 @@ from app.domain.interfaces.file_storage import FileStorage
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.lifecycle import DocumentLifecycle
 from app.domain.policies import UploadLimits
+from app.domain.source_url import SourceUrl
 from app.domain.value_objects import SourceScopeVO, SourceTypeVO
 
 if TYPE_CHECKING:
@@ -101,10 +102,11 @@ class SourceService:
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
         document_id: uuid.UUID | None = None,
     ) -> Source:
+        source_url = SourceUrl.parse(url)
         async with self._uow:
             document = await self._target_document(project.id, scope, document_id)
             source = await self._uow.sources.create_url(
-                project_id=project.id, name=name, url=url, scope=scope
+                project_id=project.id, name=name, url=source_url.value, scope=scope
             )
             if document is not None:
                 await self._uow.sources.attach_to_document(source.id, document.id)

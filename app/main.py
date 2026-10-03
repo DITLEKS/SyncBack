@@ -86,7 +86,12 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-    # CORS — первый middleware, до любых других.
+    # Starlette оборачивает приложение в middleware в порядке добавления, так что
+    # последний добавленный оказывается внешним. CORS добавляется последним:
+    # тогда его заголовки есть и на ответах 413 от BodySizeLimitMiddleware,
+    # и на preflight-запросах, которые не доходят до роутеров.
+    app.add_middleware(BodySizeLimitMiddleware)
+    app.add_middleware(CorrelationIdMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_allowed_origins,
@@ -95,9 +100,6 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
         expose_headers=["X-Request-ID"],
     )
-    # H-3: грубая защита от слишком больших request body до разбора multipart.
-    app.add_middleware(BodySizeLimitMiddleware)
-    app.add_middleware(CorrelationIdMiddleware)
 
     # M-2: NotFound-подклассы DomainError → 404 (должны быть ПЕРЕД общим DomainError handler).
     @app.exception_handler(_NOT_FOUND_EXCEPTIONS[0])
