@@ -198,3 +198,40 @@ async def test_queue_unavailable_marks_job_failed(
     assert body["status"] == "failed"
     assert body["error_code"] == "QUEUE_UNAVAILABLE"
     assert (await _document_state(sessionmaker, document["id"]))[0] == "draft"
+
+
+async def test_bulk_start_skips_documents_that_cannot_be_analysed(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    headers = await register_and_login(client)
+    project_id = await create_project(client, headers)
+    draft = await upload_document(client, headers, project_id, filename="draft.txt")
+    ready = await upload_document(client, headers, project_id, filename="ready.txt")
+    busy = await upload_document(client, headers, project_id, filename="busy.txt")
+    async with sessionmaker() as session:
+        for doc, status in ((ready, DocumentStatus.READY), (busy, DocumentStatus.IN_PROGRESS)):
+            await session.execute(
+                update(Document).where(Document.id == uuid.UUID(doc["id"])).values(status=status)
+            )
+        await session.commit()
+
+    url = f"/api/v1/projects/{project_id}/documents/analysis-jobs/bulk"
+    response = await client.post(url, headers=headers)
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["started"] == 1
+    assert body["skipped"] == 0
+    assert [r["document_id"] for r in body["results"]] == [draft["id"]]
+    assert body["results"][0]["job"]["status"] == "processing"
+    assert len(queue.enqueued) == 1
+    assert (await _document_state(sessionmaker, draft["id"]))[0] == "in_progress"
+
+    # Повторный запуск: анализируемых документов не осталось
+    response = await client.post(
+        url, json={"document_ids": [ready["id"], busy["id"]]}, headers=headers
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"started": 0, "skipped": 0, "results": []}
+    assert len(queue.enqueued) == 1

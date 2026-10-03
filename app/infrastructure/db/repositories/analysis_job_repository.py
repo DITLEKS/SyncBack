@@ -9,22 +9,18 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.repositories import IAnalysisJobRepository
-from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO
-
-if TYPE_CHECKING:
-    from app.infrastructure.db.models.analysis_job import AnalysisJob
-    from app.infrastructure.db.models.document import Document
+from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO, KeysetPage
+from app.infrastructure.db.models.analysis_job import AnalysisJob
+from app.infrastructure.db.models.document import Document
+from app.infrastructure.db.models.enums import AnalysisJobStatus
 
 
 def _status_to_orm(vo: AnalysisJobStatusVO):
-    from app.infrastructure.db.models.enums import AnalysisJobStatus
-
     return AnalysisJobStatus(vo.value)
 
 
@@ -37,34 +33,27 @@ class AnalysisJobRepository(IAnalysisJobRepository):
     # ------------------------------------------------------------------
 
     async def get_by_id(self, job_id: uuid.UUID) -> AnalysisJob | None:
-        from app.infrastructure.db.models.analysis_job import AnalysisJob as M
-
-        return await self._session.get(M, job_id)
+        return await self._session.get(AnalysisJob, job_id)
 
     async def get_by_idempotency_key(
         self, document_id: uuid.UUID, idempotency_key: str
     ) -> AnalysisJob | None:
-        from app.infrastructure.db.models.analysis_job import AnalysisJob as M
-
         result = await self._session.execute(
-            select(M).where(
-                M.document_id == document_id,
-                M.idempotency_key == idempotency_key,
+            select(AnalysisJob).where(
+                AnalysisJob.document_id == document_id,
+                AnalysisJob.idempotency_key == idempotency_key,
             )
         )
         return result.scalar_one_or_none()
 
     async def get_active_by_document_id(self, document_id: uuid.UUID) -> AnalysisJob | None:
-        from app.infrastructure.db.models.analysis_job import AnalysisJob as M
-        from app.infrastructure.db.models.enums import AnalysisJobStatus
-
         result = await self._session.execute(
-            select(M)
+            select(AnalysisJob)
             .where(
-                M.document_id == document_id,
-                M.status.in_((AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING)),
+                AnalysisJob.document_id == document_id,
+                AnalysisJob.status.in_((AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING)),
             )
-            .order_by(M.created_at.desc())
+            .order_by(AnalysisJob.created_at.desc())
             .limit(1)
         )
         return result.scalar_one_or_none()
@@ -74,17 +63,18 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         document_id: uuid.UUID,
         pagination,
     ) -> list[AnalysisJob]:
-        from app.domain.value_objects import KeysetPage
-        from app.infrastructure.db.models.analysis_job import AnalysisJob as M
-
-        stmt = select(M).where(M.document_id == document_id).order_by(M.created_at.desc())
+        stmt = (
+            select(AnalysisJob)
+            .where(AnalysisJob.document_id == document_id)
+            .order_by(AnalysisJob.created_at.desc())
+        )
         if isinstance(pagination, KeysetPage):
             if pagination.has_cursor:
                 stmt = stmt.where(
-                    (M.created_at < pagination.before_created_at)
+                    (AnalysisJob.created_at < pagination.before_created_at)
                     | (
-                        (M.created_at == pagination.before_created_at)
-                        & (M.id < pagination.before_id)
+                        (AnalysisJob.created_at == pagination.before_created_at)
+                        & (AnalysisJob.id < pagination.before_id)
                     )
                 )
             stmt = stmt.limit(pagination.limit)
@@ -116,9 +106,7 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         H-NEW-1: session.refresh(job) удалён — flush() достаточно.
         Commit — ответственность вызывающего UoW.
         """
-        from app.infrastructure.db.models.analysis_job import AnalysisJob as M
-
-        job = M(
+        job = AnalysisJob(
             id=job_id or uuid.uuid4(),
             document_id=document.id,
             status=_status_to_orm(status),
@@ -186,20 +174,17 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         M-B: использует RETURNING вместо rowcount для надёжности на asyncpg.
         Возвращает True если строка была обновлена.
         """
-        from app.infrastructure.db.models.analysis_job import AnalysisJob as M
-        from app.infrastructure.db.models.enums import AnalysisJobStatus
-
         result = await self._session.execute(
-            update(M)
+            update(AnalysisJob)
             .where(
-                M.id == job_id,
-                M.status.in_((AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING)),
+                AnalysisJob.id == job_id,
+                AnalysisJob.status.in_((AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING)),
             )
             .values(
                 status=AnalysisJobStatus.PROCESSING,
-                started_at=func.coalesce(M.started_at, datetime.now(UTC)),
+                started_at=func.coalesce(AnalysisJob.started_at, datetime.now(UTC)),
             )
-            .returning(M.id)
+            .returning(AnalysisJob.id)
         )
         await self._session.flush()
         return result.scalar_one_or_none() is not None
@@ -212,8 +197,6 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         error_message: str | None = None,
     ) -> AnalysisJob:
         """Сменить статус задачи, проставив started_at/finished_at по переходу."""
-        from app.infrastructure.db.models.enums import AnalysisJobStatus
-
         _terminal = {
             AnalysisJobStatus.SUCCESS,
             AnalysisJobStatus.PARTIAL_SUCCESS,

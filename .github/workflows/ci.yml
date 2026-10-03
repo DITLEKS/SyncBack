@@ -40,15 +40,16 @@ jobs:
       - name: Ruff format
         run: ruff format --check .
 
-      # Временно не блокирует merge: оставшиеся ошибки mypy и падающие тесты —
-      # расхождения контрактов слоёв, закрываются этапом 2 плана доработки.
-      # После этапа 2 continue-on-error убрать.
+      - name: Layer contracts
+        run: python scripts/check_layer_contracts.py app
+
+      # Пока не блокирует merge: ~130 ошибок mypy в старом коде разбираются
+      # по мере рефакторинга (этапы 3–4 плана доработки), после чего шаг станет обязательным.
       - name: Mypy type check
         continue-on-error: true
         run: mypy app/ --ignore-missing-imports
 
       - name: Run unit tests with coverage
-        continue-on-error: true
         run: |
           pytest -m "not integration" tests/ -v \
             --cov=app \

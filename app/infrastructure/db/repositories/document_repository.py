@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from sqlalchemy import delete, exists, func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.repositories import IDocumentRepository
 from app.domain.value_objects import DocumentStatusVO, KeysetPage, PaginationParams
-
-if TYPE_CHECKING:
-    from app.infrastructure.db.models.document import Document
-    from app.infrastructure.db.models.enums import DocumentFormat
+from app.infrastructure.db.models.document import Document
+from app.infrastructure.db.models.document_source import document_sources
+from app.infrastructure.db.models.enums import DocumentFormat, DocumentStatus, SuggestionStatus
+from app.infrastructure.db.models.project import Project
+from app.infrastructure.db.models.source import Source
+from app.infrastructure.db.models.source_scope import SourceScope
+from app.infrastructure.db.models.suggestion import Suggestion
 
 _ANALYZABLE_STATUSES: frozenset[DocumentStatusVO] = frozenset(
     {
@@ -25,8 +28,6 @@ _SORT_COLUMNS = frozenset({"created_at", "updated_at", "name"})
 
 
 def _status_to_orm(vo: DocumentStatusVO):
-    from app.infrastructure.db.models.enums import DocumentStatus
-
     return DocumentStatus(vo.value)
 
 
@@ -44,10 +45,7 @@ class DocumentRepository(IDocumentRepository):
         storage_key: str,
         size_bytes: int,
     ) -> Document:
-        from app.infrastructure.db.models.document import Document as M
-        from app.infrastructure.db.models.enums import DocumentStatus
-
-        doc = M(
+        doc = Document(
             id=id,
             project_id=project_id,
             name=name,
@@ -62,16 +60,12 @@ class DocumentRepository(IDocumentRepository):
         return doc
 
     async def get_by_id(self, document_id: uuid.UUID) -> Document | None:
-        from app.infrastructure.db.models.document import Document as M
-
-        return await self._session.get(M, document_id)
+        return await self._session.get(Document, document_id)
 
     async def get_many_by_ids(self, document_ids: list[uuid.UUID]) -> list[Document]:
-        from app.infrastructure.db.models.document import Document as M
-
         if not document_ids:
             return []
-        result = await self._session.execute(select(M).where(M.id.in_(document_ids)))
+        result = await self._session.execute(select(Document).where(Document.id.in_(document_ids)))
         return list(result.scalars().all())
 
     async def list_for_project(
@@ -81,21 +75,19 @@ class DocumentRepository(IDocumentRepository):
         *,
         status: DocumentStatusVO | None = None,
     ) -> list[Document]:
-        from app.infrastructure.db.models.document import Document as M
-
         q = (
-            select(M)
-            .where(M.project_id == project_id)
-            .order_by(M.created_at.desc(), M.id.desc())
+            select(Document)
+            .where(Document.project_id == project_id)
+            .order_by(Document.created_at.desc(), Document.id.desc())
             .limit(pagination.limit)
         )
 
         if status is not None:
-            q = q.where(M.status == _status_to_orm(status))
+            q = q.where(Document.status == _status_to_orm(status))
 
         if isinstance(pagination, KeysetPage) and pagination.has_cursor:
             q = q.where(
-                tuple_(M.created_at, M.id)
+                tuple_(Document.created_at, Document.id)
                 < tuple_(pagination.before_created_at, pagination.before_id)
             )
         elif isinstance(pagination, PaginationParams):
@@ -110,11 +102,9 @@ class DocumentRepository(IDocumentRepository):
         *,
         status: DocumentStatusVO | None = None,
     ) -> int:
-        from app.infrastructure.db.models.document import Document as M
-
-        q = select(func.count()).select_from(M).where(M.project_id == project_id)
+        q = select(func.count()).select_from(Document).where(Document.project_id == project_id)
         if status is not None:
-            q = q.where(M.status == _status_to_orm(status))
+            q = q.where(Document.status == _status_to_orm(status))
         result = await self._session.execute(q)
         return result.scalar_one()
 
@@ -122,13 +112,11 @@ class DocumentRepository(IDocumentRepository):
         self,
         project_id: uuid.UUID,
     ) -> list[Document]:
-        from app.infrastructure.db.models.document import Document as M
-
         analyzable_orm = tuple(_status_to_orm(s) for s in _ANALYZABLE_STATUSES)
         result = await self._session.execute(
-            select(M).where(
-                M.project_id == project_id,
-                M.status.in_(analyzable_orm),
+            select(Document).where(
+                Document.project_id == project_id,
+                Document.status.in_(analyzable_orm),
             )
         )
         return list(result.scalars().all())
@@ -137,15 +125,15 @@ class DocumentRepository(IDocumentRepository):
         self,
         project_id: uuid.UUID,
     ) -> dict[str, int]:
-        from app.infrastructure.db.models.document import Document as M
-
         stat_cols = [
-            func.count().filter(M.status == _status_to_orm(vo)).label(vo.value)
+            func.count().filter(Document.status == _status_to_orm(vo)).label(vo.value)
             for vo in DocumentStatusVO
         ]
         stat_cols.append(func.count().label("total"))
 
-        rows = await self._session.execute(select(*stat_cols).where(M.project_id == project_id))
+        rows = await self._session.execute(
+            select(*stat_cols).where(Document.project_id == project_id)
+        )
         row = rows.one()
         result: dict[str, int] = {vo.value: getattr(row, vo.value) for vo in DocumentStatusVO}
         result["total"] = row.total
@@ -168,62 +156,57 @@ class DocumentRepository(IDocumentRepository):
         а не по хрупкому строковому ключу "Document" (имя ORM-класса
         может измениться в новых версиях SA).
         """
-        from app.infrastructure.db.models.document import Document as M
-        from app.infrastructure.db.models.enums import SuggestionStatus
-        from app.infrastructure.db.models.project import Project as P
-        from app.infrastructure.db.models.suggestion import Suggestion as S
-
         if sort_by not in _SORT_COLUMNS:
             sort_by = "updated_at"
 
-        suggestions_total = func.count(S.id).label("suggestions_total")
+        suggestions_total = func.count(Suggestion.id).label("suggestions_total")
         suggestions_pending = (
-            func.count(S.id)
-            .filter(S.status == SuggestionStatus.PENDING)
+            func.count(Suggestion.id)
+            .filter(Suggestion.status == SuggestionStatus.PENDING)
             .label("suggestions_pending")
         )
         suggestions_accepted = (
-            func.count(S.id)
-            .filter(S.status == SuggestionStatus.ACCEPTED)
+            func.count(Suggestion.id)
+            .filter(Suggestion.status == SuggestionStatus.ACCEPTED)
             .label("suggestions_accepted")
         )
         suggestions_rejected = (
-            func.count(S.id)
-            .filter(S.status == SuggestionStatus.REJECTED)
+            func.count(Suggestion.id)
+            .filter(Suggestion.status == SuggestionStatus.REJECTED)
             .label("suggestions_rejected")
         )
 
         base_q = (
             select(
-                M.id.label("doc_id"),
-                M.label("doc"),
-                P.name.label("project_name"),
+                Document.id.label("doc_id"),
+                Document.label("doc"),
+                Project.name.label("project_name"),
                 suggestions_total,
                 suggestions_pending,
                 suggestions_accepted,
                 suggestions_rejected,
             )
-            .join(P, M.project_id == P.id)
-            .outerjoin(S, S.document_id == M.id)
-            .where(P.owner_id == user_id)
-            .group_by(M.id, P.name)
+            .join(Project, Document.project_id == Project.id)
+            .outerjoin(Suggestion, Suggestion.document_id == Document.id)
+            .where(Project.owner_id == user_id)
+            .group_by(Document.id, Project.name)
         )
 
         if status is not None:
-            base_q = base_q.where(M.status == _status_to_orm(status))
+            base_q = base_q.where(Document.status == _status_to_orm(status))
 
         if outdated:
             pending_exists = exists(
-                select(S.id).where(
-                    S.document_id == M.id,
-                    S.status == SuggestionStatus.PENDING,
+                select(Suggestion.id).where(
+                    Suggestion.document_id == Document.id,
+                    Suggestion.status == SuggestionStatus.PENDING,
                 )
             )
             base_q = base_q.where(pending_exists)
 
         if search:
             safe_search = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            base_q = base_q.where(M.name.ilike(f"%{safe_search}%", escape="\\"))
+            base_q = base_q.where(Document.name.ilike(f"%{safe_search}%", escape="\\"))
 
         cte = base_q.cte("docs_cte")
         paged_q = (
@@ -288,16 +271,14 @@ class DocumentRepository(IDocumentRepository):
         document_id: uuid.UUID,
         expected_version: int,
     ) -> Document | None:
-        from app.infrastructure.db.models.document import Document as M
-
         stmt = (
-            update(M)
+            update(Document)
             .where(
-                M.id == document_id,
-                M.review_version == expected_version,
+                Document.id == document_id,
+                Document.review_version == expected_version,
             )
-            .values(review_version=M.review_version + 1)
-            .returning(M)
+            .values(review_version=Document.review_version + 1)
+            .returning(Document)
         )
         result = await self._session.execute(stmt)
         updated = result.scalar_one_or_none()
@@ -329,14 +310,14 @@ class DocumentRepository(IDocumentRepository):
         ДО flush/commit, чтобы FK-каскад по document_sources не успел
         удалить строки раньше подзапроса.
         """
-        from app.infrastructure.db.models.document_source import document_sources as DS
-        from app.infrastructure.db.models.source import Source as S
-        from app.infrastructure.db.models.source_scope import SourceScope
-
-        subq = select(DS.c.source_id).where(DS.c.document_id == document_id).scalar_subquery()
-        stmt = delete(S).where(
-            S.scope == SourceScope.DOCUMENT,
-            S.id.in_(subq),
+        subq = (
+            select(document_sources.c.source_id)
+            .where(document_sources.c.document_id == document_id)
+            .scalar_subquery()
+        )
+        stmt = delete(Source).where(
+            Source.scope == SourceScope.DOCUMENT,
+            Source.id.in_(subq),
         )
         result = await self._session.execute(stmt)
         await self._session.flush()
@@ -367,15 +348,13 @@ class DocumentRepository(IDocumentRepository):
         (в той же транзакции), иначе FK-каскад по document_sources
         удалит join-строки раньше, чем подзапрос их прочитает.
         """
-        from app.infrastructure.db.models.document import Document as M
-
         stmt = (
-            delete(M)
+            delete(Document)
             .where(
-                M.id == document_id,
-                M.project_id == project_id,
+                Document.id == document_id,
+                Document.project_id == project_id,
             )
-            .returning(M.storage_key, M.original_storage_key)
+            .returning(Document.storage_key, Document.original_storage_key)
         )
         result = await self._session.execute(stmt)
         row = result.one_or_none()
