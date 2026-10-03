@@ -22,46 +22,14 @@ from app.domain.exceptions import (
 from app.domain.interfaces.analysis_queue import AnalysisQueue
 from app.domain.interfaces.entities import DocumentProtocol
 from app.domain.interfaces.unit_of_work import IUnitOfWork
+from app.domain.lifecycle import AnalysisJobLifecycle, DocumentLifecycle
 from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models.analysis_job import AnalysisJob
+    from app.infrastructure.db.models.document import Document
 
 logger = logging.getLogger("syncscribe.services.analysis_job")
-
-_ANALYSIS_ALLOWED_STATUSES = frozenset(
-    {
-        DocumentStatusVO.DRAFT,
-        DocumentStatusVO.AWAITING_APPROVAL,
-        DocumentStatusVO.READY,
-    }
-)
-
-_FORCE_CONFIRM_STATUSES = frozenset(
-    {
-        DocumentStatusVO.READY,
-    }
-)
-
-_CANCELLABLE_JOB_STATUSES = frozenset(
-    {
-        AnalysisJobStatusVO.PENDING,
-        AnalysisJobStatusVO.PROCESSING,
-    }
-)
-
-_DISPATCHABLE_JOB_STATUSES = frozenset(
-    {
-        AnalysisJobStatusVO.PENDING,
-    }
-)
-
-_RESET_ALLOWED_STATUSES = frozenset(
-    {
-        DocumentStatusVO.AWAITING_APPROVAL,
-        DocumentStatusVO.READY,
-    }
-)
 
 
 @dataclass
@@ -102,15 +70,6 @@ class AnalysisJobService:
     # Document helpers
     # ------------------------------------------------------------------
 
-    async def check_document_is_ready(self, project_id: uuid.UUID, document_id: uuid.UUID) -> bool:
-        async with self._uow:
-            document = await self._uow.documents.get_by_id(document_id)
-            if document is None or document.project_id != project_id:
-                raise DocumentNotFoundError(
-                    f"Документ {document_id} не найден в проекте {project_id}"
-                )
-            return document.status == DocumentStatusVO.READY
-
     async def check_document_needs_force_confirm(
         self, project_id: uuid.UUID, document_id: uuid.UUID
     ) -> bool:
@@ -120,18 +79,7 @@ class AnalysisJobService:
                 raise DocumentNotFoundError(
                     f"Документ {document_id} не найден в проекте {project_id}"
                 )
-            return document.status in _FORCE_CONFIRM_STATUSES
-
-    async def get_document_for_job(
-        self, project_id: uuid.UUID, document_id: uuid.UUID
-    ) -> uuid.UUID:
-        async with self._uow:
-            document = await self._uow.documents.get_by_id(document_id)
-            if document is None or document.project_id != project_id:
-                raise DocumentNotFoundError(
-                    f"Документ {document_id} не найден в проекте {project_id}"
-                )
-            return document_id
+            return DocumentLifecycle.analysis_needs_confirmation(document.status)
 
     # ------------------------------------------------------------------
     # Core job lifecycle
@@ -155,18 +103,18 @@ class AnalysisJobService:
                 if existing is not None:
                     return existing
 
-            if document.status not in _ANALYSIS_ALLOWED_STATUSES:
+            if not DocumentLifecycle.can_start_analysis(document.status):
                 raise InvalidDocumentStatusError(
-                    f"Анализ можно запустить только для документа в статусе "
-                    f"{' или '.join(s.value for s in _ANALYSIS_ALLOWED_STATUSES)}, "
-                    f"текущий статус: {document.status}"
+                    f"Анализ нельзя запустить для документа в статусе {document.status.value}"
                 )
 
             if await self._uow.jobs.get_active_by_document_id(document.id) is not None:
                 raise AnalysisAlreadyRunningError("Для документа уже выполняется анализ")
 
+            # Пока задача не поставлена в очередь, документ — черновик: прежние
+            # результаты ревью считаются сброшенными.
             if document.status != DocumentStatusVO.DRAFT:
-                document = await self._uow.documents.update_status(document, DocumentStatusVO.DRAFT)
+                document = await self._set_document_status(document, DocumentStatusVO.DRAFT)
 
             job = await self._uow.jobs.create_for_document(
                 document,
@@ -178,15 +126,16 @@ class AnalysisJobService:
         return job
 
     async def dispatch_job(self, job: AnalysisJob) -> AnalysisJob:
-        """Отправить задачу в очередь: статусы «в обработке» выставляются до отправки.
+        """Отправить задачу в очередь и вернуть её актуальное состояние.
 
-        Если очередь недоступна, задача помечается FAILED (QUEUE_UNAVAILABLE),
-        документ возвращается в DRAFT; исключение пробрасывается вызывающему.
+        Статус dispatched выставляется до отправки, чтобы быстрый воркер не был
+        перезаписан более поздней записью. Если очередь недоступна, задача
+        помечается FAILED (QUEUE_UNAVAILABLE), документ возвращается в DRAFT,
+        и такая задача возвращается без исключения.
         """
-        if job.status not in _DISPATCHABLE_JOB_STATUSES:
+        if not AnalysisJobLifecycle.can_dispatch(job.status):
             raise InvalidDocumentStatusError(
-                f"Диспатч недопустим для задачи в статусе {job.status!r}. "
-                f"Допустимые статусы: {', '.join(s.value for s in _DISPATCHABLE_JOB_STATUSES)}"
+                f"Задачу анализа в статусе {job.status.value} нельзя отправить в очередь"
             )
         queue = self._require_queue()
 
@@ -196,39 +145,36 @@ class AnalysisJobService:
                 raise DocumentNotFoundError(f"Документ {job.document_id} не найден")
             sources = await self._uow.sources.list_for_analysis(document.project_id, document.id)
             source_ids = [source.id for source in sources]
-            job, new_doc_status = await self._uow.jobs.mark_dispatched(job)
-            if new_doc_status is not None and document.current_analysis_job_id == job.id:
-                await self._uow.documents.update_status(document, new_doc_status)
+            job = await self._set_job_status(job, document, AnalysisJobStatusVO.DISPATCHED)
             await self._uow.commit()
 
         try:
             task_id = await queue.enqueue(job.id, source_ids)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — любой сбой брокера фиксируем в задаче
             logger.warning(
                 "Очередь анализа недоступна, задача помечена FAILED",
                 exc_info=True,
                 extra={"job_id": str(job.id), "document_id": str(job.document_id)},
             )
-            await self.mark_job_queue_unavailable(job, str(exc))
-            raise
+            return await self._mark_queue_unavailable(job, str(exc))
 
         async with self._uow:
             job = await self._uow.jobs.set_celery_task_id(job, task_id)
             await self._uow.commit()
         return job
 
-    async def mark_job_queue_unavailable(
-        self, job: AnalysisJob, error_message: str | None = None
-    ) -> AnalysisJob:
+    async def _mark_queue_unavailable(self, job: AnalysisJob, error_message: str) -> AnalysisJob:
         async with self._uow:
             document = await self._uow.documents.get_by_id(job.document_id)
             if document is None:
                 raise DocumentNotFoundError(f"Документ {job.document_id} не найден")
-            job, new_doc_status = await self._uow.jobs.mark_failed_queue_unavailable(
-                job, error_message
+            job = await self._set_job_status(
+                job,
+                document,
+                AnalysisJobStatusVO.FAILED,
+                error_code="QUEUE_UNAVAILABLE",
+                error_message=error_message,
             )
-            if document.current_analysis_job_id == job.id:
-                await self._uow.documents.update_status(document, new_doc_status)
             await self._uow.commit()
         return job
 
@@ -242,14 +188,18 @@ class AnalysisJobService:
             job = await self._get_job(project_id, document_id, job_id)
             if job.status == AnalysisJobStatusVO.CANCELLED:
                 return job
-            if job.status not in _CANCELLABLE_JOB_STATUSES:
+            if not AnalysisJobLifecycle.can_cancel(job.status):
                 raise AnalysisJobNotCancellableError("Завершённую задачу анализа отменить нельзя")
             document = await self._uow.documents.get_by_id(document_id)
             if document is None:
                 raise DocumentNotFoundError(f"Документ {document_id} не найден")
-            job, new_doc_status = await self._uow.jobs.cancel(job)
-            if document.current_analysis_job_id == job.id:
-                await self._uow.documents.update_status(document, new_doc_status)
+            job = await self._set_job_status(
+                job,
+                document,
+                AnalysisJobStatusVO.CANCELLED,
+                error_code="ANALYSIS_CANCELLED",
+                error_message="Анализ отменён",
+            )
             await self._uow.commit()
         return job
 
@@ -288,10 +238,9 @@ class AnalysisJobService:
                 raise DocumentNotFoundError(
                     f"Документ {document_id} не найден в проекте {project_id}"
                 )
-            if document.status not in _RESET_ALLOWED_STATUSES:
+            if not DocumentLifecycle.can_reset_review(document.status):
                 raise InvalidDocumentStatusError(
-                    f"Сброс невозможен для документа в статусе {document.status.value}. "
-                    f"Допустимые статусы: " + ", ".join(s.value for s in _RESET_ALLOWED_STATUSES)
+                    f"Сброс невозможен для документа в статусе {document.status.value}"
                 )
             if document.current_analysis_job_id is None:
                 raise AnalysisJobNotFoundError("У документа нет активного анализа для сброса")
@@ -299,9 +248,7 @@ class AnalysisJobService:
             reset_ids = await self._uow.suggestions.reset_to_pending(
                 document.current_analysis_job_id
             )
-            document = await self._uow.documents.update_status(
-                document, DocumentStatusVO.AWAITING_APPROVAL
-            )
+            document = await self._set_document_status(document, DocumentStatusVO.AWAITING_APPROVAL)
             await self._uow.commit()
 
         return ResetResult(reset_count=len(reset_ids), document=document)
@@ -313,9 +260,10 @@ class AnalysisJobService:
     ) -> list[dict]:
         """Создать задачи для всех анализируемых документов проекта (или только document_ids)."""
         async with self._uow:
-            all_analyzable: list[uuid.UUID] = [
-                doc.id for doc in await self._uow.documents.list_analyzable_for_project(project_id)
-            ]
+            analyzable_docs = await self._uow.documents.list_by_statuses(
+                project_id, DocumentLifecycle.auto_analyzable_statuses()
+            )
+            all_analyzable = [doc.id for doc in analyzable_docs]
 
         if document_ids is not None:
             requested = frozenset(document_ids)
@@ -339,6 +287,33 @@ class AnalysisJobService:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _set_document_status(self, document: Document, target: DocumentStatusVO) -> Document:
+        return await self._uow.documents.update_status(
+            document, DocumentLifecycle.transition(document.status, target)
+        )
+
+    async def _set_job_status(
+        self,
+        job: AnalysisJob,
+        document: Document,
+        target: AnalysisJobStatusVO,
+        *,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> AnalysisJob:
+        """Сменить статус задачи и, если она текущая для документа, статус документа."""
+        job = await self._uow.jobs.update_status(
+            job,
+            AnalysisJobLifecycle.transition(job.status, target),
+            error_code=error_code,
+            error_message=error_message,
+        )
+        if document.current_analysis_job_id == job.id:
+            await self._set_document_status(
+                document, AnalysisJobLifecycle.document_status_for(target)
+            )
+        return job
 
     async def _get_job(
         self,

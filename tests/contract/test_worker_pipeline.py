@@ -126,9 +126,14 @@ async def test_pipeline_success_moves_document_to_awaiting_approval(
     headers, document_id, job_id, source_ids = await _start(client, queue, ["A", "B"])
     assert len(source_ids) == 2
 
+    assert (await _job(sessionmaker, job_id)).status.value == "dispatched"
     results = [await tasks._process_source(job_id, sid) for sid in source_ids]
     assert [r["status"] for r in results] == ["ok", "ok"]
     assert [r["count"] for r in results] == [1, 1]
+    # Первый обработанный источник переводит задачу в processing
+    job = await _job(sessionmaker, job_id)
+    assert job.status.value == "processing"
+    assert job.started_at is not None
     # Документ парсится один раз, дальше текст берётся из кэша
     assert {call[0] for call in worker.calls} == {"Hello world\n"}
     assert {call[2] for call in worker.calls} == {"txt"}

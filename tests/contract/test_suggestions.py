@@ -310,15 +310,16 @@ async def test_reset_endpoint(
     assert await _audit_actions(sessionmaker) == [(first, "accept"), (first, "reset")]
 
 
-async def test_suggestions_of_foreign_project_are_forbidden(
+async def test_suggestions_of_foreign_project_look_missing(
     client: AsyncClient, review: ReviewFixture
 ) -> None:
+    # Чужой проект неотличим от несуществующего: 404, а не 403
     other_headers = await register_and_login(client, email="other@example.com")
     response = await client.get(review.base_url, headers=other_headers)
-    assert response.status_code == 403
+    assert response.status_code == 404
     response = await client.patch(
         review.base_url,
         json={"ids": [str(review.suggestion_ids[0])], "status": "accepted"},
         headers=other_headers,
     )
-    assert response.status_code == 403
+    assert response.status_code == 404

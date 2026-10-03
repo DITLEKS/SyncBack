@@ -11,8 +11,14 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.domain.value_objects import DocumentStatusVO
 from app.infrastructure.db.models.audit_log import AuditLog
-from tests.contract.conftest import create_project, register_and_login, upload_document
+from tests.contract.conftest import (
+    create_project,
+    register_and_login,
+    set_document_status,
+    upload_document,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -86,7 +92,9 @@ async def test_document_content_and_download_write_audit(
     assert str(entries[0].document_id) == document["id"]
 
 
-async def test_export_in_source_format_only(client: AsyncClient) -> None:
+async def test_export_in_source_format_only(
+    client: AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
     headers = await register_and_login(client)
     project_id = await create_project(client, headers)
     document = await upload_document(
@@ -99,6 +107,11 @@ async def test_export_in_source_format_only(client: AsyncClient) -> None:
     )
     base = f"/api/v1/projects/{project_id}/documents/{document['id']}/export"
 
+    # Экспорт доступен только готовому документу
+    response = await client.get(base, headers=headers)
+    assert response.status_code == 409, response.text
+
+    await set_document_status(sessionmaker, document["id"], DocumentStatusVO.READY)
     response = await client.get(base, headers=headers)
     assert response.status_code == 200, response.text
     assert response.headers["content-disposition"] == 'attachment; filename="report.docx"'
@@ -113,13 +126,14 @@ async def test_export_in_source_format_only(client: AsyncClient) -> None:
 
 
 async def test_export_text_document_applies_no_changes_when_none_accepted(
-    client: AsyncClient,
+    client: AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
     headers = await register_and_login(client)
     project_id = await create_project(client, headers)
     document = await upload_document(
         client, headers, project_id, filename="notes.md", content="# Заголовок\n\nТекст\n".encode()
     )
+    await set_document_status(sessionmaker, document["id"], DocumentStatusVO.READY)
     response = await client.get(
         f"/api/v1/projects/{project_id}/documents/{document['id']}/export",
         params={"export_format": "md"},

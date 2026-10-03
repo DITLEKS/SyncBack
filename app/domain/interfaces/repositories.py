@@ -139,9 +139,8 @@ class IDocumentRepository(ABC):
     ) -> int: ...
 
     @abstractmethod
-    async def list_analyzable_for_project(
-        self,
-        project_id: uuid.UUID,
+    async def list_by_statuses(
+        self, project_id: uuid.UUID, statuses: frozenset[DocumentStatusVO]
     ) -> list[Document]: ...
 
     @abstractmethod
@@ -418,28 +417,12 @@ class IAnalysisJobRepository(ABC):
     ) -> AnalysisJob: ...
 
     @abstractmethod
-    async def mark_dispatched(
-        self, job: AnalysisJob
-    ) -> tuple[AnalysisJob, DocumentStatusVO | None]:
-        """Перевести задачу в PROCESSING перед отправкой в очередь.
-
-        Возвращает (job, новый статус документа | None).
-        """
-        ...
-
-    @abstractmethod
     async def set_celery_task_id(self, job: AnalysisJob, task_id: str) -> AnalysisJob: ...
 
     @abstractmethod
-    async def mark_failed_queue_unavailable(
-        self, job: AnalysisJob, message: str | None
-    ) -> tuple[AnalysisJob, DocumentStatusVO]: ...
-
-    @abstractmethod
-    async def cancel(self, job: AnalysisJob) -> tuple[AnalysisJob, DocumentStatusVO]: ...
-
-    @abstractmethod
-    async def mark_processing_if_active(self, job_id: uuid.UUID) -> bool: ...
+    async def mark_processing_if_active(self, job_id: uuid.UUID) -> bool:
+        """Атомарно перевести незавершённую задачу в PROCESSING; False, если она уже завершена."""
+        ...
 
     @abstractmethod
     async def update_status(
@@ -448,7 +431,9 @@ class IAnalysisJobRepository(ABC):
         status: AnalysisJobStatusVO,
         error_code: str | None = None,
         error_message: str | None = None,
-    ) -> AnalysisJob: ...
+    ) -> AnalysisJob:
+        """Записать статус (переход уже проверен вызывающим) и отметки времени."""
+        ...
 
 
 class IAuditLogRepository(ABC):

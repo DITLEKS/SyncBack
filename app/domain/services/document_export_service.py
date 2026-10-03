@@ -12,10 +12,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from app.domain.exceptions import UnsupportedExportFormatError
+from app.domain.exceptions import InvalidDocumentStatusError, UnsupportedExportFormatError
 from app.domain.interfaces.document_exporter import AppliedChange, DocumentExporterRegistry
 from app.domain.interfaces.file_storage import FileStorage
 from app.domain.interfaces.unit_of_work import IUnitOfWork
+from app.domain.lifecycle import DocumentLifecycle
 from app.domain.value_objects import DocumentFormatVO, SuggestionStatusVO
 
 if TYPE_CHECKING:
@@ -53,9 +54,15 @@ class DocumentExportService:
     ) -> tuple[bytes, str, str]:
         """Вернуть (bytes, filename, media_type) документа с принятыми правками.
 
-        Экспорт возможен только в исходном формате документа: конвертация между
-        форматами не поддерживается, иной target_format → UnsupportedExportFormatError.
+        Экспорт доступен только для документа в статусе ready, иначе
+        InvalidDocumentStatusError. Формат — только исходный: конвертация не
+        поддерживается, иной target_format → UnsupportedExportFormatError.
         """
+        if not DocumentLifecycle.can_export(document.status):
+            raise InvalidDocumentStatusError(
+                f"Экспорт доступен только для готового документа, "
+                f"текущий статус: {document.status.value}"
+            )
         source_format = DocumentFormatVO(document.format)
         if target_format is not None and target_format != source_format:
             raise UnsupportedExportFormatError(

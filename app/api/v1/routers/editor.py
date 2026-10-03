@@ -59,7 +59,8 @@ from app.core.dependencies import (
     get_document_service,
     get_suggestion_service,
 )
-from app.domain.exceptions import DocumentNotFoundError
+from app.domain.exceptions import DocumentNotFoundError, InvalidDocumentStatusError
+from app.domain.lifecycle import DocumentLifecycle
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.domain.services.document_service import DocumentService
 from app.domain.services.suggestion_service import SuggestionService
@@ -74,39 +75,14 @@ router = APIRouter(
     tags=["editor"],
 )
 
-_STATUSES_WITH_APPLIED_CHANGES = frozenset(
-    {
-        DocumentStatusVO.AWAITING_APPROVAL,
-        DocumentStatusVO.READY,
-    }
-)
-
+# Режим отображения содержимого: до результатов анализа показываем исходник,
+# во время ревью — текст с предложенными правками, после — чистовик.
 _STATUS_VIEW_MODE: dict[DocumentStatusVO, str] = {
     DocumentStatusVO.DRAFT: "original",
     DocumentStatusVO.IN_PROGRESS: "original",
     DocumentStatusVO.AWAITING_APPROVAL: "suggested",
     DocumentStatusVO.READY: "clean",
 }
-
-_CAN_ANALYZE_STATUSES = frozenset(
-    {
-        DocumentStatusVO.DRAFT,
-        DocumentStatusVO.READY,
-    }
-)
-
-_LOCKED_STATUSES = frozenset(
-    {
-        DocumentStatusVO.IN_PROGRESS,
-    }
-)
-
-_SOURCES_NOT_EDITABLE_STATUSES = frozenset(
-    {
-        DocumentStatusVO.IN_PROGRESS,
-        DocumentStatusVO.AWAITING_APPROVAL,
-    }
-)
 
 _SUGGESTIONS_MAX_LIMIT = 200
 
@@ -172,7 +148,7 @@ async def get_editor_aggregate(
         view_mode=view_mode,
     )
 
-    needs_original = document.status in _STATUSES_WITH_APPLIED_CHANGES
+    needs_original = DocumentLifecycle.has_review_results(document.status)
 
     async def _fetch_content():
         try:
@@ -233,11 +209,11 @@ async def get_editor_aggregate(
     )
 
     permissions = EditorPermissions(
-        can_analyze=document.status in _CAN_ANALYZE_STATUSES,
-        can_review=document.status == DocumentStatusVO.AWAITING_APPROVAL,
-        can_export=document.status == DocumentStatusVO.READY,
-        can_delete=document.status not in _LOCKED_STATUSES,
-        sources_is_editable=document.status not in _SOURCES_NOT_EDITABLE_STATUSES,
+        can_analyze=DocumentLifecycle.can_start_analysis(document.status),
+        can_review=DocumentLifecycle.can_review(document.status),
+        can_export=DocumentLifecycle.can_export(document.status),
+        can_delete=DocumentLifecycle.can_delete(document.status),
+        sources_is_editable=DocumentLifecycle.can_edit_sources(document.status),
     )
 
     return EditorAggregateResponse(
@@ -280,36 +256,20 @@ async def reset_analysis(
     document_id: uuid.UUID,
     project: Project = Depends(get_allowed_project),
     current_user: User = Depends(get_current_user),
-    document_service: DocumentService = Depends(get_document_service),
     job_service: AnalysisJobService = Depends(get_analysis_job_service),
 ) -> ResetResponse:
     """Сбросить все правки текущего анализа: статус suggestions → pending,
     документ → AWAITING_APPROVAL.
-
-    PR4-FIX: reset_result — ResetResult dataclass с reset_count и document.
-    Читаем поля напрямую без isinstance-проверок и второго SELECT.
     """
     try:
-        document = await document_service.get_document(project.id, document_id)
+        reset_result = await job_service.reset_analysis(project.id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-
-    if document.status not in (
-        DocumentStatusVO.AWAITING_APPROVAL,
-        DocumentStatusVO.READY,
-    ):
+    except InvalidDocumentStatusError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                "Сброс возможен только для документов в статусе "
-                "AWAITING_APPROVAL или READY. "
-                f"Текущий статус: {document.status.value}"
-            ),
-        )
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
 
-    reset_result = await job_service.reset_analysis(project.id, document_id)
-
-    # PR4-FIX: reset_result всегда ResetResult — читаем атрибуты напрямую.
     suggestions_reset_count = reset_result.reset_count
     updated_doc = reset_result.document
     new_status = updated_doc.status.value

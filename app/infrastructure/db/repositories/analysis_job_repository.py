@@ -1,8 +1,7 @@
 """SQLAlchemy-адаптер для AnalysisJob.
 
-Репозиторий не трогает статус документа: методы переходов возвращают
-DocumentStatusVO, который сервис применяет через uow.documents.update_status.
-Фиксация транзакции — на стороне UoW.
+Решения о переходах принимает домен (AnalysisJobLifecycle), репозиторий
+только записывает статус и отметки времени. Фиксация транзакции — на стороне UoW.
 """
 
 from __future__ import annotations
@@ -14,7 +13,8 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.repositories import IAnalysisJobRepository
-from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO, KeysetPage
+from app.domain.lifecycle import AnalysisJobLifecycle
+from app.domain.value_objects import AnalysisJobStatusVO, KeysetPage
 from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.enums import AnalysisJobStatus
@@ -22,6 +22,9 @@ from app.infrastructure.db.models.enums import AnalysisJobStatus
 
 def _status_to_orm(vo: AnalysisJobStatusVO):
     return AnalysisJobStatus(vo.value)
+
+
+_ACTIVE_ORM_STATUSES = tuple(_status_to_orm(st) for st in AnalysisJobLifecycle.ACTIVE)
 
 
 class AnalysisJobRepository(IAnalysisJobRepository):
@@ -51,7 +54,7 @@ class AnalysisJobRepository(IAnalysisJobRepository):
             select(AnalysisJob)
             .where(
                 AnalysisJob.document_id == document_id,
-                AnalysisJob.status.in_((AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING)),
+                AnalysisJob.status.in_(_ACTIVE_ORM_STATUSES),
             )
             .order_by(AnalysisJob.created_at.desc())
             .limit(1)
@@ -116,69 +119,17 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         await self._session.flush()
         return job
 
-    async def mark_dispatched(
-        self, job: AnalysisJob
-    ) -> tuple[AnalysisJob, DocumentStatusVO | None]:
-        """PENDING → PROCESSING до отправки в очередь.
-
-        Статусы выставляются заранее, чтобы быстрый воркер не был перезаписан
-        более поздней записью «в обработке». Если задача уже не PENDING —
-        ничего не меняем.
-        """
-        if job.status.value != AnalysisJobStatusVO.PENDING.value:
-            return job, None
-        job = await self.update_status(job, AnalysisJobStatusVO.PROCESSING)
-        return job, DocumentStatusVO.IN_PROGRESS
-
     async def set_celery_task_id(self, job: AnalysisJob, task_id: str) -> AnalysisJob:
         job.celery_task_id = task_id
         await self._session.flush()
         return job
 
-    async def mark_failed_queue_unavailable(
-        self,
-        job: AnalysisJob,
-        message: str | None,
-    ) -> tuple[AnalysisJob, DocumentStatusVO]:
-        """CRIT-B / HIGH-B: делегирует update_status(), не мутирует document.
-
-        Возвращает (job, DocumentStatusVO.DRAFT) — вызывающий код обновляет документ.
-        """
-        job = await self.update_status(
-            job,
-            AnalysisJobStatusVO.FAILED,
-            error_code="QUEUE_UNAVAILABLE",
-            error_message=message,
-        )
-        return job, DocumentStatusVO.DRAFT
-
-    async def cancel(
-        self,
-        job: AnalysisJob,
-    ) -> tuple[AnalysisJob, DocumentStatusVO]:
-        """CRIT-B / HIGH-B: делегирует update_status(), не мутирует document.
-
-        Возвращает (job, DocumentStatusVO.DRAFT) — вызывающий код обновляет документ.
-        """
-        job = await self.update_status(
-            job,
-            AnalysisJobStatusVO.CANCELLED,
-            error_code="ANALYSIS_CANCELLED",
-            error_message="Анализ отменён",
-        )
-        return job, DocumentStatusVO.DRAFT
-
     async def mark_processing_if_active(self, job_id: uuid.UUID) -> bool:
-        """Atomic CAS: PENDING/PROCESSING → PROCESSING.
-
-        M-B: использует RETURNING вместо rowcount для надёжности на asyncpg.
-        Возвращает True если строка была обновлена.
-        """
         result = await self._session.execute(
             update(AnalysisJob)
             .where(
                 AnalysisJob.id == job_id,
-                AnalysisJob.status.in_((AnalysisJobStatus.PENDING, AnalysisJobStatus.PROCESSING)),
+                AnalysisJob.status.in_(_ACTIVE_ORM_STATUSES),
             )
             .values(
                 status=AnalysisJobStatus.PROCESSING,
@@ -196,21 +147,13 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> AnalysisJob:
-        """Сменить статус задачи, проставив started_at/finished_at по переходу."""
-        _terminal = {
-            AnalysisJobStatus.SUCCESS,
-            AnalysisJobStatus.PARTIAL_SUCCESS,
-            AnalysisJobStatus.FAILED,
-            AnalysisJobStatus.CANCELLED,
-        }
-        orm_status = _status_to_orm(status)
-        job.status = orm_status
+        job.status = _status_to_orm(status)
         job.error_code = error_code
         job.error_message = error_message
         now = datetime.now(UTC)
-        if orm_status == AnalysisJobStatus.PROCESSING and job.started_at is None:
+        if status is AnalysisJobStatusVO.PROCESSING and job.started_at is None:
             job.started_at = now
-        if orm_status in _terminal:
+        if AnalysisJobLifecycle.is_terminal(status):
             job.finished_at = now
         await self._session.flush()
         return job

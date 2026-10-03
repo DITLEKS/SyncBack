@@ -86,7 +86,7 @@ async def test_start_job_dispatches_project_and_document_sources(
     response = await client.post(url, headers=headers)
     assert response.status_code == 201, response.text
     job = response.json()
-    assert job["status"] == "processing"
+    assert job["status"] == "dispatched"
     assert job["document_id"] == document["id"]
 
     assert len(queue.enqueued) == 1
@@ -97,7 +97,8 @@ async def test_start_job_dispatches_project_and_document_sources(
     assert await _document_state(sessionmaker, document["id"]) == ("in_progress", job_id)
     row = await _job_row(sessionmaker, job["id"])
     assert row.celery_task_id == "task-1"
-    assert row.started_at is not None
+    # started_at проставит воркер, когда возьмёт задачу из очереди
+    assert row.started_at is None
 
     # Пока анализ идёт, второй запуск невозможен
     response = await client.post(url, headers=headers)
@@ -105,7 +106,7 @@ async def test_start_job_dispatches_project_and_document_sources(
 
     response = await client.get(f"{url}/{job['id']}", headers=headers)
     assert response.status_code == 200, response.text
-    assert response.json()["status"] == "processing"
+    assert response.json()["status"] == "dispatched"
 
 
 async def test_idempotency_key_returns_existing_job(
@@ -169,6 +170,8 @@ async def test_cancel_job_returns_document_to_draft(
     assert (await _document_state(sessionmaker, document["id"]))[0] == "draft"
     assert (await _job_row(sessionmaker, job["id"])).finished_at is not None
 
+    assert (await _job_row(sessionmaker, job["id"])).error_code == "ANALYSIS_CANCELLED"
+
     # Повторная отмена идемпотентна, отмена чужого job — 404
     assert (await client.delete(f"{url}/{job['id']}", headers=headers)).status_code == 200
     assert (await client.delete(f"{url}/{uuid.uuid4()}", headers=headers)).status_code == 404
@@ -224,7 +227,7 @@ async def test_bulk_start_skips_documents_that_cannot_be_analysed(
     assert body["started"] == 1
     assert body["skipped"] == 0
     assert [r["document_id"] for r in body["results"]] == [draft["id"]]
-    assert body["results"][0]["job"]["status"] == "processing"
+    assert body["results"][0]["job"]["status"] == "dispatched"
     assert len(queue.enqueued) == 1
     assert (await _document_state(sessionmaker, draft["id"]))[0] == "in_progress"
 
@@ -235,3 +238,26 @@ async def test_bulk_start_skips_documents_that_cannot_be_analysed(
     assert response.status_code == 200, response.text
     assert response.json() == {"started": 0, "skipped": 0, "results": []}
     assert len(queue.enqueued) == 1
+
+
+async def test_document_in_progress_cannot_be_deleted(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    headers = await register_and_login(client)
+    project_id = await create_project(client, headers)
+    document = await upload_document(client, headers, project_id)
+    doc_url = f"/api/v1/projects/{project_id}/documents/{document['id']}"
+    job = (await client.post(f"{doc_url}/analysis-jobs", headers=headers)).json()
+    assert job["status"] == "dispatched"
+
+    response = await client.delete(doc_url, headers=headers)
+    assert response.status_code == 409, response.text
+    assert (await _document_state(sessionmaker, document["id"]))[0] == "in_progress"
+
+    assert (
+        await client.delete(f"{doc_url}/analysis-jobs/{job['id']}", headers=headers)
+    ).status_code == 200
+    assert (await client.delete(doc_url, headers=headers)).status_code == 204
+    assert (await client.get(doc_url, headers=headers)).status_code == 404
