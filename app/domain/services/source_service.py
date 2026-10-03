@@ -1,52 +1,26 @@
-"""
-Бизнес-логика источников истины.
+"""Источники истины проекта.
 
-После P2:
-  - create_text_source (хранил text_content в БД) удалён.
-  - create_note_source: кодирует текст в UTF-8, загружает в MinIO.
-  - create_url_source: сохраняет url в БД (без файла в MinIO).
-  - create_file_source: без изменений.
-
-Архитектурные правила:
-  - Зависит только от IUnitOfWork (порт) и FileStorage (порт).
-  - Нет импортов из app.infrastructure.* при выполнении.
-  - app.core.config — допустимый non-infra импорт.
-
-I-1: list_sources_for_documents — батч-загрузка document-scope источников.
-     Репозиторий возвращает list[tuple[Source, document_id]] (FIX-1);
-     сервис группирует по document_id без обращения к src.document_id.
-OPT-S2: delete_source_with_guard — атомарное удаление без предварительного get_source();
-        бросает SourceNotFoundError если источник не найден или принадлежит другому проекту.
-        FIX-1: document_id не хранится на Source → возвращаем None (нет document-lock).
-FIX-5: delete_source (deprecated) удалён — все вызовы перешли на
-       delete_source_with_guard. Удаление legacy-метода устраняет путаницу.
-FIX-6: create_note_source — storage.upload перенесён внутрь async with uow.
-       Это гарантирует что при сбое __aenter__ cleanup storage выполнится
-       в рамках единой try/except области.
-       FIX-6b (review #4): то же исправление применено к create_file_source —
-       upload перенесён внутрь uow, чтобы исключить MinIO orphan при сбое __aenter__.
-WARN-2: create_url_source / create_note_source / create_file_source принимают
-        document_id: uuid.UUID | None = None. При scope=DOCUMENT + document_id
-        вызывают uow.sources.attach_to_document(source.id, document_id) — M2M-вставка.
-FIX-review-4: get_primary_document_id — УДАЛЁН как публичный метод.
-        Логика перенесена внутрь delete_source_with_guard для устранения TOCTOU
-        между чтением document_id и проверкой active job (review #6).
-
-review #1: _LOCKED_STATUSES не включает ERROR/CANCELLED намеренно —
-        пользователь должен иметь возможность убрать сломанный источник
-        до повторного запуска анализа. IN_PROGRESS и AWAITING_APPROVAL
-        блокируют изменения пока идёт активная обработка/ревью.
+Базовые источники (scope=project) участвуют в анализе всех документов проекта,
+документные (scope=document) прикрепляются к конкретному документу через M2M.
+Файлы и заметки хранятся в файловом хранилище, в БД лежит только ключ.
 """
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections import defaultdict
-from collections.abc import Awaitable, Callable
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from app.core.config import Settings, get_settings
-from app.domain.exceptions import FileTooLargeError, SourceLockError, SourceNotFoundError
+from app.domain.exceptions import (
+    DocumentNotFoundError,
+    FileTooLargeError,
+    InvalidSourceScopeError,
+    SourceLockError,
+    SourceNotFoundError,
+)
 from app.domain.interfaces.file_storage import FileStorage
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.value_objects import DocumentStatusVO, SourceScopeVO, SourceTypeVO
@@ -56,21 +30,21 @@ if TYPE_CHECKING:
     from app.infrastructure.db.models.project import Project
     from app.infrastructure.db.models.source import Source
 
-# Колбэк, который бросает исключение, если у документа идёт активный анализ.
-_ActiveJobChecker = Callable[[uuid.UUID], Awaitable[None]]
+logger = logging.getLogger("syncscribe.sources")
 
-# review #1: ERROR и CANCELLED намеренно НЕ включены в _LOCKED_STATUSES.
-# Пользователь должен иметь возможность редактировать/удалять источники
-# документа, завершившегося с ошибкой или отменённого, перед повторным
-# запуском анализа. Блокируем только активную обработку (IN_PROGRESS)
-# и этап ревью (AWAITING_APPROVAL), когда изменение источников нарушило
-# бы целостность текущего job.
-_LOCKED_STATUSES: frozenset[DocumentStatusVO] = frozenset(
-    {
-        DocumentStatusVO.IN_PROGRESS,
-        DocumentStatusVO.AWAITING_APPROVAL,
-    }
+# Источники документа заморожены, пока идёт анализ или ревью его результатов:
+# иначе набор источников разойдётся с тем, по которому получены правки.
+# ERROR и CANCELLED не блокируют, чтобы можно было убрать сломанный источник
+# перед повторным запуском.
+_SOURCES_LOCKED_STATUSES: frozenset[DocumentStatusVO] = frozenset(
+    {DocumentStatusVO.IN_PROGRESS, DocumentStatusVO.AWAITING_APPROVAL}
 )
+
+
+def _storage_filename(filename: str) -> str:
+    """Имя файла для ключа в хранилище: без каталогов и служебных имён."""
+    name = PurePosixPath(filename.replace("\\", "/")).name
+    return name if name not in {"", ".", ".."} else "upload"
 
 
 class SourceService:
@@ -84,40 +58,36 @@ class SourceService:
         self._storage = file_storage
         self._settings = settings or get_settings()
 
-    # ------------------------------------------------------------------
-    # Guard
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _assert_sources_mutable(document: Document) -> None:
-        if document.status in _LOCKED_STATUSES:
+        if document.status in _SOURCES_LOCKED_STATUSES:
             raise SourceLockError(
                 f"Нельзя изменить источники документа в статусе '{document.status.value}'. "
                 "Дождитесь завершения анализа или переведите документ обратно в черновик."
             )
 
-    # ------------------------------------------------------------------
-    # Internal: M2M attach helper
-    # ------------------------------------------------------------------
+    async def _target_document(
+        self, project_id: uuid.UUID, scope: SourceScopeVO, document_id: uuid.UUID | None
+    ) -> Document | None:
+        """Документ, к которому будет прикреплён новый источник (None для scope=project).
 
-    async def _attach_if_document_scope(
-        self,
-        source_id: uuid.UUID,
-        scope: SourceScopeVO,
-        document_id: uuid.UUID | None,
-    ) -> None:
-        """WARN-2: если scope=DOCUMENT и document_id задан — вставить M2M-запись.
-
-        Вызывается изнутри create_*_source после flush источника,
-        в рамках того же UoW (сессия ещё открыта).
+        Вызывается внутри открытого UoW. Документ должен принадлежать проекту
+        и допускать изменение источников.
         """
-        if scope is SourceScopeVO.DOCUMENT and document_id is not None:
-            await self._uow.sources.attach_to_document(source_id, document_id)
+        if scope is not SourceScopeVO.DOCUMENT:
+            return None
+        if document_id is None:
+            raise InvalidSourceScopeError("Для источника со scope=document нужен document_id")
+        document = await self._uow.documents.get_by_id(document_id)
+        if document is None or document.project_id != project_id:
+            raise DocumentNotFoundError(f"Документ {document_id} не найден в проекте {project_id}")
+        self._assert_sources_mutable(document)
+        return document
 
     async def attach_sources_to_document(
         self, document: Document, sources: list[Source]
     ) -> list[Source]:
-        """Прикрепить источники проекта к документу (M2M, повтор безопасен).
+        """Прикрепить источники проекта к документу (повтор безопасен).
 
         Источники должны быть уже проверены на принадлежность проекту документа
         (см. get_sources_for_project). Бросает SourceLockError, если документ
@@ -130,9 +100,23 @@ class SourceService:
             await self._uow.commit()
         return sources
 
-    # ------------------------------------------------------------------
-    # Create — note (P2: текст → MinIO как .txt)
-    # ------------------------------------------------------------------
+    async def create_url_source(
+        self,
+        project: Project,
+        name: str,
+        url: str,
+        scope: SourceScopeVO = SourceScopeVO.PROJECT,
+        document_id: uuid.UUID | None = None,
+    ) -> Source:
+        async with self._uow:
+            document = await self._target_document(project.id, scope, document_id)
+            source = await self._uow.sources.create_url(
+                project_id=project.id, name=name, url=url, scope=scope
+            )
+            if document is not None:
+                await self._uow.sources.attach_to_document(source.id, document.id)
+            await self._uow.commit()
+        return source
 
     async def create_note_source(
         self,
@@ -142,69 +126,17 @@ class SourceService:
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
         document_id: uuid.UUID | None = None,
     ) -> Source:
-        """Сохраняет текстовую заметку как .txt в MinIO.
-
-        FIX-6: storage.upload перенесён внутрь async with uow — если UoW
-        не открылся, cleanup не теряется. Весь процесс (upload → DB → M2M)
-        обёрнут в единый try/except для атомарного rollback MinIO.
-
-        WARN-2: при scope=DOCUMENT + document_id вставляет M2M-запись.
-        """
-        if len(text_content.encode()) > self._settings.max_upload_size_bytes:
-            raise FileTooLargeError(f"Текст превышает лимит {self._settings.max_upload_size_mb} МБ")
-
-        source_id = uuid.uuid4()
-        storage_key = f"projects/{project.id}/sources/{source_id}/note.txt"
-
-        try:
-            async with self._uow:
-                await self._storage.upload(
-                    storage_key,
-                    text_content.encode("utf-8"),
-                    "text/plain; charset=utf-8",
-                )
-                source = await self._uow.sources.create_with_id(
-                    source_id=source_id,
-                    project_id=project.id,
-                    name=name,
-                    source_type=SourceTypeVO.FILE,
-                    storage_key=storage_key,
-                    scope=scope,
-                )
-                await self._attach_if_document_scope(source.id, scope, document_id)
-                await self._uow.commit()
-        except Exception:
-            await self._storage.delete(storage_key)
-            raise
-        return source
-
-    # ------------------------------------------------------------------
-    # Create — url
-    # ------------------------------------------------------------------
-
-    async def create_url_source(
-        self,
-        project: Project,
-        name: str,
-        url: str,
-        scope: SourceScopeVO = SourceScopeVO.PROJECT,
-        document_id: uuid.UUID | None = None,
-    ) -> Source:
-        """WARN-2: при scope=DOCUMENT + document_id вставляет M2M-запись."""
-        async with self._uow:
-            source = await self._uow.sources.create_url(
-                project_id=project.id,
-                name=name,
-                url=url,
-                scope=scope,
-            )
-            await self._attach_if_document_scope(source.id, scope, document_id)
-            await self._uow.commit()
-        return source
-
-    # ------------------------------------------------------------------
-    # Create — file
-    # ------------------------------------------------------------------
+        """Текстовая заметка сохраняется как .txt-файл, тип источника — file."""
+        return await self._create_stored_source(
+            project,
+            name=name,
+            filename="note.txt",
+            content=text_content.encode("utf-8"),
+            content_type="text/plain; charset=utf-8",
+            scope=scope,
+            document_id=document_id,
+            too_large_message=f"Текст превышает лимит {self._settings.max_upload_size_mb} МБ",
+        )
 
     async def create_file_source(
         self,
@@ -216,21 +148,45 @@ class SourceService:
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
         document_id: uuid.UUID | None = None,
     ) -> Source:
-        """FIX-6b (review #4): storage.upload перенесён внутрь async with uow —
-        симметрично с create_note_source (FIX-6).
+        return await self._create_stored_source(
+            project,
+            name=name,
+            filename=filename,
+            content=content,
+            content_type=content_type,
+            scope=scope,
+            document_id=document_id,
+            too_large_message=f"Файл превышает лимит {self._settings.max_upload_size_mb} МБ",
+        )
 
-        Если uow.__aenter__ упадёт, except-блок гарантированно вызовет
-        storage.delete и не допустит MinIO orphan-объекта.
+    async def _create_stored_source(
+        self,
+        project: Project,
+        *,
+        name: str,
+        filename: str,
+        content: bytes,
+        content_type: str,
+        scope: SourceScopeVO,
+        document_id: uuid.UUID | None,
+        too_large_message: str,
+    ) -> Source:
+        """Загрузить содержимое в хранилище и записать источник в одной транзакции.
 
-        WARN-2: при scope=DOCUMENT + document_id вставляет M2M-запись.
+        Если запись в БД не удалась, загруженный объект удаляется, чтобы в хранилище
+        не оставалось файлов без владельца.
         """
         if len(content) > self._settings.max_upload_size_bytes:
-            raise FileTooLargeError(f"Файл превышает лимит {self._settings.max_upload_size_mb} МБ")
+            raise FileTooLargeError(too_large_message)
+
         source_id = uuid.uuid4()
-        storage_key = f"projects/{project.id}/sources/{source_id}/{filename}"
+        storage_key = f"projects/{project.id}/sources/{source_id}/{_storage_filename(filename)}"
+        uploaded = False
         try:
             async with self._uow:
+                document = await self._target_document(project.id, scope, document_id)
                 await self._storage.upload(storage_key, content, content_type)
+                uploaded = True
                 source = await self._uow.sources.create_with_id(
                     source_id=source_id,
                     project_id=project.id,
@@ -239,16 +195,14 @@ class SourceService:
                     storage_key=storage_key,
                     scope=scope,
                 )
-                await self._attach_if_document_scope(source.id, scope, document_id)
+                if document is not None:
+                    await self._uow.sources.attach_to_document(source.id, document.id)
                 await self._uow.commit()
         except Exception:
-            await self._storage.delete(storage_key)
+            if uploaded:
+                await self._storage.delete(storage_key)
             raise
         return source
-
-    # ------------------------------------------------------------------
-    # Read
-    # ------------------------------------------------------------------
 
     async def list_sources(
         self,
@@ -257,16 +211,14 @@ class SourceService:
         offset: int,
         scope: SourceScopeVO | None = None,
     ) -> tuple[list[Source], int]:
-        """R-5: опциональная фильтрация по scope передаётся в репозиторий."""
         async with self._uow:
             items = await self._uow.sources.list_by_project(
                 project_id, limit=limit, offset=offset, scope=scope
             )
-            total = await self._uow.sources.count_by_project(project_id)
+            total = await self._uow.sources.count_by_project(project_id, scope=scope)
         return items, total
 
     async def get_source(self, project_id: uuid.UUID, source_id: uuid.UUID) -> Source:
-        """Получить источник. Бросает SourceNotFoundError если не найден."""
         async with self._uow:
             source = await self._uow.sources.get_by_id(source_id)
         if source is None or source.project_id != project_id:
@@ -294,14 +246,7 @@ class SourceService:
         project_id: uuid.UUID,
         document_ids: list[uuid.UUID],
     ) -> dict[uuid.UUID, list[Source]]:
-        """I-1: батч-загрузка document-scope источников для списка документов.
-
-        FIX-1: репозиторий возвращает list[tuple[Source, document_id]];
-        группируем по document_id здесь, без обращения к src.document_id
-        (колонки нет — связь через M2M document_sources).
-
-        Возвращает {document_id: [Source, ...]} для маппинга в DocumentListItem.sources.
-        """
+        """Документные источники для набора документов: {document_id: [Source, ...]}."""
         if not document_ids:
             return {}
         async with self._uow:
@@ -311,37 +256,33 @@ class SourceService:
             result[doc_id].append(source)
         return dict(result)
 
-    # ------------------------------------------------------------------
-    # Delete
-    # ------------------------------------------------------------------
+    async def delete_source(self, project_id: uuid.UUID, source_id: uuid.UUID) -> None:
+        """Удалить источник проекта.
 
-    async def delete_source_with_guard(
-        self,
-        project_id: uuid.UUID,
-        source_id: uuid.UUID,
-        active_job_checker: _ActiveJobChecker | None = None,
-    ) -> None:
-        """Атомарное удаление источника с guard-проверкой активного job.
-
-        review #6 (TOCTOU fix): чтение document_id из M2M и проверка
-        active job объединены в один uow-блок — устраняет race condition
-        между get_primary_document_id и guard из отдельных uow-сессий.
-
-        Бросает SourceNotFoundError если источник не найден или
-        принадлежит другому проекту.
+        Бросает SourceNotFoundError, если источник не найден или чужой,
+        и SourceLockError, если он прикреплён к документу, который сейчас
+        анализируется или находится на ревью. Файл в хранилище удаляется
+        после фиксации транзакции; сбой удаления только логируется.
         """
         async with self._uow:
             source = await self._uow.sources.get_by_id(source_id)
             if source is None or source.project_id != project_id:
                 raise SourceNotFoundError(f"Источник {source_id} не найден в проекте {project_id}")
 
-            # review #6: получаем document_id и проверяем active job
-            # в рамках той же транзакции — нет TOCTOU.
-            document_id = await self._uow.sources.get_primary_document_id_for_source(source_id)
-            if document_id is not None and active_job_checker is not None:
-                await active_job_checker(document_id)
+            document_ids = await self._uow.sources.list_attached_document_ids(source_id)
+            for document in await self._uow.documents.get_many_by_ids(document_ids):
+                self._assert_sources_mutable(document)
 
-            if source.storage_key:
-                await self._storage.delete(source.storage_key)
-            await self._uow.sources.delete(source_id)
+            storage_key = source.storage_key
+            await self._uow.sources.delete(source)
             await self._uow.commit()
+
+        if storage_key:
+            try:
+                await self._storage.delete(storage_key)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Файл источника не удалён из хранилища",
+                    exc_info=True,
+                    extra={"source_id": str(source_id), "storage_key": storage_key},
+                )

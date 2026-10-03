@@ -85,6 +85,9 @@ class IDocumentRepository(ABC):
     ) -> Document: ...
 
     @abstractmethod
+    async def get_many_by_ids(self, document_ids: list[uuid.UUID]) -> list[Document]: ...
+
+    @abstractmethod
     async def update_status(self, document: Document, status: DocumentStatusVO) -> Document: ...
 
     @abstractmethod
@@ -159,8 +162,9 @@ class ISourceRepository(ABC):
     async def list_for_analysis(
         self, project_id: uuid.UUID, document_id: uuid.UUID
     ) -> list[Source]:
-        """Источники, по которым анализируется документ: базовые источники проекта
-        (scope=project) и прикреплённые к документу."""
+        """Источники, участвующие в анализе документа: базовые источники проекта
+        плюс прикреплённые к документу. Порядок стабильный (created_at, id).
+        """
         ...
 
     @abstractmethod
@@ -170,16 +174,12 @@ class ISourceRepository(ABC):
         limit: int,
         offset: int,
         scope: SourceScopeVO | None = None,
-    ) -> list[Source]:
-        """R-5: опциональная фильтрация по scope.
-
-        scope=None (по умолчанию) — все источники проекта.
-        scope=SourceScopeVO.PROJECT — только PROJECT-scope (для /sources эндпоинта).
-        """
-        ...
+    ) -> list[Source]: ...
 
     @abstractmethod
-    async def count_by_project(self, project_id: uuid.UUID) -> int: ...
+    async def count_by_project(
+        self, project_id: uuid.UUID, scope: SourceScopeVO | None = None
+    ) -> int: ...
 
     @abstractmethod
     async def list_by_document_ids(
@@ -187,38 +187,17 @@ class ISourceRepository(ABC):
         project_id: uuid.UUID,
         document_ids: list[uuid.UUID],
     ) -> list[tuple[Source, uuid.UUID]]:
-        """I-1 / FIX-1: батч-запрос document-scope источников через JOIN на document_sources.
-
-        Возвращает list[(Source, document_id)] — кортежи для группировки
-        в сервисном слое без обращения к несуществующей Source.document_id.
-        """
+        """Документные источники для набора документов в виде пар (source, document_id)."""
         ...
 
     @abstractmethod
-    async def get_primary_document_id_for_source(
-        self,
-        source_id: uuid.UUID,
-    ) -> uuid.UUID | None:
-        """FIX-review-4: вернуть первый document_id из M2M-таблицы document_sources.
-
-        Source не хранит document_id напрямую — связь через M2M.
-        None означает что источник project-scope (document_sources пуст: нет связей).
-
-        Используется в SourceService.get_primary_document_id() →
-        DELETE /sources/{id} шаг 2 — перед guard активных jobив.
-        """
+    async def list_attached_document_ids(self, source_id: uuid.UUID) -> list[uuid.UUID]:
+        """Документы, к которым прикреплён источник."""
         ...
 
     @abstractmethod
-    async def attach_to_document(
-        self,
-        source_id: uuid.UUID,
-        document_id: uuid.UUID,
-    ) -> None:
-        """WARN-2: вставить запись в document_sources без полного replace.
-
-        Идемпотентен: повторная вставка существующей пары — no-op (INSERT OR IGNORE).
-        """
+    async def attach_to_document(self, source_id: uuid.UUID, document_id: uuid.UUID) -> None:
+        """Прикрепить источник к документу; повторный вызов безопасен."""
         ...
 
     @abstractmethod
@@ -242,22 +221,7 @@ class ISourceRepository(ABC):
     ) -> Source: ...
 
     @abstractmethod
-    async def replace_document_sources(
-        self,
-        document_id: uuid.UUID,
-        sources: list[Source],
-    ) -> list[Source]: ...
-
-    # FIX-B1: delete(source_id) удалён — не реализован и не используется.
-    # Единственный актуальный путь удаления — delete_if_owned (атомарная
-    # проверка ownership + DELETE за один запрос, OPT-S2).
-
-    @abstractmethod
-    async def delete_if_owned(
-        self,
-        project_id: uuid.UUID,
-        source_id: uuid.UUID,
-    ) -> Source | None: ...
+    async def delete(self, source: Source) -> None: ...
 
 
 class ISuggestionRepository(ABC):
