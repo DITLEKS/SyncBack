@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import CheckConstraint, Column, DateTime, Enum, ForeignKey, String, func
+from sqlalchemy import CheckConstraint, Column, DateTime, Enum, ForeignKey, Index, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -21,6 +21,7 @@ class Source(Base):
             """,
             name="ck_sources_type_field_consistency",
         ),
+        Index("ix_sources_scope", "scope"),
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

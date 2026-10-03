@@ -106,6 +106,9 @@ jobs:
       - name: Apply migrations from scratch (fresh DB)
         run: alembic upgrade head
 
+      - name: Schema matches ORM models
+        run: alembic check
+
       - name: Verify alembic current == head
         run: |
           CURRENT=$(alembic current 2>&1)

@@ -1,17 +1,17 @@
 """
 Конфигурация Alembic для асинхронного SQLAlchemy-движка.
 
-ИСПРАВЛЕНО: по умолчанию Alembic выполняет все накопившиеся миграции в одной команде
-`upgrade head` в ОДНОЙ транзакции. Миграция 0002 делает
-`ALTER TYPE audit_action ADD VALUE 'download'`, а миграция 0003 сразу же использует
-это значение в CHECK CONSTRAINT. PostgreSQL требует, чтобы новое значение enum было
-закоммичено, прежде чем его можно использовать — без этого Postgres падает с
-`UnsafeNewEnumValueUsageError`, что делало `alembic upgrade head` на любой чистой БД
-полностью нерабочим. Теперь `transaction_per_migration=True` заставляет каждую
-миграцию коммититься отдельно, прежде чем начнётся следующая.
+Каждая миграция коммитится отдельно (transaction_per_migration): PostgreSQL
+не позволяет использовать новое значение enum в той же транзакции, где оно
+добавлено, а несколько ревизий делают ADD VALUE и тут же используют значение.
+
+Alembic нужен только адрес БД, поэтому читаем DATABASE_URL напрямую, не собирая
+полный Settings: в окружении миграций (CI, job migrate) нет и не должно быть
+JWT-секрета, адреса MinIO и прочих настроек приложения.
 """
 
 import asyncio
+import os
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -19,7 +19,6 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
-from app.core.config import get_settings
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.models import *  # noqa: F401,F403
 
@@ -30,8 +29,18 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.database_url)
+
+def _database_url() -> str:
+    url = os.environ.get("DATABASE_URL")
+    if url:
+        return url
+    # Локальный запуск без экспорта переменной: берём значение из .env, как делает приложение.
+    from app.core.config import get_settings  # noqa: PLC0415
+
+    return get_settings().database_url
+
+
+config.set_main_option("sqlalchemy.url", _database_url())
 
 
 def run_migrations_offline() -> None:
