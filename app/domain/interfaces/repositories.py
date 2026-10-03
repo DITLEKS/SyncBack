@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 from app.domain.interfaces.user_repository import IUserRepository  # noqa: F401
 from app.domain.value_objects import (
     AnalysisJobStatusVO,
+    DocumentFormatVO,
     DocumentStatusVO,
     SourceScopeVO,
     SuggestionStatusVO,
@@ -79,7 +80,7 @@ class IDocumentRepository(ABC):
         id: uuid.UUID,
         project_id: uuid.UUID,
         name: str,
-        format: Any,
+        format: DocumentFormatVO,
         storage_key: str,
         size_bytes: int,
     ) -> Document: ...

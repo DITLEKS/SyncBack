@@ -13,7 +13,6 @@ from collections import defaultdict
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
-from app.core.config import Settings, get_settings
 from app.domain.exceptions import (
     DocumentNotFoundError,
     FileTooLargeError,
@@ -24,6 +23,7 @@ from app.domain.exceptions import (
 from app.domain.interfaces.file_storage import FileStorage
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.lifecycle import DocumentLifecycle
+from app.domain.policies import UploadLimits
 from app.domain.value_objects import SourceScopeVO, SourceTypeVO
 
 if TYPE_CHECKING:
@@ -45,11 +45,11 @@ class SourceService:
         self,
         uow: IUnitOfWork,
         file_storage: FileStorage,
-        settings: Settings | None = None,
+        upload_limits: UploadLimits,
     ) -> None:
         self._uow = uow
         self._storage = file_storage
-        self._settings = settings or get_settings()
+        self._upload_limits = upload_limits
 
     @staticmethod
     def _assert_sources_mutable(document: Document) -> None:
@@ -128,7 +128,7 @@ class SourceService:
             content_type="text/plain; charset=utf-8",
             scope=scope,
             document_id=document_id,
-            too_large_message=f"Текст превышает лимит {self._settings.max_upload_size_mb} МБ",
+            too_large_message=f"Текст превышает лимит {self._upload_limits.max_size_mb} МБ",
         )
 
     async def create_file_source(
@@ -149,7 +149,7 @@ class SourceService:
             content_type=content_type,
             scope=scope,
             document_id=document_id,
-            too_large_message=f"Файл превышает лимит {self._settings.max_upload_size_mb} МБ",
+            too_large_message=f"Файл превышает лимит {self._upload_limits.max_size_mb} МБ",
         )
 
     async def _create_stored_source(
@@ -169,7 +169,7 @@ class SourceService:
         Если запись в БД не удалась, загруженный объект удаляется, чтобы в хранилище
         не оставалось файлов без владельца.
         """
-        if len(content) > self._settings.max_upload_size_bytes:
+        if self._upload_limits.exceeded_by(len(content)):
             raise FileTooLargeError(too_large_message)
 
         source_id = uuid.uuid4()

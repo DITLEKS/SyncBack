@@ -28,7 +28,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.domain.policies import UploadLimits
 from app.domain.services.source_service import SourceService
+
+_LIMITS = UploadLimits.from_megabytes(50)
 
 # ---------------------------------------------------------------------------
 # Вспомогательные функции
@@ -50,7 +53,7 @@ def _make_service(pairs: list[tuple]) -> SourceService:
     uow.__aexit__ = AsyncMock(return_value=False)
     uow.sources = repo
 
-    return SourceService(uow=uow, file_storage=AsyncMock())
+    return SourceService(uow=uow, file_storage=AsyncMock(), upload_limits=_LIMITS)
 
 
 def _src(name: str = "wiki") -> SimpleNamespace:
@@ -92,7 +95,7 @@ async def test_empty_document_ids_skips_repo() -> None:
     uow.__aexit__ = AsyncMock(return_value=False)
     uow.sources = repo
 
-    svc = SourceService(uow=uow, file_storage=AsyncMock())
+    svc = SourceService(uow=uow, file_storage=AsyncMock(), upload_limits=_LIMITS)
     result = await svc.list_sources_for_documents(PROJECT_ID, [])
 
     assert result == {}

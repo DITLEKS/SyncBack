@@ -29,10 +29,10 @@ from fastapi.security import OAuth2PasswordBearer
 from app.core.dependencies import get_jwt_handler, get_project_repository, get_user_repository
 from app.domain.exceptions import InvalidTokenError
 from app.domain.interfaces.repositories import IProjectRepository, IUserRepository
+from app.domain.interfaces.security import ITokenIssuer
 from app.infrastructure.db.models.enums import UserRole
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.user import User
-from app.infrastructure.security.jwt_handler import JWTHandler
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
@@ -40,7 +40,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 async def get_current_user(
     token: str = Depends(oauth2_scheme),
     user_repository: IUserRepository = Depends(get_user_repository),
-    jwt_handler: JWTHandler = Depends(get_jwt_handler),
+    jwt_handler: ITokenIssuer = Depends(get_jwt_handler),
 ) -> User:
     try:
         payload = jwt_handler.decode_access_token(token)

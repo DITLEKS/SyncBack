@@ -13,23 +13,26 @@ from app.domain.exceptions import (
     AccountTemporarilyLockedError,
     EmailAlreadyRegisteredError,
     InvalidCredentialsError,
+    InvalidTokenError,
 )
 from app.domain.interfaces.entities import UserProtocol
+from app.domain.interfaces.security import (
+    ILoginThrottle,
+    IPasswordHasher,
+    IRefreshTokenStore,
+    ITokenIssuer,
+)
 from app.domain.interfaces.unit_of_work import IUnitOfWork
-from app.infrastructure.security.jwt_handler import JWTHandler
-from app.infrastructure.security.login_rate_limiter import LoginRateLimiter
-from app.infrastructure.security.password_hasher import PasswordHasher
-from app.infrastructure.security.refresh_token_store import RefreshTokenStore
 
 
 class AuthService:
     def __init__(
         self,
         uow: IUnitOfWork,
-        password_hasher: PasswordHasher,
-        jwt_handler: JWTHandler,
-        rate_limiter: LoginRateLimiter,
-        refresh_store: RefreshTokenStore,
+        password_hasher: IPasswordHasher,
+        jwt_handler: ITokenIssuer,
+        rate_limiter: ILoginThrottle,
+        refresh_store: IRefreshTokenStore,
     ):
         self._uow = uow
         self._hasher = password_hasher
@@ -85,9 +88,9 @@ class AuthService:
         """Отозвать refresh-токен при явном logout."""
         try:
             payload = self._jwt.decode_refresh_token(refresh_token)
-            jti = payload.get("jti")
-            if jti:
-                await self._refresh_store.revoke(jti)
-        except Exception:
-            # Если токен уже истёк или невалиден — logout всё равно проходит.
-            pass
+        except InvalidTokenError:
+            # Просроченный или невалидный токен отзывать нечего — logout всё равно успешен.
+            return
+        jti = payload.get("jti")
+        if jti:
+            await self._refresh_store.revoke(jti)

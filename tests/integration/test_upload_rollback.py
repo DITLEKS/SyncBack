@@ -1,33 +1,33 @@
-"""
-ИСПРАВЛЕНО: test_source_upload_deletes_orphan_file_on_db_failure вызывал
-`create_file_source(project, "upload.txt", b"hello world", "text/plain")` — всего 4
-позиционных аргумента, хотя реальная сигнатура —
-`create_file_source(self, project, name, filename, content, content_type)` (5 аргументов
-после self). Тест падал с `TypeError: missing 1 required positional argument:
-'content_type'` ещё до того, как успевал проверить то, что должен был
-проверять (откат файла из MinIO при сбое записи в БД). Добавлен пропущенный
-аргумент name ("Test source") перед filename.
-"""
+"""Откат файла из хранилища, если запись в БД при загрузке не удалась."""
 
 import uuid
 from unittest.mock import AsyncMock
 
 import pytest
 
+from app.domain.policies import UploadLimits
 from app.domain.services.document_service import DocumentService
 from app.domain.services.source_service import SourceService
 from app.infrastructure.db.models.project import Project
-from app.infrastructure.db.repositories.document_repository import DocumentRepository
-from app.infrastructure.db.repositories.source_repository import SourceRepository
+from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
+from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 from app.infrastructure.storage.minio_storage import MinioStorage
+
+_LIMITS = UploadLimits.from_megabytes(50)
 
 
 @pytest.mark.asyncio
 async def test_document_upload_deletes_orphan_file_on_db_failure(
     db_session, minio_storage: MinioStorage, monkeypatch
 ):
-    repo = DocumentRepository(db_session)
-    service = DocumentService(repo, minio_storage)
+    uow = SqlAlchemyUnitOfWork(db_session)
+    service = DocumentService(
+        uow,
+        minio_storage,
+        parser_registry=DocumentParserRegistry(),
+        upload_limits=_LIMITS,
+        download_url_ttl_seconds=300,
+    )
     project = Project(
         id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
         name="rollback-project",
@@ -37,10 +37,10 @@ async def test_document_upload_deletes_orphan_file_on_db_failure(
     monkeypatch.setattr(
         "app.domain.services.document_service.uuid.uuid4", lambda: expected_document_id
     )
-    repo.create = AsyncMock(side_effect=Exception("DB create failed"))
+    uow.documents.create = AsyncMock(side_effect=Exception("DB create failed"))
 
     with pytest.raises(Exception, match="DB create failed"):
-        await service.upload_document(project, "document.txt", b"hello world", "text/plain")
+        await service.upload_document(project.id, "document.txt", b"hello world", "text/plain")
 
     storage_key = f"projects/{project.id}/documents/{expected_document_id}/document.txt"
     assert not await minio_storage.exists(storage_key)
@@ -50,8 +50,8 @@ async def test_document_upload_deletes_orphan_file_on_db_failure(
 async def test_source_upload_deletes_orphan_file_on_db_failure(
     db_session, minio_storage: MinioStorage, monkeypatch
 ):
-    repo = SourceRepository(db_session)
-    service = SourceService(repo, minio_storage)
+    uow = SqlAlchemyUnitOfWork(db_session)
+    service = SourceService(uow, minio_storage, upload_limits=_LIMITS)
     project = Project(
         id=uuid.UUID("44444444-4444-4444-4444-444444444444"),
         name="rollback-source-project",
@@ -59,7 +59,7 @@ async def test_source_upload_deletes_orphan_file_on_db_failure(
     )
     expected_source_id = uuid.UUID("66666666-6666-6666-6666-666666666666")
     monkeypatch.setattr("app.domain.services.source_service.uuid.uuid4", lambda: expected_source_id)
-    repo.create = AsyncMock(side_effect=Exception("DB create failed"))
+    uow.sources.create_with_id = AsyncMock(side_effect=Exception("DB create failed"))
 
     with pytest.raises(Exception, match="DB create failed"):
         await service.create_file_source(

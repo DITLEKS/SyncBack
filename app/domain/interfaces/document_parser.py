@@ -17,3 +17,9 @@ class ParsedDocument:
 
 class DocumentParser(Protocol):
     def parse(self, raw_bytes: bytes) -> ParsedDocument: ...
+
+
+class IDocumentParserRegistry(Protocol):
+    """Выбор парсера по имени файла. Неподдерживаемый формат → UnsupportedFormatError."""
+
+    def parse_by_filename(self, filename: str, raw_bytes: bytes) -> ParsedDocument: ...

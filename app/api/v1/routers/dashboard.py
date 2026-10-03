@@ -10,6 +10,7 @@ GET /dashboard/stats удалён — его данные вошли в GET /das
 """
 
 import uuid
+from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, status
 
@@ -33,7 +34,8 @@ async def get_dashboard(
     svc: DashboardService = Depends(get_dashboard_service),
 ) -> DashboardResponse:
     """Агрегаты + статистика виджетов рабочего пространства."""
-    return await svc.get_dashboard(current_user.id)
+    summary = await svc.get_dashboard(current_user.id)
+    return DashboardResponse(**asdict(summary))
 
 
 @router.get("/documents/attention", response_model=list[AttentionDocumentItem])

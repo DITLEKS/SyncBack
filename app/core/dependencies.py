@@ -41,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.domain.interfaces.dashboard_query_service import IDashboardQueryService
 from app.domain.interfaces.llm_client import LLMClient
+from app.domain.policies import UploadLimits
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.domain.services.audit_log_service import AuditLogService
 from app.domain.services.auth_service import AuthService
@@ -152,7 +153,8 @@ def get_document_service(
         uow=uow,
         file_storage=_get_minio_storage(),
         parser_registry=_get_parser_registry(),
-        settings=settings,
+        upload_limits=UploadLimits.from_megabytes(settings.max_upload_size_mb),
+        download_url_ttl_seconds=settings.minio_presigned_url_expire_seconds,
     )
 
 
@@ -163,7 +165,7 @@ def get_source_service(
     return SourceService(
         uow=uow,
         file_storage=_get_minio_storage(),
-        settings=settings,
+        upload_limits=UploadLimits.from_megabytes(settings.max_upload_size_mb),
     )
 
 

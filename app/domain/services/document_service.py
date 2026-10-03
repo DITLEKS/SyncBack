@@ -1,53 +1,33 @@
-"""
-Бизнес-логика документов.
+"""Бизнес-логика документов: загрузка, список, содержимое, удаление.
 
-Архитектурные правила:
-  - Зависит только от IUnitOfWork (порт), FileStorage (порт)
-    и DocumentParserRegistry (инфра-singleton без сайд-эффектов).
-  - Нет module-level импортов из app.infrastructure.db.*.
-  - Один uow.commit() на операцию.
-
-ИСПРАВЛЕНИЯ:
-- CRIT-3 / H-NEW-1: _FORMAT_MAP убран полностью. Вместо global-переменной
-  используется @functools.cache на _extension_to_format() — потокобезопасно,
-  не требует global statement, кэшируется автоматически.
-- HIGH-2: delete_document сначала commit(), потом MinIO.
-- M-3: upload_document принимает project_id: UUID вместо ORM-объекта Project.
-- H-5: ORM-объект Document создаётся внутри репозитория через фабричный метод.
-- BUG-FIX-1: upload_document передаёт name=filename (было title=filename).
-- BUG-FIX-2: list_all_for_user принимает outdated: bool и пробрасывает в репозиторий.
-- BUG-FIX-3: тип возврата list_all_for_user — tuple[list[dict], int].
-
-CRIT-NEW-2: list_documents передаёт PaginationParams-объект, а не limit/offset позиционно.
-LOW: exc_info=True добавлен в logger.warning внутри delete_document.
-FEAT: list_documents принимает status_filter: DocumentStatusVO | None.
-M-BLOCK: добавлен delete_document_by_id — удаление без предварительного SELECT.
-SOURCE-CLEANUP: delete_document и delete_document_by_id вызывают
-  uow.documents.delete_document_scoped_sources() до коммита, чтобы
-  источники scope=DOCUMENT не оставались orphan-строками в таблице sources.
+Зависит только от портов домена (IUnitOfWork, FileStorage, IDocumentParserRegistry)
+и ограничений UploadLimits; один uow.commit() на операцию.
 """
 
 from __future__ import annotations
 
-import functools
 import logging
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from app.core.config import Settings, get_settings
 from app.domain.exceptions import (
     DocumentNotFoundError,
     FileTooLargeError,
     InvalidDocumentStatusError,
     UnsupportedFileFormatError,
 )
-from app.domain.interfaces.document_parser import ParsedDocument
+from app.domain.interfaces.document_parser import IDocumentParserRegistry, ParsedDocument
 from app.domain.interfaces.file_storage import FileStorage
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.lifecycle import DocumentLifecycle
-from app.domain.value_objects import DocumentStatusVO, KeysetPage, PaginationParams
-from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
+from app.domain.policies import UploadLimits
+from app.domain.value_objects import (
+    DocumentFormatVO,
+    DocumentStatusVO,
+    KeysetPage,
+    PaginationParams,
+)
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models.document import Document
@@ -55,27 +35,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger("syncscribe.services.document")
 
 
-@functools.cache
-def _get_format_map() -> dict[str, object]:
-    """H-NEW-1: ленивый импорт + кэш через functools.cache (без global).
-
-    Первый вызов строит словарь и кэширует его навсегда в рамках процесса.
-    functools.cache потокобезопасен для read-after-first-write — GIL гарантирует
-    единственное создание словаря при первом вызове.
-    """
-    from app.infrastructure.db.models.enums import DocumentFormat  # noqa: PLC0415
-
-    return {
-        ".docx": DocumentFormat.DOCX,
-        ".txt": DocumentFormat.TXT,
-        ".md": DocumentFormat.MARKDOWN,
-        ".markdown": DocumentFormat.MARKDOWN,
-    }
+_FORMAT_BY_EXTENSION: dict[str, DocumentFormatVO] = {
+    ".docx": DocumentFormatVO.DOCX,
+    ".txt": DocumentFormatVO.TXT,
+    ".md": DocumentFormatVO.MARKDOWN,
+    ".markdown": DocumentFormatVO.MARKDOWN,
+}
 
 
-def _extension_to_format(suffix: str):
-    """Лукап: расширение → ORM DocumentFormat enum."""
-    fmt = _get_format_map().get(suffix)
+def _extension_to_format(suffix: str) -> DocumentFormatVO:
+    fmt = _FORMAT_BY_EXTENSION.get(suffix)
     if fmt is None:
         raise UnsupportedFileFormatError(
             f"Формат '{suffix or 'без расширения'}' не поддерживается. "
@@ -89,19 +58,21 @@ class DocumentService:
         self,
         uow: IUnitOfWork,
         file_storage: FileStorage,
-        parser_registry: DocumentParserRegistry | None = None,
-        settings: Settings | None = None,
+        parser_registry: IDocumentParserRegistry,
+        upload_limits: UploadLimits,
+        download_url_ttl_seconds: int,
     ):
         self._uow = uow
         self._storage = file_storage
-        self._parser_registry = parser_registry or DocumentParserRegistry()
-        self._settings = settings or get_settings()
+        self._parser_registry = parser_registry
+        self._upload_limits = upload_limits
+        self._download_url_ttl_seconds = download_url_ttl_seconds
 
     # ------------------------------------------------------------------
     # Upload
     # ------------------------------------------------------------------
 
-    def _resolve_format(self, filename: str):
+    def _resolve_format(self, filename: str) -> DocumentFormatVO:
         return _extension_to_format(Path(filename).suffix.lower())
 
     async def upload_document(
@@ -111,13 +82,9 @@ class DocumentService:
         content: bytes,
         content_type: str,
     ) -> Document:
-        """Загрузить документ в MinIO и создать запись в БД.
-
-        M-3: принимает project_id: UUID, а не ORM-объект Project.
-        BUG-FIX-1: передаёт name=filename (было title=filename).
-        """
-        if len(content) > self._settings.max_upload_size_bytes:
-            raise FileTooLargeError(f"Файл превышает лимит {self._settings.max_upload_size_mb} МБ")
+        """Загрузить документ в хранилище и создать запись в БД."""
+        if self._upload_limits.exceeded_by(len(content)):
+            raise FileTooLargeError(f"Файл превышает лимит {self._upload_limits.max_size_mb} МБ")
         document_format = self._resolve_format(filename)
         document_id = uuid.uuid4()
         storage_key = f"projects/{project_id}/documents/{document_id}/{filename}"
@@ -294,7 +261,7 @@ class DocumentService:
                 )
 
     async def get_download_url(self, document: Document) -> tuple[str, int]:
-        expires_in = self._settings.minio_presigned_url_expire_seconds
+        expires_in = self._download_url_ttl_seconds
         url = await self._storage.get_presigned_url(document.storage_key, expires_in)
         return url, expires_in
 
