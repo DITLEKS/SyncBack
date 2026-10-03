@@ -16,12 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.interfaces.repositories import ISourceRepository
 from app.domain.value_objects import SourceScopeVO, SourceTypeVO
 from app.infrastructure.db.models.document_source import document_sources
-from app.infrastructure.db.models.enums import SourceScope, SourceType
+from app.infrastructure.db.models.enums import SourceType
 from app.infrastructure.db.models.source import Source
-
-
-def _scope_to_orm(vo: SourceScopeVO):
-    return SourceScope(vo.value)
 
 
 def _type_to_orm(vo: SourceTypeVO):
@@ -56,7 +52,7 @@ class SourceRepository(ISourceRepository):
             .offset(offset)
         )
         if scope is not None:
-            stmt = stmt.where(Source.scope == _scope_to_orm(scope))
+            stmt = stmt.where(Source.scope == scope)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
@@ -70,7 +66,7 @@ class SourceRepository(ISourceRepository):
             select(Source)
             .where(
                 Source.project_id == project_id,
-                (Source.scope == SourceScope.PROJECT) | Source.id.in_(attached),
+                (Source.scope == SourceScopeVO.PROJECT) | Source.id.in_(attached),
             )
             .order_by(Source.created_at.asc(), Source.id.asc())
         )
@@ -82,7 +78,7 @@ class SourceRepository(ISourceRepository):
     ) -> int:
         stmt = select(func.count()).select_from(Source).where(Source.project_id == project_id)
         if scope is not None:
-            stmt = stmt.where(Source.scope == _scope_to_orm(scope))
+            stmt = stmt.where(Source.scope == scope)
         result = await self._session.execute(stmt)
         return result.scalar_one()
 
@@ -99,7 +95,7 @@ class SourceRepository(ISourceRepository):
             .where(
                 document_sources.c.document_id.in_(document_ids),
                 Source.project_id == project_id,
-                Source.scope == SourceScope.DOCUMENT,
+                Source.scope == SourceScopeVO.DOCUMENT,
             )
             .order_by(Source.created_at.desc(), Source.id.desc())
         )
@@ -137,7 +133,7 @@ class SourceRepository(ISourceRepository):
             name=name,
             type=_type_to_orm(source_type),
             storage_key=storage_key,
-            scope=_scope_to_orm(scope),
+            scope=scope,
         )
         self._session.add(source)
         await self._session.flush()
@@ -156,7 +152,7 @@ class SourceRepository(ISourceRepository):
             name=name,
             type=SourceType.URL,
             url=url,
-            scope=_scope_to_orm(scope),
+            scope=scope,
         )
         self._session.add(source)
         await self._session.flush()
