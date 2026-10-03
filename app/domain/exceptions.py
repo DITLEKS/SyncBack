@@ -176,8 +176,16 @@ class EmailAlreadyRegisteredError(DomainError):
     pass
 
 
+class InvalidPasswordError(DomainError):
+    """Пароль не удовлетворяет PasswordPolicy."""
+
+
 class AccountTemporarilyLockedError(DomainError):
-    pass
+    """Слишком много неудачных попыток входа; retry_after — секунд до следующей попытки."""
+
+    def __init__(self, retry_after: int) -> None:
+        super().__init__(f"Слишком много неудачных попыток входа, повторите через {retry_after} с")
+        self.retry_after = retry_after
 
 
 # ---------------------------------------------------------------------------
