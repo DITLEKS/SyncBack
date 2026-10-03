@@ -1,12 +1,9 @@
-"""
-Infrastructure enums — DB-level string enumerations.
+"""Перечисления уровня БД (типы PostgreSQL ENUM).
 
-FIX-review-7: DocumentStatus дополнен значениями ERROR и CANCELLED.
-    Требует миграции:
-      ALTER TYPE document_status ADD VALUE IF NOT EXISTS 'error';
-      ALTER TYPE document_status ADD VALUE IF NOT EXISTS 'cancelled';
-FIX-VO-1: синхронизировано с DocumentStatusVO (domain/value_objects.py) —
-    ранее домен не имел ERROR/CANCELLED, теперь оба слоя идентичны.
+Значения должны совпадать с доменными VO из app.domain.value_objects;
+репозитории переводят VO в эти типы. DocumentStatus пока содержит
+значения error и cancelled, которых нет в DocumentStatusVO: они остались
+в типе БД и будут убраны отдельной миграцией.
 """
 
 import enum
@@ -67,8 +64,3 @@ class AuditAction(enum.StrEnum):
     REOPEN = "reopen"
     RESET = "reset"  # синхронизировано с AuditActionVO
     DOWNLOAD = "download"
-
-
-class SourceScope(enum.StrEnum):
-    PROJECT = "project"
-    DOCUMENT = "document"

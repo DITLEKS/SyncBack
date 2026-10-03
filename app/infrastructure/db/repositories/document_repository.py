@@ -13,13 +13,13 @@ from app.domain.value_objects import (
     DocumentStatusVO,
     KeysetPage,
     PaginationParams,
+    SourceScopeVO,
 )
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.document_source import document_sources
 from app.infrastructure.db.models.enums import DocumentFormat, DocumentStatus, SuggestionStatus
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.source import Source
-from app.infrastructure.db.models.source_scope import SourceScope
 from app.infrastructure.db.models.suggestion import Suggestion
 
 _SORT_COLUMNS = frozenset({"created_at", "updated_at", "name"})
@@ -316,7 +316,7 @@ class DocumentRepository(IDocumentRepository):
             .scalar_subquery()
         )
         stmt = delete(Source).where(
-            Source.scope == SourceScope.DOCUMENT,
+            Source.scope == SourceScopeVO.DOCUMENT,
             Source.id.in_(subq),
         )
         result = await self._session.execute(stmt)

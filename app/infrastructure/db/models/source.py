@@ -4,9 +4,9 @@ from sqlalchemy import CheckConstraint, Column, DateTime, Enum, ForeignKey, Inde
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
+from app.domain.value_objects import SourceScopeVO
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.models.enums import SourceType
-from app.infrastructure.db.models.source_scope import SourceScope
 
 
 class Source(Base):
@@ -40,11 +40,13 @@ class Source(Base):
     url = Column(String(2048), nullable=True)
     # R-4: uploaded_at удалён — дублировал created_at (server_default=func.now()).
     # list_by_project теперь сортирует по created_at DESC.
+    # Область видимости — доменный VO напрямую: у scope нет инфраструктурных
+    # значений, которых не было бы в домене, поэтому отдельный ORM-enum не нужен.
     scope = Column(
-        Enum(SourceScope, name="source_scope", values_callable=lambda e: [m.value for m in e]),
+        Enum(SourceScopeVO, name="source_scope", values_callable=lambda e: [m.value for m in e]),
         nullable=False,
-        default=SourceScope.PROJECT,
-        server_default=SourceScope.PROJECT.value,
+        default=SourceScopeVO.PROJECT,
+        server_default=SourceScopeVO.PROJECT.value,
     )
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(

@@ -13,7 +13,6 @@ from app.infrastructure.db.models.document_source import document_sources  # noq
 from app.infrastructure.db.models.enums import (  # noqa: F401
     AnalysisJobStatus,
     DocumentStatus,
-    SourceScope,
     SuggestionStatus,
 )
 from app.infrastructure.db.models.project import Project  # noqa: F401
