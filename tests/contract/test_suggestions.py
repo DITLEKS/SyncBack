@@ -114,7 +114,7 @@ async def test_list_suggestions_with_status_filter(
     body = response.json()
     assert body["total"] == 3
     assert {s["id"] for s in body["items"]} == {str(i) for i in review.suggestion_ids}
-    assert body["items"][0]["original_text"] == "old 1"
+    assert {s["original_text"] for s in body["items"]} == {"old 1", "old 2", "old 3"}
 
     response = await client.get(
         review.base_url, params={"status": "accepted"}, headers=review.headers

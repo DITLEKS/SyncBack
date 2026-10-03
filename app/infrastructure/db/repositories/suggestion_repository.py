@@ -81,7 +81,7 @@ class SuggestionRepository(ISuggestionRepository):
         q = select(M).where(M.analysis_job_id == analysis_job_id)
         if status is not None:
             q = q.where(M.status == _status_to_orm(status))
-        q = q.order_by(M.created_at.asc()).offset(offset)
+        q = q.order_by(M.created_at.asc(), M.id.asc()).offset(offset)
         if limit is not None:
             q = q.limit(limit)
         result = await self._session.execute(q)
@@ -111,7 +111,7 @@ class SuggestionRepository(ISuggestionRepository):
             await self._session.execute(
                 select(M, func.count().over().label("total"))
                 .where(*where_clauses)
-                .order_by(M.created_at.asc())
+                .order_by(M.created_at.asc(), M.id.asc())
                 .limit(limit)
                 .offset(offset)
             )
@@ -161,7 +161,7 @@ class SuggestionRepository(ISuggestionRepository):
                 M.analysis_job_id == analysis_job_id,
                 M.status == _status_to_orm(status),
             )
-            .order_by(M.created_at.asc())
+            .order_by(M.created_at.asc(), M.id.asc())
         )
         return list(result.scalars().all())
 
@@ -184,7 +184,7 @@ class SuggestionRepository(ISuggestionRepository):
                 M.analysis_job_id == analysis_job_id,
                 M.status == _status_to_orm(status),
             )
-            .order_by(M.created_at.asc())
+            .order_by(M.created_at.asc(), M.id.asc())
             .limit(limit)
             .offset(offset)
         )
