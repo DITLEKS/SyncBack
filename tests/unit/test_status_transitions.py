@@ -21,6 +21,7 @@ from app.infrastructure.db.models.enums import (
     DocumentStatus,
     SuggestionStatus,
 )
+from tests.unit._fakes import FakeUnitOfWork
 
 
 def _make_document(status: DocumentStatus, job_id: uuid.UUID | None = None):
@@ -52,7 +53,7 @@ async def test_create_job_from_draft_succeeds():
     created_job = _make_job()
     job_repo.create_for_document.return_value = created_job
 
-    service = AnalysisJobService(job_repo, doc_repo)
+    service = AnalysisJobService(FakeUnitOfWork(jobs=job_repo, documents=doc_repo))
     result = await service.create_job(doc.project_id, doc.id)
     assert result is created_job
 
@@ -76,7 +77,7 @@ async def test_create_job_from_awaiting_approval_succeeds():
     created_job = _make_job()
     job_repo.create_for_document.return_value = created_job
 
-    service = AnalysisJobService(job_repo, doc_repo)
+    service = AnalysisJobService(FakeUnitOfWork(jobs=job_repo, documents=doc_repo))
     result = await service.create_job(doc.project_id, doc.id)
 
     # Должен был сбросить в DRAFT перед постановкой
@@ -85,16 +86,35 @@ async def test_create_job_from_awaiting_approval_succeeds():
 
 
 # ---------------------------------------------------------------------------
-# Запрос из READY — запрещён (конечный статус в MVP)
+# Повторный анализ из READY разрешён: документ возвращается в DRAFT
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_create_job_from_ready_raises():
+async def test_create_job_from_ready_resets_document_to_draft():
     doc = _make_document(DocumentStatus.READY)
     job_repo = AsyncMock()
     doc_repo = AsyncMock()
     doc_repo.get_by_id.return_value = doc
+    job_repo.get_active_by_document_id.return_value = None
+    created_job = _make_job()
+    job_repo.create_for_document.return_value = created_job
 
-    service = AnalysisJobService(job_repo, doc_repo)
+    service = AnalysisJobService(FakeUnitOfWork(jobs=job_repo, documents=doc_repo))
+    result = await service.create_job(doc.project_id, doc.id)
+    assert result is created_job
+    doc_repo.update_status.assert_awaited_once_with(doc, DocumentStatus.DRAFT)
+
+
+# ---------------------------------------------------------------------------
+# Запрос из IN_PROGRESS — запрещён
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_create_job_from_in_progress_raises():
+    doc = _make_document(DocumentStatus.IN_PROGRESS)
+    job_repo = AsyncMock()
+    doc_repo = AsyncMock()
+    doc_repo.get_by_id.return_value = doc
+
+    service = AnalysisJobService(FakeUnitOfWork(jobs=job_repo, documents=doc_repo))
     with pytest.raises(InvalidDocumentStatusError):
         await service.create_job(doc.project_id, doc.id)
 
@@ -109,7 +129,7 @@ async def test_create_job_from_in_progress_raises():
     doc_repo = AsyncMock()
     doc_repo.get_by_id.return_value = doc
 
-    service = AnalysisJobService(job_repo, doc_repo)
+    service = AnalysisJobService(FakeUnitOfWork(jobs=job_repo, documents=doc_repo))
     with pytest.raises(InvalidDocumentStatusError):
         await service.create_job(doc.project_id, doc.id)
 
@@ -128,8 +148,8 @@ async def test_finalize_review_moves_to_ready():
     ready_doc = _make_document(DocumentStatus.READY)
     doc_repo.update_status.return_value = ready_doc
 
-    service = SuggestionService(suggestion_repo, doc_repo)
-    result = await service.finalize_review(doc.project_id, doc.id)
+    service = SuggestionService(FakeUnitOfWork(suggestions=suggestion_repo, documents=doc_repo))
+    result = await service.finalize_review(doc.project_id, doc.id, uuid.uuid4())
     doc_repo.update_status.assert_called_once_with(doc, DocumentStatus.READY)
     assert result is ready_doc
 
@@ -146,9 +166,9 @@ async def test_finalize_review_blocked_when_pending_exist():
     doc_repo.get_by_id.return_value = doc
     suggestion_repo.count_by_analysis_job_and_status.return_value = 3  # есть PENDING
 
-    service = SuggestionService(suggestion_repo, doc_repo)
+    service = SuggestionService(FakeUnitOfWork(suggestions=suggestion_repo, documents=doc_repo))
     with pytest.raises(ReviewNotCompleteError):
-        await service.finalize_review(doc.project_id, doc.id)
+        await service.finalize_review(doc.project_id, doc.id, uuid.uuid4())
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +186,6 @@ async def test_finalize_review_allowed_when_all_rejected():
     ready_doc = _make_document(DocumentStatus.READY)
     doc_repo.update_status.return_value = ready_doc
 
-    service = SuggestionService(suggestion_repo, doc_repo)
-    result = await service.finalize_review(doc.project_id, doc.id)
+    service = SuggestionService(FakeUnitOfWork(suggestions=suggestion_repo, documents=doc_repo))
+    result = await service.finalize_review(doc.project_id, doc.id, uuid.uuid4())
     assert result is ready_doc

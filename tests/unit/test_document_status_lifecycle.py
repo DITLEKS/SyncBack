@@ -12,16 +12,17 @@ from app.domain.exceptions import (
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.domain.services.suggestion_service import SuggestionService
 from app.infrastructure.db.models.enums import DocumentStatus
+from tests.unit._fakes import FakeUnitOfWork
 
 
 @pytest.mark.asyncio
-async def test_analysis_requires_draft_document():
+async def test_analysis_blocked_while_in_progress():
     document = SimpleNamespace(
-        id=uuid.uuid4(), project_id=uuid.uuid4(), status=DocumentStatus.READY
+        id=uuid.uuid4(), project_id=uuid.uuid4(), status=DocumentStatus.IN_PROGRESS
     )
     documents = SimpleNamespace(get_by_id=AsyncMock(return_value=document))
     jobs = SimpleNamespace(get_active_by_document_id=AsyncMock())
-    service = AnalysisJobService(jobs, documents)
+    service = AnalysisJobService(FakeUnitOfWork(jobs=jobs, documents=documents))
     with pytest.raises(InvalidDocumentStatusError):
         await service.create_job(document.project_id, document.id)
 
@@ -33,7 +34,7 @@ async def test_second_active_analysis_is_rejected():
     )
     documents = SimpleNamespace(get_by_id=AsyncMock(return_value=document))
     jobs = SimpleNamespace(get_active_by_document_id=AsyncMock(return_value=object()))
-    service = AnalysisJobService(jobs, documents)
+    service = AnalysisJobService(FakeUnitOfWork(jobs=jobs, documents=documents))
     with pytest.raises(AnalysisAlreadyRunningError):
         await service.create_job(document.project_id, document.id)
 
@@ -50,9 +51,9 @@ async def test_review_cannot_finalize_with_pending_suggestions():
         get_by_id=AsyncMock(return_value=document), update_status=AsyncMock()
     )
     suggestions = SimpleNamespace(count_by_analysis_job_and_status=AsyncMock(return_value=2))
-    service = SuggestionService(suggestions, documents)
+    service = SuggestionService(FakeUnitOfWork(suggestions=suggestions, documents=documents))
     with pytest.raises(ReviewNotCompleteError):
-        await service.finalize_review(document.project_id, document.id)
+        await service.finalize_review(document.project_id, document.id, uuid.uuid4())
 
 
 @pytest.mark.asyncio
@@ -68,7 +69,7 @@ async def test_review_finalization_marks_document_ready():
         get_by_id=AsyncMock(return_value=document), update_status=AsyncMock(return_value=ready)
     )
     suggestions = SimpleNamespace(count_by_analysis_job_and_status=AsyncMock(return_value=0))
-    service = SuggestionService(suggestions, documents)
-    result = await service.finalize_review(document.project_id, document.id)
+    service = SuggestionService(FakeUnitOfWork(suggestions=suggestions, documents=documents))
+    result = await service.finalize_review(document.project_id, document.id, uuid.uuid4())
     assert result.status == DocumentStatus.READY
     documents.update_status.assert_awaited_once_with(document, DocumentStatus.READY)

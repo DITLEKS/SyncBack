@@ -18,6 +18,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.domain.services.document_service import DocumentService
+from app.domain.value_objects import PaginationParams
+from tests.unit._fakes import FakeUnitOfWork
 
 
 def _make_service() -> tuple[DocumentService, AsyncMock]:
@@ -25,10 +27,7 @@ def _make_service() -> tuple[DocumentService, AsyncMock]:
     repo = AsyncMock()
     repo.list_all_for_user.return_value = ([], 0)
     storage = AsyncMock()
-    svc = DocumentService(
-        document_repository=repo,
-        file_storage=storage,
-    )
+    svc = DocumentService(FakeUnitOfWork(documents=repo), storage)
     return svc, repo
 
 
@@ -46,7 +45,7 @@ def _make_doc_row(
         size_bytes=1024,
         status="draft",
         current_analysis_job_id=None,
-        created_at=now,
+        uploaded_at=now,
         updated_at=now,
     )
     return {
@@ -65,7 +64,9 @@ async def test_list_all_for_user_delegates_to_repo() -> None:
     svc, repo = _make_service()
     owner_id = uuid.uuid4()
 
-    items, total = await svc.list_all_for_user(owner_id, limit=10, offset=0)
+    items, total = await svc.list_all_for_user(
+        owner_id, pagination=PaginationParams(limit=10, offset=0)
+    )
 
     repo.list_all_for_user.assert_called_once()
     call_kwargs = repo.list_all_for_user.call_args
@@ -75,14 +76,15 @@ async def test_list_all_for_user_delegates_to_repo() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_all_for_user_caps_limit() -> None:
-    """Значение limit не должно превышать 200 на уровне сервиса."""
+async def test_list_all_for_user_default_pagination() -> None:
+    """Без pagination сервис запрашивает первую страницу разумного размера."""
     svc, repo = _make_service()
 
-    await svc.list_all_for_user(uuid.uuid4(), limit=9999, offset=0)
+    await svc.list_all_for_user(uuid.uuid4())
 
     call_kwargs = repo.list_all_for_user.call_args.kwargs
-    assert call_kwargs["limit"] <= 200
+    assert call_kwargs["offset"] == 0
+    assert 0 < call_kwargs["limit"] <= 200
 
 
 @pytest.mark.asyncio
@@ -92,7 +94,9 @@ async def test_list_all_for_user_row_shape() -> None:
     row = _make_doc_row()
     repo.list_all_for_user.return_value = ([row], 1)
 
-    items, total = await svc.list_all_for_user(uuid.uuid4(), limit=10, offset=0)
+    items, total = await svc.list_all_for_user(
+        uuid.uuid4(), pagination=PaginationParams(limit=10, offset=0)
+    )
 
     assert total == 1
     assert len(items) == 1
@@ -104,7 +108,7 @@ async def test_list_all_for_user_row_shape() -> None:
     assert hasattr(r["document"], "format")
     assert hasattr(r["document"], "size_bytes")
     assert hasattr(r["document"], "status")
-    assert hasattr(r["document"], "created_at")
+    assert hasattr(r["document"], "uploaded_at")
     assert hasattr(r["document"], "updated_at")
     assert "project_name" in r
     assert "suggestions_total" in r

@@ -18,11 +18,13 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.api.deps import get_current_user
+from app.core.dependencies import get_document_service, get_source_service
 from app.main import app
 
 # ---------------------------------------------------------------------------
@@ -60,7 +62,7 @@ def _doc(
         size_bytes=1024,
         status="draft",
         current_analysis_job_id=None,
-        created_at=now,
+        uploaded_at=now,
         updated_at=now,
     )
 
@@ -91,28 +93,25 @@ def _source(name: str = "wiki", src_type: str = "url") -> SimpleNamespace:
 
 @pytest.fixture()
 def mock_current_user():
-    with patch("app.api.deps.get_current_user", return_value=_user()):
-        yield
+    app.dependency_overrides[get_current_user] = _user
+    yield
+    app.dependency_overrides.pop(get_current_user, None)
 
 
 @pytest.fixture()
 def mock_doc_svc():
     svc = AsyncMock()
-    with patch(
-        "app.core.dependencies.get_document_service",
-        return_value=svc,
-    ):
-        yield svc
+    app.dependency_overrides[get_document_service] = lambda: svc
+    yield svc
+    app.dependency_overrides.pop(get_document_service, None)
 
 
 @pytest.fixture()
 def mock_src_svc():
     svc = AsyncMock()
-    with patch(
-        "app.core.dependencies.get_source_service",
-        return_value=svc,
-    ):
-        yield svc
+    app.dependency_overrides[get_source_service] = lambda: svc
+    yield svc
+    app.dependency_overrides.pop(get_source_service, None)
 
 
 # ---------------------------------------------------------------------------

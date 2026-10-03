@@ -1,36 +1,26 @@
-"""
-P0-11: Тесты GET /api/v1/system/capabilities.
-"""
+"""GET /api/v1/system/capabilities: публичный контракт для фронтенда."""
 
 import pytest
 
 
 @pytest.mark.anyio
-async def test_capabilities_returns_200(client):
+async def test_capabilities_returns_200_without_auth(client):
     resp = await client.get("/api/v1/system/capabilities")
     assert resp.status_code == 200
 
 
 @pytest.mark.anyio
-async def test_capabilities_contains_required_fields(client):
-    resp = await client.get("/api/v1/system/capabilities")
-    data = resp.json()
-    assert "supported_formats" in data
-    assert "unsupported_formats" in data
-    assert "max_file_size_mb" in data
+async def test_capabilities_contains_required_sections(client):
+    data = (await client.get("/api/v1/system/capabilities")).json()
+    assert {"upload", "analysis", "review", "export"} <= data.keys()
+    assert {"max_size_mb", "max_size_bytes", "supported_formats", "supported_mime_types"} <= data[
+        "upload"
+    ].keys()
 
 
 @pytest.mark.anyio
 async def test_capabilities_doc_is_unsupported(client):
-    resp = await client.get("/api/v1/system/capabilities")
-    data = resp.json()
-    assert "doc" in data["unsupported_formats"]
-    assert "doc" not in data["supported_formats"]
-
-
-@pytest.mark.anyio
-async def test_capabilities_no_auth_required(client):
-    """capabilities должен работать без Authorization header."""
-    resp = await client.get("/api/v1/system/capabilities")
-    assert resp.status_code != 401
-    assert resp.status_code != 403
+    """Старый .doc парсер не читает, фронт не должен предлагать его к загрузке."""
+    data = (await client.get("/api/v1/system/capabilities")).json()
+    assert "doc" not in data["upload"]["supported_formats"]
+    assert "docx" in data["upload"]["supported_formats"]
