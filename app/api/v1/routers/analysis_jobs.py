@@ -29,8 +29,6 @@ REFACTOR: dispatch run_analysis_job делегирован в service.dispatch_j
   роутер не импортирует Celery-задачи напрямую.
   Deprecated POST /{job_id}/cancel удалён (фронт не подключён).
 
-review #7: добавлен logger.warning при поглощении ошибки dispatch в
-  start_analysis_job — потеря диагностики при сбое очереди устранена.
 """
 
 import logging
@@ -109,8 +107,8 @@ async def start_analysis_job(
                 )
             return _job_response(existing, status.HTTP_200_OK)
 
-    # P0-9 (review #2): повторный анализ документа в статусе READY/ERROR/CANCELLED
-    # требует явного подтверждения через force=true.
+    # Повторный анализ готового документа сбрасывает результаты ревью,
+    # поэтому требует явного подтверждения через force=true.
     try:
         needs_force = await service.check_document_needs_force_confirm(project.id, document_id)
     except DocumentNotFoundError as exc:
@@ -132,18 +130,9 @@ async def start_analysis_job(
     except (AnalysisAlreadyRunningError, InvalidDocumentStatusError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    # REFACTOR: dispatch делегирован в сервис — роутер не знает о Celery.
-    # review #7: явный лог при поглощении ошибки dispatch — потеря диагностики устранена.
-    try:
-        job = await service.dispatch_job(job)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Не удалось задиспатчить analysis job — очередь недоступна",
-            exc_info=True,
-            extra={"job_id": str(job.id), "document_id": str(document_id)},
-        )
-        job = await service.mark_job_queue_unavailable(job, str(exc))
-
+    # Сбой очереди не является ошибкой запроса: сервис вернёт задачу в статусе
+    # failed с кодом QUEUE_UNAVAILABLE, и клиент увидит причину в ответе.
+    job = await service.dispatch_job(job)
     return _job_response(job)
 
 

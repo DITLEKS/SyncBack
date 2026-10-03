@@ -72,9 +72,9 @@ async def get_allowed_project(
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Проект не найден")
 
+    # Чужой проект неотличим от несуществующего: иначе по коду ответа можно
+    # перебирать идентификаторы.
     if current_user.role != UserRole.ADMIN and project.owner_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к этому проекту"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Проект не найден")
 
     return project

@@ -17,13 +17,6 @@ from app.infrastructure.db.models.source import Source
 from app.infrastructure.db.models.source_scope import SourceScope
 from app.infrastructure.db.models.suggestion import Suggestion
 
-_ANALYZABLE_STATUSES: frozenset[DocumentStatusVO] = frozenset(
-    {
-        DocumentStatusVO.DRAFT,
-        DocumentStatusVO.AWAITING_APPROVAL,
-    }
-)
-
 _SORT_COLUMNS = frozenset({"created_at", "updated_at", "name"})
 
 
@@ -108,16 +101,18 @@ class DocumentRepository(IDocumentRepository):
         result = await self._session.execute(q)
         return result.scalar_one()
 
-    async def list_analyzable_for_project(
-        self,
-        project_id: uuid.UUID,
+    async def list_by_statuses(
+        self, project_id: uuid.UUID, statuses: frozenset[DocumentStatusVO]
     ) -> list[Document]:
-        analyzable_orm = tuple(_status_to_orm(s) for s in _ANALYZABLE_STATUSES)
+        if not statuses:
+            return []
         result = await self._session.execute(
-            select(Document).where(
+            select(Document)
+            .where(
                 Document.project_id == project_id,
-                Document.status.in_(analyzable_orm),
+                Document.status.in_(tuple(_status_to_orm(s) for s in statuses)),
             )
+            .order_by(Document.created_at.asc(), Document.id.asc())
         )
         return list(result.scalars().all())
 

@@ -21,7 +21,8 @@ from redis.asyncio import Redis
 from app.core.config import get_settings
 from app.domain.exceptions import DocumentParseError
 from app.domain.interfaces.source_connector import SourceKind, SourceRef
-from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO, SuggestionStatusVO
+from app.domain.lifecycle import AnalysisJobLifecycle, DocumentLifecycle
+from app.domain.value_objects import AnalysisJobStatusVO, SuggestionStatusVO
 from app.infrastructure.db.session import isolated_uow
 from app.infrastructure.llm.factory import get_llm_client
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
@@ -38,15 +39,6 @@ _PARSED_DOC_TTL_SECONDS = 3600
 
 # Точка подмены в тестах: фабрика UoW над изолированным подключением.
 uow_factory = isolated_uow
-
-_TERMINAL_JOB_STATUSES = frozenset(
-    {
-        AnalysisJobStatusVO.SUCCESS,
-        AnalysisJobStatusVO.PARTIAL_SUCCESS,
-        AnalysisJobStatusVO.FAILED,
-        AnalysisJobStatusVO.CANCELLED,
-    }
-)
 
 
 def _run_async(coro):
@@ -177,8 +169,11 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
         if job is None:
             logger.error("process_source: job не найден", extra={"job_id": job_id})
             return _failed(source_id, "JOB_NOT_FOUND", "Задача анализа не найдена")
-        if job.status == AnalysisJobStatusVO.CANCELLED:
+        # Первый источник переводит задачу из очереди в обработку; если задачу
+        # уже завершили (например, отменили), работать не над чем.
+        if not await uow.jobs.mark_processing_if_active(job_uuid):
             return {"source_id": source_id, "status": "cancelled"}
+        await uow.commit()
 
         source = await uow.sources.get_by_id(uuid.UUID(source_id))
         if source is None:
@@ -210,7 +205,7 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
     async with uow_factory() as uow:
         job = await uow.jobs.get_by_id(job_uuid)
         # Пока шла генерация, задачу могли отменить — тогда правки не сохраняем.
-        if job is None or job.status == AnalysisJobStatusVO.CANCELLED:
+        if job is None or not AnalysisJobLifecycle.is_active(job.status):
             return {"source_id": source_id, "status": "cancelled"}
         await uow.suggestions.bulk_create(suggestions)
         await uow.commit()
@@ -233,7 +228,7 @@ async def _finalize(results: list[dict[str, Any]], job_id: str) -> None:
         if job is None:
             logger.error("finalize: job не найден", extra={"job_id": job_id})
             return
-        if job.status in _TERMINAL_JOB_STATUSES:
+        if AnalysisJobLifecycle.is_terminal(job.status):
             # Задачу уже завершили (например, отменили через API) — результат воркера не важнее.
             logger.info(
                 "finalize: задача уже завершена",
@@ -246,28 +241,35 @@ async def _finalize(results: list[dict[str, Any]], job_id: str) -> None:
             logger.error("finalize: документ не найден", extra={"job_id": job_id})
             return
 
+        error_code: str | None = None
+        error_message: str | None = None
         if cancelled:
-            job_status, doc_status = AnalysisJobStatusVO.CANCELLED, DocumentStatusVO.DRAFT
+            job_status = AnalysisJobStatusVO.CANCELLED
             error_code, error_message = "ANALYSIS_CANCELLED", "Анализ отменён"
         elif failed and not succeeded:
-            job_status, doc_status = AnalysisJobStatusVO.FAILED, DocumentStatusVO.DRAFT
+            job_status = AnalysisJobStatusVO.FAILED
             error_code = failed[0].get("error_code") or "GENERATION_ERROR"
             error_message = _join_errors(failed)
+        elif failed:
+            job_status = AnalysisJobStatusVO.PARTIAL_SUCCESS
+            error_code, error_message = "PARTIAL_FAILURE", _join_errors(failed)
         else:
-            pending = await uow.suggestions.count_by_analysis_job_and_status(
-                job.id, SuggestionStatusVO.PENDING
-            )
-            doc_status = DocumentStatusVO.AWAITING_APPROVAL if pending else DocumentStatusVO.READY
-            if failed:
-                job_status = AnalysisJobStatusVO.PARTIAL_SUCCESS
-                error_code, error_message = "PARTIAL_FAILURE", _join_errors(failed)
-            else:
-                job_status, error_code, error_message = AnalysisJobStatusVO.SUCCESS, None, None
+            job_status = AnalysisJobStatusVO.SUCCESS
 
-        job = await uow.jobs.update_status(job, job_status, error_code, error_message)
-        job.partial_success = job_status == AnalysisJobStatusVO.PARTIAL_SUCCESS
+        pending = await uow.suggestions.count_by_analysis_job_and_status(
+            job.id, SuggestionStatusVO.PENDING
+        )
+        job = await uow.jobs.update_status(
+            job, AnalysisJobLifecycle.transition(job.status, job_status), error_code, error_message
+        )
+        job.partial_success = job_status is AnalysisJobStatusVO.PARTIAL_SUCCESS
         if document.current_analysis_job_id == job.id:
-            await uow.documents.update_status(document, doc_status)
+            doc_status = AnalysisJobLifecycle.document_status_for(
+                job_status, has_pending_suggestions=pending > 0
+            )
+            await uow.documents.update_status(
+                document, DocumentLifecycle.transition(document.status, doc_status)
+            )
         await uow.commit()
 
 

@@ -30,6 +30,7 @@ from app.domain.exceptions import (
     DocumentNotFoundError,
     DocumentParseError,
     FileTooLargeError,
+    InvalidDocumentStatusError,
     SourceLockError,
     SourceNotFoundError,
     UnsupportedExportFormatError,
@@ -163,6 +164,8 @@ async def delete_document(
         await document_service.delete_document_by_id(project.id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except InvalidDocumentStatusError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @router.get("/{document_id}/content", response_model=DocumentContentResponse)
@@ -263,6 +266,8 @@ async def export_document(
         )
     except UnsupportedExportFormatError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except InvalidDocumentStatusError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     await _log_download(audit_log_service, current_user.id, document.id)
     return Response(
         content=content,

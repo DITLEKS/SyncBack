@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+import uuid
+
 import fakeredis.aioredis
 import pytest
 import pytest_asyncio
@@ -17,9 +19,12 @@ from sqlalchemy.pool import StaticPool
 
 import app.core.dependencies as dependencies
 import app.infrastructure.db.models  # noqa: F401
+from app.domain.value_objects import DocumentStatusVO
 from app.core.dependencies import get_login_rate_limiter, get_refresh_token_store, get_settings
 from app.core.limiter import limiter
 from app.infrastructure.db.base import Base
+from app.infrastructure.db.models.document import Document
+from app.infrastructure.db.models.enums import DocumentStatus
 from app.infrastructure.db.session import get_db_session
 from app.infrastructure.security.login_rate_limiter import LoginRateLimiter
 from app.infrastructure.security.refresh_token_store import RefreshTokenStore
@@ -127,3 +132,14 @@ async def upload_document(
     )
     assert response.status_code == 201, response.text
     return response.json()
+
+
+async def set_document_status(
+    sessionmaker: async_sessionmaker[AsyncSession], document_id: str, status: DocumentStatusVO
+) -> None:
+    """Перевести документ в нужный статус напрямую в БД, минуя жизненный цикл."""
+    async with sessionmaker() as session:
+        document = await session.get(Document, uuid.UUID(document_id))
+        assert document is not None
+        document.status = DocumentStatus(status.value)
+        await session.commit()

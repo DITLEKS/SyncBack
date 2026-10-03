@@ -23,7 +23,8 @@ from app.domain.exceptions import (
 )
 from app.domain.interfaces.file_storage import FileStorage
 from app.domain.interfaces.unit_of_work import IUnitOfWork
-from app.domain.value_objects import DocumentStatusVO, SourceScopeVO, SourceTypeVO
+from app.domain.lifecycle import DocumentLifecycle
+from app.domain.value_objects import SourceScopeVO, SourceTypeVO
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models.document import Document
@@ -31,14 +32,6 @@ if TYPE_CHECKING:
     from app.infrastructure.db.models.source import Source
 
 logger = logging.getLogger("syncscribe.sources")
-
-# Источники документа заморожены, пока идёт анализ или ревью его результатов:
-# иначе набор источников разойдётся с тем, по которому получены правки.
-# ERROR и CANCELLED не блокируют, чтобы можно было убрать сломанный источник
-# перед повторным запуском.
-_SOURCES_LOCKED_STATUSES: frozenset[DocumentStatusVO] = frozenset(
-    {DocumentStatusVO.IN_PROGRESS, DocumentStatusVO.AWAITING_APPROVAL}
-)
 
 
 def _storage_filename(filename: str) -> str:
@@ -60,7 +53,7 @@ class SourceService:
 
     @staticmethod
     def _assert_sources_mutable(document: Document) -> None:
-        if document.status in _SOURCES_LOCKED_STATUSES:
+        if not DocumentLifecycle.can_edit_sources(document.status):
             raise SourceLockError(
                 f"Нельзя изменить источники документа в статусе '{document.status.value}'. "
                 "Дождитесь завершения анализа или переведите документ обратно в черновик."

@@ -39,11 +39,13 @@ from app.core.config import Settings, get_settings
 from app.domain.exceptions import (
     DocumentNotFoundError,
     FileTooLargeError,
+    InvalidDocumentStatusError,
     UnsupportedFileFormatError,
 )
 from app.domain.interfaces.document_parser import ParsedDocument
 from app.domain.interfaces.file_storage import FileStorage
 from app.domain.interfaces.unit_of_work import IUnitOfWork
+from app.domain.lifecycle import DocumentLifecycle
 from app.domain.value_objects import DocumentStatusVO, KeysetPage, PaginationParams
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 
@@ -244,7 +246,7 @@ class DocumentService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
     ) -> None:
-        """M-BLOCK: удалить документ без предварительного SELECT.
+        """Удалить документ проекта вместе с его собственными источниками.
 
         Порядок операций внутри транзакции:
           1. delete_document_scoped_sources — удаляем orphan-источники scope=DOCUMENT
@@ -254,9 +256,19 @@ class DocumentService:
           3. commit() — единственный коммит на операцию.
         После коммита — best-effort удаление файлов из MinIO.
 
-        Если ни одна строка не удалена — бросает DocumentNotFoundError (404).
+        DocumentNotFoundError — документа нет в проекте;
+        InvalidDocumentStatusError — документ сейчас анализируется.
         """
         async with self._uow:
+            document = await self._uow.documents.get_by_id(document_id)
+            if document is None or document.project_id != project_id:
+                raise DocumentNotFoundError(
+                    f"Документ {document_id} не найден в проекте {project_id}"
+                )
+            if not DocumentLifecycle.can_delete(document.status):
+                raise InvalidDocumentStatusError(
+                    "Нельзя удалить документ, пока идёт анализ. Сначала отмените задачу."
+                )
             await self._uow.documents.delete_document_scoped_sources(document_id)
             deleted = await self._uow.documents.delete_by_id(
                 document_id=document_id,

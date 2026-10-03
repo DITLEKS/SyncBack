@@ -256,7 +256,8 @@ async def test_delete_source_removes_file_and_is_scoped_to_project(
 
     other_headers = await register_and_login(client, email="intruder@example.com")
     response = await client.delete(f"{base}/{note['id']}", headers=other_headers)
-    assert response.status_code == 403
+    assert response.status_code == 404
+    assert key in file_storage.files
 
     assert (await client.delete(f"{base}/{note['id']}", headers=headers)).status_code == 204
     assert key not in file_storage.files

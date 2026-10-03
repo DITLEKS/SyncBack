@@ -28,6 +28,7 @@ from app.domain.exceptions import (
 from app.domain.interfaces.document_exporter import AppliedChange
 from app.domain.interfaces.entities import DocumentProtocol, SuggestionProtocol
 from app.domain.interfaces.unit_of_work import IUnitOfWork
+from app.domain.lifecycle import DocumentLifecycle
 from app.domain.value_objects import (
     DocumentStatusVO,
     PaginationParams,
@@ -118,7 +119,7 @@ class SuggestionService:
             ) from err
 
     def _assert_awaiting_approval(self, document: DocumentProtocol) -> None:
-        if document.status != DocumentStatusVO.AWAITING_APPROVAL:
+        if not DocumentLifecycle.can_review(document.status):
             raise InvalidDocumentStatusError(
                 "Решения по правкам доступны только в статусе 'awaiting_approval'"
             )
@@ -356,7 +357,9 @@ class SuggestionService:
                 )
             if export_service is not None:
                 await self._run_export(document, export_service)
-            document = await self._uow.documents.update_status(document, DocumentStatusVO.READY)
+            document = await self._uow.documents.update_status(
+                document, DocumentLifecycle.transition(document.status, DocumentStatusVO.READY)
+            )
             await self._uow.commit()
         return document
 
@@ -437,7 +440,9 @@ class SuggestionService:
                     )
                 if export_service is not None:
                     await self._run_export(document, export_service)
-                document = await self._uow.documents.update_status(document, DocumentStatusVO.READY)
+                document = await self._uow.documents.update_status(
+                    document, DocumentLifecycle.transition(document.status, DocumentStatusVO.READY)
+                )
                 finalized = True
 
             await self._uow.commit()
