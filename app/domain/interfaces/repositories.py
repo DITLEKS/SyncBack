@@ -42,6 +42,7 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, TypedDict
 
+from app.domain.interfaces.user_repository import IUserRepository  # noqa: F401
 from app.domain.value_objects import (
     AnalysisJobStatusVO,
     DocumentStatusVO,
@@ -56,7 +57,6 @@ if TYPE_CHECKING:
     from app.infrastructure.db.models.project import Project
     from app.infrastructure.db.models.source import Source
     from app.infrastructure.db.models.suggestion import Suggestion
-    from app.infrastructure.db.models.user import User
 
 
 class DocumentRow(TypedDict):
@@ -532,7 +532,10 @@ class IProjectRepository(ABC):
         """Проект владельца; если не найден или чужой — ProjectNotFoundError."""
 
     @abstractmethod
-    async def create(self, project: Project) -> Project: ...
+    async def create(
+        self, owner_id: uuid.UUID, name: str, description: str | None = None
+    ) -> Project:
+        """Создать проект; сущность собирает инфраструктура."""
 
     @abstractmethod
     async def list_all(self, limit: int, offset: int) -> list[Project]: ...
@@ -561,14 +564,3 @@ class IProjectRepository(ABC):
 
     @abstractmethod
     async def delete(self, project: Project) -> None: ...
-
-
-class IUserRepository(ABC):
-    @abstractmethod
-    async def get_by_email(self, email: str) -> User | None: ...
-
-    @abstractmethod
-    async def get_by_id(self, user_id: uuid.UUID) -> User | None: ...
-
-    @abstractmethod
-    async def create(self, user: User) -> User: ...

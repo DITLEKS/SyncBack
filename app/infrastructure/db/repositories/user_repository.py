@@ -1,11 +1,4 @@
-"""
-Репозиторий пользователей.
-
-ИЗМЕНЕНИЯ:
-- HIGH-A: удалён session.commit() из create() — нарушение UoW-правила.
-  Теперь только flush() + refresh() через параметрD obj для совместимости;
-  commit — ответственность вызывающего UoW.
-"""
+"""Репозиторий пользователей."""
 
 from __future__ import annotations
 
@@ -14,11 +7,10 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.interfaces.repositories import IUserRepository
 from app.infrastructure.db.models.user import User
 
 
-class UserRepository(IUserRepository):
+class UserRepository:
     def __init__(self, session: AsyncSession):
         self._session = session
 
@@ -29,8 +21,9 @@ class UserRepository(IUserRepository):
     async def get_by_id(self, user_id: uuid.UUID) -> User | None:
         return await self._session.get(User, user_id)
 
-    async def create(self, user: User) -> User:
-        """HIGH-A: commit удалён — фиксирует вызывающий UoW."""
+    async def create_from_credentials(self, email: str, password_hash: str) -> User:
+        """Фиксацию транзакции выполняет вызывающий UoW."""
+        user = User(email=email, password_hash=password_hash)
         self._session.add(user)
         await self._session.flush()
         await self._session.refresh(user)

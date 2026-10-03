@@ -23,8 +23,9 @@ class BlockType(enum.StrEnum):
 class DocumentBlock(Base):
     __tablename__ = "document_blocks"
     __table_args__ = (
-        # Два блока одного документа не могут занимать одну позицию.
-        UniqueConstraint("document_id", "position", name="uq_document_blocks_doc_position"),
+        # Два блока одного документа не могут занимать одну позицию; этот же индекс
+        # обслуживает выборку WHERE document_id = ? ORDER BY position.
+        Index("uq_document_blocks_doc_position", "document_id", "position", unique=True),
         # block_ref уникален в пределах документа (используется как anchor suggestions).
         UniqueConstraint("document_id", "block_ref", name="uq_document_blocks_doc_ref"),
         # heading_level допустим только для блоков типа heading.
@@ -32,9 +33,6 @@ class DocumentBlock(Base):
             "block_type = 'heading' OR heading_level IS NULL",
             name="ck_document_blocks_heading_level",
         ),
-        # N-4: index=True на document_id удалён — составной индекс ниже покрывает все
-        # запросы WHERE document_id = ?, ORDER BY position.
-        Index("ix_document_blocks_doc_position", "document_id", "position"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

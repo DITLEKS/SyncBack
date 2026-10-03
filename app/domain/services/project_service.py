@@ -9,8 +9,10 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING
 
+from app.domain.exceptions import ProjectNotFoundError
 from app.domain.interfaces.file_storage import FileStorage
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.value_objects import UserRoleVO
@@ -33,6 +35,18 @@ class ProjectService:
                 owner_id=owner.id, name=name, description=description
             )
             await self._uow.commit()
+        return project
+
+    async def get_project_for_user(self, project_id: uuid.UUID, user: User) -> Project:
+        """Проект, доступный пользователю: владельцу или администратору.
+
+        Чужой проект намеренно неотличим от несуществующего (ProjectNotFoundError),
+        чтобы не раскрывать факт его существования.
+        """
+        async with self._uow:
+            project = await self._uow.projects.get_by_id(project_id)
+        if project is None or (user.role != UserRoleVO.ADMIN and project.owner_id != user.id):
+            raise ProjectNotFoundError(f"Проект {project_id} не найден")
         return project
 
     async def list_projects_for_user(

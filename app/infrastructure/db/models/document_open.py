@@ -17,6 +17,7 @@ from app.infrastructure.db.base import Base
 
 class DocumentOpen(Base):
     __tablename__ = "document_opens"
+    __table_args__ = (sa.Index("ix_document_opens_user_opened", "user_id", "last_opened_at"),)
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         sa.UUID(as_uuid=True),

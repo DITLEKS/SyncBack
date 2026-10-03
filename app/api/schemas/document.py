@@ -24,7 +24,7 @@ FIX-review-4: DocumentListItem.created_at → uploaded_at.
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -217,6 +217,40 @@ class DocumentListItem(BaseModel):
     sources: list[SourceBadge] | None = None
     # Техническое состояние последнего analysis job
     analysis: AnalysisStateResponse | None = None
+
+
+def document_list_item(
+    document: Any,
+    *,
+    project_name: str,
+    suggestions: SuggestionCounters,
+    sources: list[Any] | None = None,
+    latest_job: Any = None,
+) -> DocumentListItem:
+    """Собрать элемент списка документов из ORM-объекта Document.
+
+    Единственное место, где внутренние поля документа переводятся в контракт
+    карточки; роутеры «Мои документы» и страницы проекта используют его оба.
+    """
+    public_status, analysis = resolve_document_public_status_and_analysis(
+        str(document.status), latest_job
+    )
+    return DocumentListItem(
+        id=document.id,
+        name=document.name,
+        format=str(document.format),
+        size_bytes=document.size_bytes,
+        status=public_status,  # type: ignore[arg-type]
+        current_analysis_job_id=document.current_analysis_job_id,
+        uploaded_at=document.uploaded_at,
+        updated_at=document.updated_at,
+        project=DocumentListProject(id=document.project_id, name=project_name),
+        suggestions=suggestions,
+        sources=None
+        if sources is None
+        else [SourceBadge(id=s.id, name=s.name, type=str(s.type)) for s in sources],
+        analysis=analysis,
+    )
 
 
 class DocumentListPage(BaseModel):

@@ -8,7 +8,7 @@ M-block: добавлен rate limit 5/minute на POST /register (защита 
 с заголовком Retry-After.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from slowapi.errors import RateLimitExceeded  # noqa: F401  — re-exported для тестов
 
 from app.api.deps import get_current_user
@@ -37,12 +37,14 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 @limiter.limit("5/minute")
 async def register(
     request: Request,
+    response: Response,
     payload: UserRegisterRequest,
     auth_service: AuthService = Depends(get_auth_service),
 ) -> UserResponse:
     """Регистрация нового пользователя.
 
-    Rate limit: 5 запросов в минуту с одного IP.
+    Rate limit: 5 запросов в минуту с одного IP. Параметр response нужен slowapi,
+    чтобы записать заголовки X-RateLimit-* в ответ, собранный из pydantic-модели.
     """
     try:
         user = await auth_service.register(payload.email, payload.password)
@@ -55,6 +57,7 @@ async def register(
 @limiter.limit("20/minute")
 async def login(
     request: Request,
+    response: Response,
     payload: UserLoginRequest,
     auth_service: AuthService = Depends(get_auth_service),
 ) -> TokenResponse:

@@ -19,16 +19,15 @@ I-4: GET /{project_id}?include=documents,sources
     GET /projects/{id}?include=documents&include=sources
 """
 
-import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.api.deps import get_allowed_project, get_current_user
-from app.api.schemas.document import DocumentListItem, DocumentListProject, SuggestionCounters
+from app.api.schemas.document import SuggestionCounters, document_list_item
 from app.api.schemas.pagination import Page
 from app.api.schemas.project import ProjectCreateRequest, ProjectResponse, ProjectUpdateRequest
-from app.api.schemas.source import SourceBadge, SourceResponse
+from app.api.schemas.source import SourceResponse
 from app.core.dependencies import get_document_service, get_project_service, get_source_service
 from app.domain.services.document_service import DocumentService
 from app.domain.services.project_service import ProjectService
@@ -41,6 +40,20 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 
 # I-4: допустимые значения ?include=
 _VALID_INCLUDES = frozenset({"sources", "documents"})
+# Страница проекта отдаёт вложенные списки без пагинации, поэтому ограничиваем их размер.
+_INCLUDE_LIMIT = 200
+
+
+def _project_response(project: Project) -> ProjectResponse:
+    """Ответ только из скалярных полей: relationship-атрибуты ORM не трогаем,
+    иначе в async-сессии ленивая загрузка падает с MissingGreenlet."""
+    return ProjectResponse(
+        id=project.id,
+        name=project.name,
+        description=project.description,
+        owner_id=project.owner_id,
+        created_at=project.created_at,
+    )
 
 
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
@@ -50,7 +63,7 @@ async def create_project(
     project_service: ProjectService = Depends(get_project_service),
 ) -> ProjectResponse:
     project = await project_service.create_project(current_user, payload.name, payload.description)
-    return ProjectResponse.model_validate(project)
+    return _project_response(project)
 
 
 @router.get("", response_model=Page[ProjectResponse])
@@ -64,7 +77,7 @@ async def list_projects(
         current_user, limit=limit, offset=offset
     )
     return Page[ProjectResponse](
-        items=[ProjectResponse.model_validate(p) for p in projects],
+        items=[_project_response(p) for p in projects],
         total=total,
         limit=limit,
         offset=offset,
@@ -102,46 +115,28 @@ async def get_project(
     """
     includes = _VALID_INCLUDES.intersection(include)
 
-    response = ProjectResponse.model_validate(project)
+    response = _project_response(project)
 
-    # include=sources: project-scope источники (глобальные для всего проекта)
     if "sources" in includes:
-        raw_sources = await source_service.list_sources_for_project(
-            project.id, scope=SourceScopeVO.PROJECT
+        raw_sources, _ = await source_service.list_sources(
+            project.id, limit=_INCLUDE_LIMIT, offset=0, scope=SourceScopeVO.PROJECT
         )
         response.sources = [SourceResponse.model_validate(s) for s in raw_sources]
 
-    # include=documents: документы проекта + их document-scope источники (бейджи)
     if "documents" in includes:
-        pagination = PaginationParams(limit=200, offset=0)
-        raw_docs, _ = await document_service.list_documents(project.id, pagination)
-
-        # Подгружаем document-scope источники одним батч-запросом
-        doc_ids = [d.id for d in raw_docs]
-        sources_by_doc: dict[uuid.UUID, list] = {}
-        if doc_ids:
-            doc_sources = await source_service.list_sources_for_documents(
-                project.id, doc_ids, scope=SourceScopeVO.DOCUMENT
-            )
-            for src in doc_sources:
-                sources_by_doc.setdefault(src.document_id, []).append(src)
-
+        raw_docs, _ = await document_service.list_documents(
+            project.id, PaginationParams(limit=_INCLUDE_LIMIT, offset=0)
+        )
+        sources_by_doc = await source_service.list_sources_for_documents(
+            project.id, [d.id for d in raw_docs]
+        )
+        # Счётчики правок на странице проекта пока не считаются: нужен отдельный запрос.
         response.documents = [
-            DocumentListItem(
-                id=d.id,
-                name=d.name,
-                format=d.format.value if hasattr(d.format, "value") else d.format,
-                size_bytes=d.size_bytes,
-                status=d.status.value if hasattr(d.status, "value") else d.status,
-                current_analysis_job_id=d.current_analysis_job_id,
-                created_at=d.uploaded_at,
-                updated_at=d.uploaded_at,
-                project=DocumentListProject(id=project.id, name=project.name),
+            document_list_item(
+                d,
+                project_name=project.name,
                 suggestions=SuggestionCounters(total=0, pending=0, accepted=0, rejected=0),
-                sources=[
-                    SourceBadge(id=s.id, name=s.name, type=s.type)
-                    for s in sources_by_doc.get(d.id, [])
-                ],
+                sources=sources_by_doc.get(d.id, []),
             )
             for d in raw_docs
         ]
@@ -166,7 +161,7 @@ async def update_project(
         name=payload.name,
         description=payload.description,
     )
-    return ProjectResponse.model_validate(updated)
+    return _project_response(updated)
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -1,22 +1,13 @@
 """
 Бизнес-логика регистрации и входа.
 
-REVIEW-1: добавлена ротация refresh-токенов с хранением jti в Redis.
-  - authenticate: сохраняет jti нового refresh-токена в RefreshTokenStore.
-  - refresh_access_token: проверяет и атомарно отзывает старый jti,
-    выпускает новую пару токенов и сохраняет новый jti.
-  - logout: отзывает jti текущего refresh-токена.
-
-REVIEW-7: AuthService больше не импортирует ORM-модель User напрямую.
-  Взамен используется UserProtocol (domain/interfaces/entities.py).
-  Инстансирование User вынесено в UserRepository.create_from_credentials,
-  чтобы domain-сервис не знал об инфраструктурном слое.
+Refresh-токены ротируются: jti хранится в RefreshTokenStore, при обновлении
+старый jti атомарно отзывается, при logout — отзывается текущий.
 """
 
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING
 
 from app.domain.exceptions import (
     AccountTemporarilyLockedError,
@@ -24,43 +15,44 @@ from app.domain.exceptions import (
     InvalidCredentialsError,
 )
 from app.domain.interfaces.entities import UserProtocol
-from app.domain.interfaces.user_repository import IUserRepository
+from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.infrastructure.security.jwt_handler import JWTHandler
 from app.infrastructure.security.login_rate_limiter import LoginRateLimiter
 from app.infrastructure.security.password_hasher import PasswordHasher
 from app.infrastructure.security.refresh_token_store import RefreshTokenStore
 
-if TYPE_CHECKING:
-    pass
-
 
 class AuthService:
     def __init__(
         self,
-        user_repository: IUserRepository,
+        uow: IUnitOfWork,
         password_hasher: PasswordHasher,
         jwt_handler: JWTHandler,
         rate_limiter: LoginRateLimiter,
         refresh_store: RefreshTokenStore,
     ):
-        self._users = user_repository
+        self._uow = uow
         self._hasher = password_hasher
         self._jwt = jwt_handler
         self._rate_limiter = rate_limiter
         self._refresh_store = refresh_store
 
     async def register(self, email: str, password: str) -> UserProtocol:
-        existing = await self._users.get_by_email(email)
-        if existing is not None:
-            raise EmailAlreadyRegisteredError(f"Email {email} уже зарегистрирован")
-        return await self._users.create_from_credentials(email, self._hasher.hash(password))
+        async with self._uow:
+            existing = await self._uow.users.get_by_email(email)
+            if existing is not None:
+                raise EmailAlreadyRegisteredError(f"Email {email} уже зарегистрирован")
+            user = await self._uow.users.create_from_credentials(email, self._hasher.hash(password))
+            await self._uow.commit()
+        return user
 
     async def authenticate(self, email: str, password: str) -> tuple[str, str, int, int]:
         is_locked, retry_after = await self._rate_limiter.is_locked(email)
         if is_locked:
             raise AccountTemporarilyLockedError(retry_after)
 
-        user = await self._users.get_by_email(email)
+        async with self._uow:
+            user = await self._uow.users.get_by_email(email)
         if user is None or not self._hasher.verify(password, user.password_hash):
             await self._rate_limiter.register_failure(email)
             raise InvalidCredentialsError("Неверный email или пароль")
@@ -77,7 +69,8 @@ class AuthService:
         if not jti or not await self._refresh_store.revoke_if_valid(jti):
             raise InvalidCredentialsError("Refresh-токен недействителен или уже использован")
 
-        user = await self._users.get_by_id(uuid.UUID(payload["sub"]))
+        async with self._uow:
+            user = await self._uow.users.get_by_id(uuid.UUID(payload["sub"]))
         if user is None:
             raise InvalidCredentialsError("Пользователь не найден")
 

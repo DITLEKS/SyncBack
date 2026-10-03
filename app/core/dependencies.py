@@ -237,12 +237,12 @@ def get_refresh_token_store() -> RefreshTokenStore:
 
 
 async def get_auth_service(
-    session: AsyncSession = Depends(get_db_session),
+    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
     rate_limiter: LoginRateLimiter = Depends(get_login_rate_limiter),
     refresh_store: RefreshTokenStore = Depends(get_refresh_token_store),
 ) -> AuthService:
     return AuthService(
-        UserRepository(session),
+        uow,
         PasswordHasher(),
         _get_jwt_handler(),
         rate_limiter,

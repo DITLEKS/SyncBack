@@ -33,7 +33,10 @@ class ProjectRepository(IProjectRepository):
             raise PermissionError("Access denied: this project belongs to another user.")
         return project
 
-    async def create(self, project: Project) -> Project:
+    async def create(
+        self, owner_id: uuid.UUID, name: str, description: str | None = None
+    ) -> Project:
+        project = Project(owner_id=owner_id, name=name, description=description)
         self._session.add(project)
         await self._session.flush()
         await self._session.refresh(project)

@@ -46,6 +46,13 @@ class Suggestion(Base):
         Index("ix_suggestions_job_status", "analysis_job_id", "status"),
         # N-6: index=True на document_id удалён — ix_suggestions_document_status покрывает его.
         Index("ix_suggestions_document_status", "document_id", "status"),
+        # Keyset-пагинация по задаче: ORDER BY created_at, id.
+        Index("ix_suggestions_job_created_at_id", "analysis_job_id", "created_at", "id"),
+        Index(
+            "ix_suggestions_decided_by",
+            "decided_by",
+            postgresql_where=sa.text("decided_by IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -63,12 +70,9 @@ class Suggestion(Base):
         nullable=False,
     )
     section_ref: Mapped[str] = mapped_column(String(500), nullable=False)
-    block_id: Mapped[str | None] = mapped_column(
-        String(255),
-        ForeignKey("document_blocks.block_ref", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
-    )
+    # Ссылка на document_blocks.block_ref. Внешний ключ не объявлен: block_ref уникален
+    # только в паре с document_id, поэтому ссылка должна быть составной.
+    block_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     start_offset: Mapped[int | None] = mapped_column(Integer, nullable=True)
     end_offset: Mapped[int | None] = mapped_column(Integer, nullable=True)
     change_type: Mapped[ChangeType] = mapped_column(
@@ -92,8 +96,6 @@ class Suggestion(Base):
         nullable=True,
     )
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # reviewed_at kept for backward compat (pre-C-1 data); new code uses decided_at.
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     analysis_job: Mapped["AnalysisJob"] = relationship(back_populates="suggestions")

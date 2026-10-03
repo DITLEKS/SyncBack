@@ -11,7 +11,18 @@ FIX-review-2: добавлена колонка current_analysis_job_id (nullabl
 
 import uuid
 
-from sqlalchemy import CheckConstraint, Column, DateTime, Enum, ForeignKey, Integer, String, func
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -23,6 +34,20 @@ class Document(Base):
     __tablename__ = "documents"
     __table_args__ = (
         CheckConstraint("size_bytes >= 0", name="ck_documents_size_bytes_non_negative"),
+        # Keyset-пагинация списка документов проекта: ORDER BY created_at DESC, id DESC.
+        Index(
+            "ix_documents_project_created_at_id",
+            "project_id",
+            text("created_at DESC"),
+            text("id DESC"),
+        ),
+        # Поиск по подстроке имени (ILIKE '%...%') в «Моих документах»; требует pg_trgm.
+        Index(
+            "ix_documents_name_trgm",
+            "name",
+            postgresql_using="gin",
+            postgresql_ops={"name": "gin_trgm_ops"},
+        ),
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

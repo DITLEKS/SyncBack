@@ -14,7 +14,17 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -35,6 +45,15 @@ class AnalysisJob(Base):
         #     WHERE document_id = ? AND idempotency_key = ?, поэтому
         #     одиночный B-tree на idempotency_key был лишним.
         UniqueConstraint("document_id", "idempotency_key", name="uq_analysis_jobs_doc_idem_key"),
+        # У документа не может быть двух незавершённых задач одновременно.
+        Index(
+            "uq_analysis_jobs_one_active_per_document",
+            "document_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'processing')"),
+        ),
+        # Последняя задача документа: WHERE document_id = ? ORDER BY created_at DESC.
+        Index("ix_analysis_jobs_doc_latest", "document_id", "created_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

@@ -55,7 +55,10 @@ def _make_document(
 
 
 def _make_suggestion(
-    suggestion_id: uuid.UUID, job_id: uuid.UUID, status=SuggestionStatusVO.PENDING
+    suggestion_id: uuid.UUID,
+    job_id: uuid.UUID,
+    document_id: uuid.UUID,
+    status=SuggestionStatusVO.PENDING,
 ):
     class _Sug:
         pass
@@ -63,6 +66,7 @@ def _make_suggestion(
     s = _Sug()
     s.id = suggestion_id
     s.analysis_job_id = job_id
+    s.document_id = document_id
     s.status = status
     return s
 
@@ -101,13 +105,19 @@ class FakeSuggestionRepo:
     def set_pending_count(self, n: int):
         self._pending_count = n
 
-    async def bulk_update_status(self, decisions: ReviewDecisions):
-        """Возвращает только те правки, что принадлежат текущему job и PENDING."""
-        updated = []
-        for sid in decisions.all_ids:
-            s = self._store.get(sid)
-            if s is not None and s.analysis_job_id == decisions.analysis_job_id:
-                updated.append(s)
+    async def bulk_update_status(self, decisions: ReviewDecisions) -> int:
+        """Как и реальный репозиторий: обновляет только PENDING-правки документа
+        и возвращает их число."""
+        updated = 0
+        for decision in decisions.decisions:
+            s = self._store.get(decision.suggestion_id)
+            if (
+                s is not None
+                and s.document_id == decisions.document_id
+                and s.status == SuggestionStatusVO.PENDING
+            ):
+                s.status = decision.status
+                updated += 1
         return updated
 
     async def count_by_analysis_job_and_status(self, job_id, status):
@@ -170,9 +180,9 @@ def document(ids):
 @pytest.fixture()
 def suggestions(ids):
     return [
-        _make_suggestion(ids["s1"], ids["job"]),
-        _make_suggestion(ids["s2"], ids["job"]),
-        _make_suggestion(ids["s3"], ids["job"]),
+        _make_suggestion(ids["s1"], ids["job"], ids["document"]),
+        _make_suggestion(ids["s2"], ids["job"], ids["document"]),
+        _make_suggestion(ids["s3"], ids["job"], ids["document"]),
     ]
 
 
