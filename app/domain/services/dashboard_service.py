@@ -1,12 +1,11 @@
 """
-DashboardService — оркестрирует агрегаты для GET /dashboard,
-GET /documents/attention, GET /documents/recent.
+DashboardService — агрегаты рабочего пространства: сводка с трендами,
+документы «требуют внимания», недавно открытые.
 
-Архитектурные правила:
-  - Зависит только от IDashboardQueryService (read-model порт).
-  - Нет импортов из app.infrastructure.* при выполнении.
+Зависит только от IDashboardQueryService (read-model порт); результат
+возвращает доменными структурами, HTTP-схемы собирает роутер.
 
-Снэпшот за сегодня пишется при каждом GET /dashboard — фоновый
+Снэпшот за сегодня пишется при каждом запросе сводки — фоновый
 джоб не нужен. ON CONFLICT DO UPDATE гарантирует идемпотентность.
 """
 
@@ -14,14 +13,30 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, date, timedelta
 from datetime import datetime as dt
 
-from app.api.schemas.dashboard import (
-    DashboardResponse,
-    TrendPoint,
-)
 from app.domain.interfaces.dashboard_query_service import IDashboardQueryService
+
+
+@dataclass(frozen=True)
+class TrendPoint:
+    """Точка sparkline: дата в ISO 8601 и значение на этот день."""
+
+    date: str
+    value: float
+
+
+@dataclass(frozen=True)
+class DashboardSummary:
+    total_documents: int
+    awaiting_approval_count: int
+    ready_count: int
+    relevance_percent: float
+    total_trend: list[TrendPoint]
+    awaiting_trend: list[TrendPoint]
+    relevance_trend: list[TrendPoint]
 
 
 def _interpolate(
@@ -65,8 +80,8 @@ class DashboardService:
     def __init__(self, dashboard_qs: IDashboardQueryService) -> None:
         self._qs = dashboard_qs
 
-    async def get_dashboard(self, user_id: uuid.UUID) -> DashboardResponse:
-        """GET /dashboard.
+    async def get_dashboard(self, user_id: uuid.UUID) -> DashboardSummary:
+        """Сводка рабочего пространства с трендами за 7 дней.
 
         Последовательность:
           1. Параллельно читаем stats + trends.
@@ -105,7 +120,7 @@ class DashboardService:
 
         dates = [today - timedelta(days=i) for i in range(6, -1, -1)]
 
-        return DashboardResponse(
+        return DashboardSummary(
             total_documents=total,
             awaiting_approval_count=awaiting,
             ready_count=ready,

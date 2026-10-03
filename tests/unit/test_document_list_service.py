@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.domain.policies import UploadLimits
 from app.domain.services.document_service import DocumentService
 from app.domain.value_objects import PaginationParams
 from tests.unit._fakes import FakeUnitOfWork
@@ -27,7 +28,13 @@ def _make_service() -> tuple[DocumentService, AsyncMock]:
     repo = AsyncMock()
     repo.list_all_for_user.return_value = ([], 0)
     storage = AsyncMock()
-    svc = DocumentService(FakeUnitOfWork(documents=repo), storage)
+    svc = DocumentService(
+        FakeUnitOfWork(documents=repo),
+        storage,
+        parser_registry=AsyncMock(),
+        upload_limits=UploadLimits.from_megabytes(50),
+        download_url_ttl_seconds=300,
+    )
     return svc, repo
 
 

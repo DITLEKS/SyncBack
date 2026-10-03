@@ -8,7 +8,12 @@ from sqlalchemy import delete, exists, func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.repositories import IDocumentRepository
-from app.domain.value_objects import DocumentStatusVO, KeysetPage, PaginationParams
+from app.domain.value_objects import (
+    DocumentFormatVO,
+    DocumentStatusVO,
+    KeysetPage,
+    PaginationParams,
+)
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.document_source import document_sources
 from app.infrastructure.db.models.enums import DocumentFormat, DocumentStatus, SuggestionStatus
@@ -34,7 +39,7 @@ class DocumentRepository(IDocumentRepository):
         id: uuid.UUID,
         project_id: uuid.UUID,
         name: str,
-        format: DocumentFormat,
+        format: DocumentFormatVO,
         storage_key: str,
         size_bytes: int,
     ) -> Document:
@@ -42,7 +47,7 @@ class DocumentRepository(IDocumentRepository):
             id=id,
             project_id=project_id,
             name=name,
-            format=format,
+            format=DocumentFormat(format.value),
             storage_key=storage_key,
             size_bytes=size_bytes,
             uploaded_at=datetime.now(UTC),

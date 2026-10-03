@@ -108,3 +108,33 @@ async def test_update_and_delete_project(client: AsyncClient) -> None:
     assert response.status_code == 204, response.text
     response = await client.get(f"/api/v1/projects/{project_id}", headers=headers)
     assert response.status_code == 404
+
+
+async def test_refresh_token_rotates_and_old_one_is_revoked(client: AsyncClient) -> None:
+    await client.post(
+        "/api/v1/auth/register",
+        json={"email": "rotate@example.com", "password": "Correct-Horse-Battery-9"},
+    )
+    login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "rotate@example.com", "password": "Correct-Horse-Battery-9"},
+    )
+    assert login.status_code == 200, login.text
+    old_refresh = login.json()["refresh_token"]
+
+    response = await client.post("/api/v1/auth/refresh", json={"refresh_token": old_refresh})
+    assert response.status_code == 200, response.text
+    new_tokens = response.json()
+    assert new_tokens["refresh_token"] != old_refresh
+    assert new_tokens["access_token"]
+
+    # Старый refresh-токен отозван при ротации, новый — работает
+    response = await client.post("/api/v1/auth/refresh", json={"refresh_token": old_refresh})
+    assert response.status_code == 401
+    response = await client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": new_tokens["refresh_token"]}
+    )
+    assert response.status_code == 200, response.text
+
+    response = await client.post("/api/v1/auth/refresh", json={"refresh_token": "not-a-jwt"})
+    assert response.status_code == 401
