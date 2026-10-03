@@ -23,6 +23,7 @@ from app.domain.interfaces.security import (
     ITokenIssuer,
 )
 from app.domain.interfaces.unit_of_work import IUnitOfWork
+from app.domain.policies import PasswordPolicy
 
 
 class AuthService:
@@ -33,14 +34,17 @@ class AuthService:
         jwt_handler: ITokenIssuer,
         rate_limiter: ILoginThrottle,
         refresh_store: IRefreshTokenStore,
+        password_policy: PasswordPolicy = PasswordPolicy(),
     ):
         self._uow = uow
         self._hasher = password_hasher
         self._jwt = jwt_handler
         self._rate_limiter = rate_limiter
         self._refresh_store = refresh_store
+        self._password_policy = password_policy
 
     async def register(self, email: str, password: str) -> UserProtocol:
+        self._password_policy.validate(password)
         async with self._uow:
             existing = await self._uow.users.get_by_email(email)
             if existing is not None:
@@ -49,18 +53,32 @@ class AuthService:
             await self._uow.commit()
         return user
 
-    async def authenticate(self, email: str, password: str) -> tuple[str, str, int, int]:
-        is_locked, retry_after = await self._rate_limiter.is_locked(email)
+    async def authenticate(
+        self, email: str, password: str, client_ip: str | None = None
+    ) -> tuple[str, str, int, int]:
+        is_locked, retry_after = await self._rate_limiter.is_locked(email, client_ip)
         if is_locked:
             raise AccountTemporarilyLockedError(retry_after)
 
-        async with self._uow:
-            user = await self._uow.users.get_by_email(email)
-        if user is None or not self._hasher.verify(password, user.password_hash):
-            await self._rate_limiter.register_failure(email)
+        # Пароль, не проходящий политику, не мог быть сохранён — проверять его
+        # хэшированием незачем, а bcrypt на длинном пароле падает.
+        if not self._password_policy.is_satisfied_by(password):
+            await self._rate_limiter.register_failure(email, client_ip)
             raise InvalidCredentialsError("Неверный email или пароль")
 
-        await self._rate_limiter.reset(email)
+        async with self._uow:
+            user = await self._uow.users.get_by_email(email)
+        if user is None:
+            # Хэшируем и для несуществующего email, чтобы по времени ответа
+            # нельзя было понять, зарегистрирован ли адрес.
+            self._hasher.hash(password)
+            await self._rate_limiter.register_failure(email, client_ip)
+            raise InvalidCredentialsError("Неверный email или пароль")
+        if not self._hasher.verify(password, user.password_hash):
+            await self._rate_limiter.register_failure(email, client_ip)
+            raise InvalidCredentialsError("Неверный email или пароль")
+
+        await self._rate_limiter.reset(email, client_ip)
         access_token, expires_in = self._jwt.create_access_token(user.id, user.role)
         refresh_token, refresh_expires_in, jti = self._jwt.create_refresh_token(user.id, user.role)
         await self._refresh_store.save(jti, user.id, refresh_expires_in)

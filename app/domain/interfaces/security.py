@@ -37,15 +37,19 @@ class ITokenIssuer(Protocol):
 
 
 class ILoginThrottle(Protocol):
-    """Защита входа от перебора пароля по идентификатору учётной записи."""
+    """Защита входа от перебора пароля.
 
-    async def is_locked(self, email: str) -> tuple[bool, int]:
+    Попытки считаются по паре (email, адрес клиента): так перебор с одного
+    адреса упирается в лимит, а чужой вход нельзя заблокировать, зная только email.
+    """
+
+    async def is_locked(self, email: str, client_ip: str | None) -> tuple[bool, int]:
         """Вернуть (заблокирован ли вход, секунд до разблокировки)."""
         ...
 
-    async def register_failure(self, email: str) -> None: ...
+    async def register_failure(self, email: str, client_ip: str | None) -> None: ...
 
-    async def reset(self, email: str) -> None: ...
+    async def reset(self, email: str, client_ip: str | None) -> None: ...
 
 
 class IRefreshTokenStore(Protocol):
