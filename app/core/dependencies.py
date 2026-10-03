@@ -59,6 +59,7 @@ from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.exporters.exporter_registry import DocumentExporterRegistry
 from app.infrastructure.llm.factory import get_llm_client
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
+from app.infrastructure.queue.celery_analysis_queue import CeleryAnalysisQueue
 from app.infrastructure.security.jwt_handler import JWTHandler
 from app.infrastructure.security.login_rate_limiter import LoginRateLimiter
 from app.infrastructure.security.password_hasher import PasswordHasher
@@ -83,6 +84,11 @@ def _get_parser_registry() -> DocumentParserRegistry:
 @lru_cache
 def _get_exporter_registry() -> DocumentExporterRegistry:
     return DocumentExporterRegistry()
+
+
+@lru_cache
+def _get_analysis_queue() -> CeleryAnalysisQueue:
+    return CeleryAnalysisQueue()
 
 
 @lru_cache
@@ -120,7 +126,7 @@ def get_suggestion_service(
 def get_analysis_job_service(
     uow: SqlAlchemyUnitOfWork = Depends(get_uow),
 ) -> AnalysisJobService:
-    return AnalysisJobService(uow)
+    return AnalysisJobService(uow, queue=_get_analysis_queue())
 
 
 def get_audit_log_service(

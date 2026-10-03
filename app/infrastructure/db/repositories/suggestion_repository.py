@@ -1,31 +1,9 @@
-"""
-SQLAlchemy-адаптер для Suggestion.
+"""SQLAlchemy-адаптер для Suggestion.
 
-Правило: НИКАКИХ session.commit() / session.rollback() здесь.
-Все изменения фиксирует SqlAlchemyUnitOfWork через uow.commit().
-
-ИСПРАВЛЕНИЯ:
-- bulk_update_status / update_status принимают ReviewDecisions или SuggestionDecision.
-- bulk_create: session.add_all() + flush().
-- list_by_analysis_job_and_status_page: постраничный вариант для стримингового
-  экспорта; покрывается индексом ix_suggestions_job_status (0015).
-- L-D1 (этот раунд): удалён мёртвый метод _flush_and_refresh() — он был
-  определён, но нигде не вызывался. Все вызовы flush() оставлены напрямую.
-- OPT-1: в list_with_total удалён мёртвый код (count_q / items_q строились, но
-  не исполнялись при непустом результате). window-function func.count().over()
-  корректно возвращает 0 на пустой выборке, поэтому отдельный count_q для
-  пустого случая тоже лишний. Итого: один SELECT вместо двух.
-- RESET: reset_status() — UPDATE WHERE status != PENDING, обнуляет
-  decided_by/decided_at, возвращает обновлённый объект или None если правка
-  уже PENDING.
-- C-3 (issue #37): bulk_reject_all — зеркало bulk_accept_all.
-- M-1 (issue #37): bulk_update_status scope-фильтр исправлен:
-  decisions.document_id сравнивается с M.document_id (денормализованная
-  колонка), а не с M.analysis_job_id.
-- NEW-1: delete_by_analysis_job — bulk DELETE всех правок job одним запросом;
-  вызывается в create_job при повторном анализе (ERROR/CANCELLED → DRAFT).
-- NEW-2: reset_to_pending_by_job — bulk UPDATE всех правок job → PENDING;
-  вызывался в reset_analysis() но отсутствовал в реализации.
+Фиксация транзакции — на стороне UoW. Решения по правкам меняются условными
+UPDATE (WHERE status = ...), чтобы параллельные запросы не перезаписывали друг друга.
+Выборки упорядочены по (created_at, id): правки одного анализа вставляются одним
+flush и имеют одинаковое время создания.
 """
 
 from __future__ import annotations
@@ -443,36 +421,3 @@ class SuggestionRepository(ISuggestionRepository):
         reset_ids = list(result.scalars().all())
         await self._session.flush()
         return reset_ids
-
-    async def reset_to_pending_by_job(
-        self,
-        analysis_job_id: uuid.UUID,
-    ) -> int:
-        """NEW-2: bulk UPDATE всех правок job обратно в PENDING.
-
-        UPDATE suggestions
-           SET status = 'pending', decided_by = NULL, decided_at = NULL
-         WHERE analysis_job_id = ? AND status != 'pending'.
-        Возвращает количество затронутых строк.
-
-        Идемпотентен: если все правки уже PENDING — возвращает 0.
-        Вызывается в AnalysisJobService.reset_analysis().
-        """
-        from app.infrastructure.db.models.enums import SuggestionStatus
-        from app.infrastructure.db.models.suggestion import Suggestion as M
-
-        stmt = (
-            update(M)
-            .where(
-                M.analysis_job_id == analysis_job_id,
-                M.status != SuggestionStatus.PENDING,
-            )
-            .values(
-                status=SuggestionStatus.PENDING,
-                decided_by=None,
-                decided_at=None,
-            )
-        )
-        result = await self._session.execute(stmt)
-        await self._session.flush()
-        return result.rowcount
