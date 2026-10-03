@@ -9,11 +9,12 @@ GET /documents/attention, GET /documents/recent.
 Снэпшот за сегодня пишется при каждом GET /dashboard — фоновый
 джоб не нужен. ON CONFLICT DO UPDATE гарантирует идемпотентность.
 """
+
 from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import date, timedelta, timezone
+from datetime import UTC, date, timedelta
 from datetime import datetime as dt
 
 from app.api.schemas.dashboard import (
@@ -30,11 +31,11 @@ def _interpolate(
 ) -> list[TrendPoint]:
     """Строит 7 точек sparkline с линейной интерполяцией пропусков.
 
-      - Известный день         → точное значение из снэпшота.
-      - Пропуск между двумя    → линейная интерполяция.
-      - Пропуск до первого     → значение первого известного.
-      - Пропуск после последнего → значение последнего известного.
-      - Нет снэпшотов вообще   → flat = fallback.
+    - Известный день         → точное значение из снэпшота.
+    - Пропуск между двумя    → линейная интерполяция.
+    - Пропуск до первого     → значение первого известного.
+    - Пропуск после последнего → значение последнего известного.
+    - Нет снэпшотов вообще   → flat = fallback.
     """
     if not snap_by_date:
         return [TrendPoint(date=d.isoformat(), value=fallback) for d in dates]
@@ -52,7 +53,7 @@ def _interpolate(
             v = snap_by_date[last]
         else:
             before = max(k for k in known if k < d)
-            after  = min(k for k in known if k > d)
+            after = min(k for k in known if k > d)
             v0, v1 = snap_by_date[before], snap_by_date[after]
             t = (d - before).days / (after - before).days
             v = round(v0 + (v1 - v0) * t, 2)
@@ -82,7 +83,7 @@ class DashboardService:
         ready: int = stats["ready"]
         awaiting: int = stats["awaiting"]
         relevance = round(ready / total * 100, 1) if total else 0.0
-        today = dt.now(tz=timezone.utc).date()
+        today = dt.now(tz=UTC).date()
 
         # — записываем снэпшот сегодня: ON CONFLICT DO UPDATE, идемпотентно
         await self._qs.upsert_snapshot(
@@ -126,14 +127,10 @@ class DashboardService:
             ),
         )
 
-    async def get_attention_documents(
-        self, user_id: uuid.UUID, limit: int = 4
-    ) -> list[dict]:
+    async def get_attention_documents(self, user_id: uuid.UUID, limit: int = 4) -> list[dict]:
         return await self._qs.get_attention_documents(user_id, limit=limit)
 
-    async def get_recent_documents(
-        self, user_id: uuid.UUID, limit: int = 5
-    ) -> list[dict]:
+    async def get_recent_documents(self, user_id: uuid.UUID, limit: int = 5) -> list[dict]:
         return await self._qs.get_recent_documents(user_id, limit=limit)
 
     async def track_open(

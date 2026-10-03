@@ -1,6 +1,7 @@
 """
 P0-11: Тесты guard активного анализа в sources (P0-6).
 """
+
 import pytest
 
 

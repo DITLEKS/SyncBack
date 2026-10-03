@@ -29,7 +29,9 @@ from app.main import app
 
 @pytest.mark.asyncio
 async def test_analysis_job_queue_failure_updates_job_status(db_session):
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
         queue_failure_email = f"queue-failure-{uuid.uuid4().hex}@example.com"
         register_response = await client.post(
             "/api/v1/auth/register",
@@ -61,7 +63,10 @@ async def test_analysis_job_queue_failure_updates_job_status(db_session):
         assert document_response.status_code == 201
         document_id = document_response.json()["id"]
 
-        with patch("app.api.v1.routers.analysis_jobs.run_analysis_job.delay", side_effect=RuntimeError("queue unavailable")):
+        with patch(
+            "app.api.v1.routers.analysis_jobs.run_analysis_job.delay",
+            side_effect=RuntimeError("queue unavailable"),
+        ):
             analysis_response = await client.post(
                 f"/api/v1/projects/{project_id}/documents/{document_id}/analysis-jobs",
                 headers=headers,
@@ -84,7 +89,9 @@ async def test_analysis_job_queue_failure_updates_job_status(db_session):
 
 @pytest.mark.asyncio
 async def test_analysis_job_persists_celery_task_id(db_session):
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
         celery_task_id_email = f"celery-task-id-{uuid.uuid4().hex}@example.com"
         register_response = await client.post(
             "/api/v1/auth/register",
@@ -119,7 +126,9 @@ async def test_analysis_job_persists_celery_task_id(db_session):
         fake_result = AsyncMock()
         fake_result.id = "fake-celery-id"
 
-        with patch("app.api.v1.routers.analysis_jobs.run_analysis_job.delay", return_value=fake_result):
+        with patch(
+            "app.api.v1.routers.analysis_jobs.run_analysis_job.delay", return_value=fake_result
+        ):
             analysis_response = await client.post(
                 f"/api/v1/projects/{project_id}/documents/{document_id}/analysis-jobs",
                 headers=headers,
@@ -153,7 +162,9 @@ async def test_analysis_job_persists_celery_task_id(db_session):
 
 @pytest.mark.asyncio
 async def test_download_audit_log_uses_document_id_and_constraints(db_session):
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
         audit_download_email = f"audit-download-{uuid.uuid4().hex}@example.com"
         register_response = await client.post(
             "/api/v1/auth/register",

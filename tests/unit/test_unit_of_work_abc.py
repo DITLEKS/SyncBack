@@ -5,6 +5,7 @@
 к TypeError: Can't instantiate abstract class SqlAlchemyUnitOfWork
 with abstract methods ... — этот тест поймает регрессию сразу.
 """
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -24,9 +25,9 @@ from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 def _make_mock_session() -> AsyncMock:
     """AsyncMock минимальной AsyncSession для конструктора UoW."""
     session = AsyncMock()
-    session.commit   = AsyncMock()
+    session.commit = AsyncMock()
     session.rollback = AsyncMock()
-    session.refresh  = AsyncMock()
+    session.refresh = AsyncMock()
     return session
 
 
@@ -63,13 +64,13 @@ class TestSqlAlchemyUoWABCCompleteness:
     def test_repository_types(self):
         """Репозитории имеют ожидаемые типы (smoke check)."""
         uow = SqlAlchemyUnitOfWork(_make_mock_session())
-        assert isinstance(uow.documents,   IDocumentRepository)
+        assert isinstance(uow.documents, IDocumentRepository)
         assert isinstance(uow.suggestions, ISuggestionRepository)
-        assert isinstance(uow.jobs,        IAnalysisJobRepository)
-        assert isinstance(uow.audit,       IAuditLogRepository)
-        assert isinstance(uow.projects,    IProjectRepository)
-        assert isinstance(uow.sources,     ISourceRepository)
-        assert isinstance(uow.users,       IUserRepository)
+        assert isinstance(uow.jobs, IAnalysisJobRepository)
+        assert isinstance(uow.audit, IAuditLogRepository)
+        assert isinstance(uow.projects, IProjectRepository)
+        assert isinstance(uow.sources, ISourceRepository)
+        assert isinstance(uow.users, IUserRepository)
 
     def test_abstract_methods_covered(self):
         """Проверить, что в IUnitOfWork нет нереализованных абстрактных методов.

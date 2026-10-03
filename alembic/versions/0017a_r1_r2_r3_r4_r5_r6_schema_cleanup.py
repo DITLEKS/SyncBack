@@ -16,6 +16,7 @@ R-6  Drop index ix_analysis_jobs_idempotency_key.
 Note: CREATE/DROP INDEX CONCURRENTLY cannot run inside a transaction.
 All indexes here use plain CREATE/DROP INDEX.
 """
+
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID

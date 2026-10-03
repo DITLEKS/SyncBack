@@ -35,6 +35,7 @@ NEW-2: ISuggestionRepository.reset_to_pending_by_job() — bulk UPDATE
   всех правок job обратно в PENDING; уже вызывался в reset_analysis(),
   но отсутствовал в интерфейсе и реализации — критический пробел.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -66,7 +67,8 @@ class DocumentRow(TypedDict):
     Поле sources НЕ включено сюда намеренно — оно инъектируется отдельным
     батч-запросом в роутере через SourceService.list_sources_for_documents.
     """
-    document: "Document"
+
+    document: Document
     project_name: str
     suggestions_total: int
     suggestions_pending: int
@@ -76,7 +78,7 @@ class DocumentRow(TypedDict):
 
 class IDocumentRepository(ABC):
     @abstractmethod
-    async def get_by_id(self, document_id: uuid.UUID) -> "Document | None": ...
+    async def get_by_id(self, document_id: uuid.UUID) -> Document | None: ...
 
     @abstractmethod
     async def list_all_for_user(
@@ -89,7 +91,7 @@ class IDocumentRepository(ABC):
         search: str | None = None,
         sort_by: str = "updated_at",
         sort_dir: str = "desc",
-    ) -> "tuple[list[DocumentRow], int]":
+    ) -> tuple[list[DocumentRow], int]:
         """CRIT-1: возвращает (список документо-строк, total_count) — один round-trip.
 
         Параметры фильтрации/сортировки приведены к реализации DocumentRepository.
@@ -110,14 +112,14 @@ class IDocumentRepository(ABC):
         name: str,
         format: Any,
         storage_key: str,
-    ) -> "Document": ...
+    ) -> Document: ...
 
     @abstractmethod
     async def update_status(
         self,
         document_id: uuid.UUID,
         status: DocumentStatusVO,
-    ) -> "Document | None": ...
+    ) -> Document | None: ...
 
     @abstractmethod
     async def update_exported_key(
@@ -134,7 +136,7 @@ class IDocumentRepository(ABC):
     ) -> bool: ...
 
     @abstractmethod
-    async def delete(self, document: "Document") -> None:
+    async def delete(self, document: Document) -> None:
         """CRIT-3: принимает ORM-объект Document, а не UUID.
 
         Реализация использует session.delete(document) — объект уже загружен
@@ -151,7 +153,7 @@ class IDocumentRepository(ABC):
         pagination: Any,
         *,
         status: DocumentStatusVO | None = None,
-    ) -> "list[Document]": ...
+    ) -> list[Document]: ...
 
     @abstractmethod
     async def count_for_project(
@@ -165,7 +167,7 @@ class IDocumentRepository(ABC):
     async def list_analyzable_for_project(
         self,
         project_id: uuid.UUID,
-    ) -> "list[Document]": ...
+    ) -> list[Document]: ...
 
     @abstractmethod
     async def get_stats_for_project(
@@ -176,10 +178,10 @@ class IDocumentRepository(ABC):
 
 class ISourceRepository(ABC):
     @abstractmethod
-    async def get_by_id(self, source_id: uuid.UUID) -> "Source | None": ...
+    async def get_by_id(self, source_id: uuid.UUID) -> Source | None: ...
 
     @abstractmethod
-    async def get_many_by_ids(self, source_ids: list[uuid.UUID]) -> "list[Source]": ...
+    async def get_many_by_ids(self, source_ids: list[uuid.UUID]) -> list[Source]: ...
 
     @abstractmethod
     async def list_by_project(
@@ -188,7 +190,7 @@ class ISourceRepository(ABC):
         limit: int,
         offset: int,
         scope: SourceScopeVO | None = None,
-    ) -> "list[Source]":
+    ) -> list[Source]:
         """R-5: опциональная фильтрация по scope.
 
         scope=None (по умолчанию) — все источники проекта.
@@ -204,7 +206,7 @@ class ISourceRepository(ABC):
         self,
         project_id: uuid.UUID,
         document_ids: list[uuid.UUID],
-    ) -> "list[tuple[Source, uuid.UUID]]":
+    ) -> list[tuple[Source, uuid.UUID]]:
         """I-1 / FIX-1: батч-запрос document-scope источников через JOIN на document_sources.
 
         Возвращает list[(Source, document_id)] — кортежи для группировки
@@ -216,7 +218,7 @@ class ISourceRepository(ABC):
     async def get_primary_document_id_for_source(
         self,
         source_id: uuid.UUID,
-    ) -> "uuid.UUID | None":
+    ) -> uuid.UUID | None:
         """FIX-review-4: вернуть первый document_id из M2M-таблицы document_sources.
 
         Source не хранит document_id напрямую — связь через M2M.
@@ -248,7 +250,7 @@ class ISourceRepository(ABC):
         source_type: Any,
         storage_key: str,
         scope: Any,
-    ) -> "Source": ...
+    ) -> Source: ...
 
     @abstractmethod
     async def create_url(
@@ -257,14 +259,14 @@ class ISourceRepository(ABC):
         name: str,
         url: str,
         scope: Any,
-    ) -> "Source": ...
+    ) -> Source: ...
 
     @abstractmethod
     async def replace_document_sources(
         self,
         document_id: uuid.UUID,
-        sources: "list[Source]",
-    ) -> "list[Source]": ...
+        sources: list[Source],
+    ) -> list[Source]: ...
 
     # FIX-B1: delete(source_id) удалён — не реализован и не используется.
     # Единственный актуальный путь удаления — delete_if_owned (атомарная
@@ -275,7 +277,7 @@ class ISourceRepository(ABC):
         self,
         project_id: uuid.UUID,
         source_id: uuid.UUID,
-    ) -> "Source | None": ...
+    ) -> Source | None: ...
 
 
 class ISuggestionRepository(ABC):
@@ -284,9 +286,7 @@ class ISuggestionRepository(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    async def get_by_id(
-        self, suggestion_id: uuid.UUID
-    ) -> "Suggestion | None": ...
+    async def get_by_id(self, suggestion_id: uuid.UUID) -> Suggestion | None: ...
 
     @abstractmethod
     async def list_by_analysis_job(
@@ -296,7 +296,7 @@ class ISuggestionRepository(ABC):
         limit: int | None = None,
         offset: int = 0,
         status: SuggestionStatusVO | None = None,
-    ) -> "list[Suggestion]": ...
+    ) -> list[Suggestion]: ...
 
     @abstractmethod
     async def list_with_total(
@@ -306,7 +306,7 @@ class ISuggestionRepository(ABC):
         limit: int,
         offset: int,
         status: SuggestionStatusVO | None = None,
-    ) -> "tuple[list[Suggestion], int]":
+    ) -> tuple[list[Suggestion], int]:
         """OPT-1: один SELECT с window-функцией вместо двух запросов.
 
         func.count().over() вычисляется ДО применения LIMIT/OFFSET в PostgreSQL,
@@ -329,7 +329,7 @@ class ISuggestionRepository(ABC):
         self,
         analysis_job_id: uuid.UUID,
         status: SuggestionStatusVO,
-    ) -> "list[Suggestion]": ...
+    ) -> list[Suggestion]: ...
 
     @abstractmethod
     async def list_by_analysis_job_and_status_page(
@@ -338,7 +338,7 @@ class ISuggestionRepository(ABC):
         status: SuggestionStatusVO,
         limit: int,
         offset: int = 0,
-    ) -> "list[Suggestion]": ...
+    ) -> list[Suggestion]: ...
 
     @abstractmethod
     async def list_ids_by_analysis_job_and_status(
@@ -352,14 +352,12 @@ class ISuggestionRepository(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    async def bulk_create(
-        self, suggestions: "list[Suggestion]"
-    ) -> "list[Suggestion]": ...
+    async def bulk_create(self, suggestions: list[Suggestion]) -> list[Suggestion]: ...
 
     @abstractmethod
     async def update_status(
         self,
-        suggestion: "Suggestion",
+        suggestion: Suggestion,
         decision: Any,
     ) -> None:
         """Атомарный UPDATE ... WHERE status = 'pending'.
@@ -386,7 +384,7 @@ class ISuggestionRepository(ABC):
         self,
         analysis_job_id: uuid.UUID,
         user_id: uuid.UUID,
-    ) -> "list[Suggestion]":
+    ) -> list[Suggestion]:
         """Принять все PENDING-правки одним UPDATE, вернуть обновлённые объекты."""
         ...
 
@@ -395,7 +393,7 @@ class ISuggestionRepository(ABC):
         self,
         analysis_job_id: uuid.UUID,
         user_id: uuid.UUID,
-    ) -> "list[Suggestion]":
+    ) -> list[Suggestion]:
         """C-3 (issue #37): отклонить все PENDING-правки одним UPDATE.
 
         Зеркало bulk_accept_all — один UPDATE WHERE status=PENDING,
@@ -406,8 +404,8 @@ class ISuggestionRepository(ABC):
     @abstractmethod
     async def reset_status(
         self,
-        suggestion: "Suggestion",
-    ) -> "Suggestion | None":
+        suggestion: Suggestion,
+    ) -> Suggestion | None:
         """C-2 (issue #37): сбросить решение правки обратно в PENDING.
 
         Атомарный UPDATE WHERE status != PENDING AND id = ?.
@@ -457,41 +455,43 @@ class ISuggestionRepository(ABC):
 
 class IAnalysisJobRepository(ABC):
     @abstractmethod
-    async def get_by_id(self, job_id: uuid.UUID) -> "AnalysisJob | None": ...
+    async def get_by_id(self, job_id: uuid.UUID) -> AnalysisJob | None: ...
 
     @abstractmethod
     async def get_by_idempotency_key(
         self, document_id: uuid.UUID, idempotency_key: str
-    ) -> "AnalysisJob | None": ...
+    ) -> AnalysisJob | None: ...
 
     @abstractmethod
-    async def get_active_by_document_id(self, document_id: uuid.UUID) -> "AnalysisJob | None": ...
+    async def get_active_by_document_id(self, document_id: uuid.UUID) -> AnalysisJob | None: ...
 
     @abstractmethod
-    async def list_by_document(self, document_id: uuid.UUID, pagination: Any) -> "list[AnalysisJob]": ...
+    async def list_by_document(
+        self, document_id: uuid.UUID, pagination: Any
+    ) -> list[AnalysisJob]: ...
 
     @abstractmethod
     async def create_for_document(
         self,
-        document: "Document",
+        document: Document,
         *,
         job_id: uuid.UUID | None = None,
         status: AnalysisJobStatusVO = AnalysisJobStatusVO.PENDING,
         idempotency_key: str | None = None,
-    ) -> "AnalysisJob": ...
+    ) -> AnalysisJob: ...
 
     @abstractmethod
     async def mark_dispatched(
-        self, job: "AnalysisJob", task_id: str
-    ) -> "tuple[AnalysisJob, DocumentStatusVO | None]": ...
+        self, job: AnalysisJob, task_id: str
+    ) -> tuple[AnalysisJob, DocumentStatusVO | None]: ...
 
     @abstractmethod
     async def mark_failed_queue_unavailable(
-        self, job: "AnalysisJob", message: str | None
-    ) -> "tuple[AnalysisJob, DocumentStatusVO]": ...
+        self, job: AnalysisJob, message: str | None
+    ) -> tuple[AnalysisJob, DocumentStatusVO]: ...
 
     @abstractmethod
-    async def cancel(self, job: "AnalysisJob") -> "tuple[AnalysisJob, DocumentStatusVO]": ...
+    async def cancel(self, job: AnalysisJob) -> tuple[AnalysisJob, DocumentStatusVO]: ...
 
     @abstractmethod
     async def mark_processing_if_active(self, job_id: uuid.UUID) -> bool: ...
@@ -499,11 +499,11 @@ class IAnalysisJobRepository(ABC):
     @abstractmethod
     async def update_status(
         self,
-        job: "AnalysisJob",
+        job: AnalysisJob,
         status: AnalysisJobStatusVO,
         error_code: str | None = None,
         error_message: str | None = None,
-    ) -> "AnalysisJob": ...
+    ) -> AnalysisJob: ...
 
 
 class IAuditLogRepository(ABC):
@@ -515,27 +515,27 @@ class IAuditLogRepository(ABC):
         user_id: uuid.UUID | None,
         action: str,
         details: Any | None = None,
-    ) -> "AuditLog": ...
+    ) -> AuditLog: ...
 
     @abstractmethod
     async def list_for_document(
         self, document_id: uuid.UUID, limit: int, offset: int
-    ) -> "list[AuditLog]": ...
+    ) -> list[AuditLog]: ...
 
 
 class IProjectRepository(ABC):
     @abstractmethod
-    async def get_by_id(self, project_id: uuid.UUID) -> "Project | None": ...
+    async def get_by_id(self, project_id: uuid.UUID) -> Project | None: ...
 
     @abstractmethod
-    async def get_for_user(self, project_id: uuid.UUID, owner_id: uuid.UUID) -> "Project":
+    async def get_for_user(self, project_id: uuid.UUID, owner_id: uuid.UUID) -> Project:
         """Проект владельца; если не найден или чужой — ProjectNotFoundError."""
 
     @abstractmethod
-    async def create(self, project: "Project") -> "Project": ...
+    async def create(self, project: Project) -> Project: ...
 
     @abstractmethod
-    async def list_all(self, limit: int, offset: int) -> "list[Project]": ...
+    async def list_all(self, limit: int, offset: int) -> list[Project]: ...
 
     @abstractmethod
     async def count_all(self) -> int: ...
@@ -543,7 +543,7 @@ class IProjectRepository(ABC):
     @abstractmethod
     async def list_by_owner(
         self, owner_id: uuid.UUID, limit: int, offset: int
-    ) -> "list[Project]": ...
+    ) -> list[Project]: ...
 
     @abstractmethod
     async def count_by_owner(self, owner_id: uuid.UUID) -> int: ...
@@ -551,24 +551,24 @@ class IProjectRepository(ABC):
     @abstractmethod
     async def update(
         self,
-        project: "Project",
+        project: Project,
         name: str | None = None,
         description: str | None = None,
-    ) -> "Project": ...
+    ) -> Project: ...
 
     @abstractmethod
     async def collect_storage_keys(self, project_id: uuid.UUID) -> list[str]: ...
 
     @abstractmethod
-    async def delete(self, project: "Project") -> None: ...
+    async def delete(self, project: Project) -> None: ...
 
 
 class IUserRepository(ABC):
     @abstractmethod
-    async def get_by_email(self, email: str) -> "User | None": ...
+    async def get_by_email(self, email: str) -> User | None: ...
 
     @abstractmethod
-    async def get_by_id(self, user_id: uuid.UUID) -> "User | None": ...
+    async def get_by_id(self, user_id: uuid.UUID) -> User | None: ...
 
     @abstractmethod
-    async def create(self, user: "User") -> "User": ...
+    async def create(self, user: User) -> User: ...

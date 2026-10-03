@@ -22,7 +22,9 @@ from typing import Any
 
 from app.core.config import get_settings
 
-request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("request_id", default=None)
+request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "request_id", default=None
+)
 task_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("task_id", default=None)
 
 _SENSITIVE_KEYS = {
@@ -42,7 +44,11 @@ _REDACTED = "***REDACTED***"
 def _redact(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            key: (_REDACTED if isinstance(key, str) and key.lower() in _SENSITIVE_KEYS else _redact(val))
+            key: (
+                _REDACTED
+                if isinstance(key, str) and key.lower() in _SENSITIVE_KEYS
+                else _redact(val)
+            )
             for key, val in value.items()
         }
     if isinstance(value, (list, tuple)):

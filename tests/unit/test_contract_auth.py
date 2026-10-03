@@ -10,6 +10,7 @@ F-2: Contract-тесты роутера auth.
 
 Тесты работают через мок сервисного слоя — реальная БД не нужна.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -55,6 +56,7 @@ def anyio_backend():
 # GET /health — smoke-тест, не требует auth
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.anyio
 async def test_health_check():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
@@ -66,6 +68,7 @@ async def test_health_check():
 # ---------------------------------------------------------------------------
 # POST /api/v1/auth/register
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.anyio
 async def test_register_returns_201():
@@ -107,6 +110,7 @@ async def test_register_duplicate_returns_409():
 # ---------------------------------------------------------------------------
 # POST /api/v1/auth/login
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.anyio
 async def test_login_returns_200_with_token():

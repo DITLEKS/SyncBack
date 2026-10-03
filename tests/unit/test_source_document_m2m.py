@@ -4,6 +4,7 @@ WARN-2: scope=document + document_id — M2M-запись в document_sources.
 Баги BUG-A и BUG-B закрыты — xfail-отметки сняты.
 Тесты верифицируют корректное поведение после исправления.
 """
+
 from __future__ import annotations
 
 import inspect
@@ -19,6 +20,7 @@ from app.domain.value_objects import SourceScopeVO
 # ---------------------------------------------------------------------------
 # Хелперы
 # ---------------------------------------------------------------------------
+
 
 def _make_service() -> tuple[SourceService, MagicMock, MagicMock]:
     """Возвращает (service, uow_mock, sources_repo_mock)."""
@@ -54,6 +56,7 @@ def _make_project(project_id: uuid.UUID | None = None) -> MagicMock:
 # BUG-A: сервисные методы принимают document_id
 # ---------------------------------------------------------------------------
 
+
 class TestServiceSignatures:
     """create_url/note/file_source имеют document_id: uuid.UUID | None = None."""
 
@@ -74,6 +77,7 @@ class TestServiceSignatures:
 # BUG-A: M2M-вставка происходит при scope=document
 # ---------------------------------------------------------------------------
 
+
 class TestM2MInsert:
     """При scope=DOCUMENT + document_id вызывается attach_to_document."""
 
@@ -93,7 +97,9 @@ class TestM2MInsert:
 
         sources_repo.attach_to_document.assert_awaited_once()
         call_args = sources_repo.attach_to_document.call_args
-        passed_doc_id = call_args.args[1] if len(call_args.args) >= 2 else call_args.kwargs.get("document_id")
+        passed_doc_id = (
+            call_args.args[1] if len(call_args.args) >= 2 else call_args.kwargs.get("document_id")
+        )
         assert passed_doc_id == doc_id
 
     @pytest.mark.asyncio
@@ -114,7 +120,9 @@ class TestM2MInsert:
 
         sources_repo.attach_to_document.assert_awaited_once()
         call_args = sources_repo.attach_to_document.call_args
-        passed_doc_id = call_args.args[1] if len(call_args.args) >= 2 else call_args.kwargs.get("document_id")
+        passed_doc_id = (
+            call_args.args[1] if len(call_args.args) >= 2 else call_args.kwargs.get("document_id")
+        )
         assert passed_doc_id == doc_id
 
     @pytest.mark.asyncio
@@ -133,13 +141,16 @@ class TestM2MInsert:
 
         sources_repo.attach_to_document.assert_awaited_once()
         call_args = sources_repo.attach_to_document.call_args
-        passed_doc_id = call_args.args[1] if len(call_args.args) >= 2 else call_args.kwargs.get("document_id")
+        passed_doc_id = (
+            call_args.args[1] if len(call_args.args) >= 2 else call_args.kwargs.get("document_id")
+        )
         assert passed_doc_id == doc_id
 
 
 # ---------------------------------------------------------------------------
 # BUG-B: роутер передаёт document_id в сервис
 # ---------------------------------------------------------------------------
+
 
 class TestRouterWiring:
     """create_url_source и create_note_source в роутере передают document_id."""
@@ -149,12 +160,12 @@ class TestRouterWiring:
         from pathlib import Path
 
         router_path = (
-            Path(__file__).parent.parent.parent
-            / "app" / "api" / "v1" / "routers" / "sources.py"
+            Path(__file__).parent.parent.parent / "app" / "api" / "v1" / "routers" / "sources.py"
         )
         tree = ast.parse(router_path.read_text(encoding="utf-8"))
         url_calls = [
-            node for node in ast.walk(tree)
+            node
+            for node in ast.walk(tree)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "create_url_source"
@@ -162,19 +173,21 @@ class TestRouterWiring:
         assert url_calls
         for call_node in url_calls:
             kw_names = {kw.arg for kw in call_node.keywords}
-            assert "document_id" in kw_names, f"create_url_source не передаёт document_id. kwargs={kw_names}"
+            assert "document_id" in kw_names, (
+                f"create_url_source не передаёт document_id. kwargs={kw_names}"
+            )
 
     def test_router_create_note_passes_document_id(self) -> None:
         import ast
         from pathlib import Path
 
         router_path = (
-            Path(__file__).parent.parent.parent
-            / "app" / "api" / "v1" / "routers" / "sources.py"
+            Path(__file__).parent.parent.parent / "app" / "api" / "v1" / "routers" / "sources.py"
         )
         tree = ast.parse(router_path.read_text(encoding="utf-8"))
         note_calls = [
-            node for node in ast.walk(tree)
+            node
+            for node in ast.walk(tree)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "create_note_source"
@@ -182,12 +195,15 @@ class TestRouterWiring:
         assert note_calls
         for call_node in note_calls:
             kw_names = {kw.arg for kw in call_node.keywords}
-            assert "document_id" in kw_names, f"create_note_source не передаёт document_id. kwargs={kw_names}"
+            assert "document_id" in kw_names, (
+                f"create_note_source не передаёт document_id. kwargs={kw_names}"
+            )
 
 
 # ---------------------------------------------------------------------------
 # Smoke: scope=project без document_id — нет регрессии
 # ---------------------------------------------------------------------------
+
 
 class TestProjectScopeUnaffected:
     """scope=project без document_id не затронут исправлениями."""
@@ -198,7 +214,9 @@ class TestProjectScopeUnaffected:
         project = _make_project()
 
         result = await service.create_url_source(
-            project, name="Docs", url="https://docs.example.com",
+            project,
+            name="Docs",
+            url="https://docs.example.com",
             scope=SourceScopeVO.PROJECT,
         )
 
@@ -212,8 +230,11 @@ class TestProjectScopeUnaffected:
         project = _make_project()
 
         result = await service.create_file_source(
-            project, name="manual.pdf", filename="manual.pdf",
-            content=b"data", content_type="application/pdf",
+            project,
+            name="manual.pdf",
+            filename="manual.pdf",
+            content=b"data",
+            content_type="application/pdf",
             scope=SourceScopeVO.PROJECT,
         )
 
@@ -228,7 +249,9 @@ class TestProjectScopeUnaffected:
         project = _make_project()
 
         result = await service.create_url_source(
-            project, name="Ref", url="https://ref.example.com",
+            project,
+            name="Ref",
+            url="https://ref.example.com",
             scope=SourceScopeVO.DOCUMENT,
             # document_id намеренно не передаём
         )

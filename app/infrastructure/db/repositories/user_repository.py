@@ -6,6 +6,7 @@
   Теперь только flush() + refresh() через параметрD obj для совместимости;
   commit — ответственность вызывающего UoW.
 """
+
 from __future__ import annotations
 
 import uuid

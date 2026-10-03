@@ -3,6 +3,7 @@ P0-11: Тесты GET /editor (P0-8 aggregate).
 
 Заглушки — будут реализованы после появления fixtures.
 """
+
 import pytest
 
 

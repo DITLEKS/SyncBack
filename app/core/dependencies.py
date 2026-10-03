@@ -65,10 +65,10 @@ from app.infrastructure.security.password_hasher import PasswordHasher
 from app.infrastructure.security.refresh_token_store import RefreshTokenStore
 from app.infrastructure.storage.minio_storage import MinioStorage
 
-
 # ---------------------------------------------------------------------------
 # Singleton-like infrastructure (one instance per process)
 # ---------------------------------------------------------------------------
+
 
 @lru_cache
 def _get_minio_storage() -> MinioStorage:
@@ -94,6 +94,7 @@ def _get_jwt_handler() -> JWTHandler:
 # Unit of Work (per-request)
 # ---------------------------------------------------------------------------
 
+
 def get_uow(
     session: AsyncSession = Depends(get_db_session),
 ) -> SqlAlchemyUnitOfWork:
@@ -108,6 +109,7 @@ def get_uow(
 # ---------------------------------------------------------------------------
 # Services — все используют UoW
 # ---------------------------------------------------------------------------
+
 
 def get_suggestion_service(
     uow: SqlAlchemyUnitOfWork = Depends(get_uow),
@@ -179,6 +181,7 @@ def get_document_export_service(
 # текущего запроса — передать session из get_uow явно.
 # ---------------------------------------------------------------------------
 
+
 def get_dashboard_query_service(
     session: AsyncSession = Depends(get_db_session),
 ) -> IDashboardQueryService:
@@ -204,6 +207,7 @@ def get_dashboard_service(
 # Per-request repositories (используются в deps.py для auth/authz)
 # ---------------------------------------------------------------------------
 
+
 def get_user_repository(
     session: AsyncSession = Depends(get_db_session),
 ) -> UserRepository:
@@ -221,6 +225,7 @@ def get_project_repository(
 # ---------------------------------------------------------------------------
 # Auth (UserRepository живёт вне UoW — отдельная сессия по дизайну)
 # ---------------------------------------------------------------------------
+
 
 def get_login_rate_limiter() -> LoginRateLimiter:
     return LoginRateLimiter(get_redis_client(), get_settings())

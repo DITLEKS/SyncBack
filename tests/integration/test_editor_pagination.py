@@ -13,6 +13,7 @@ PR4 regression guard — Editor API pagination.
 Тесты работают напрямую с БД через SQLAlchemy (без HTTP-слоя) и маркированы
 @pytest.mark.integration — запускаются только в CI с реальным PostgreSQL.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -30,6 +31,7 @@ N_SUGGESTIONS = 5  # достаточно для двух страниц по 2 
 # ---------------------------------------------------------------------------
 # Helpers (дублированы локально, чтобы тест был самодостаточным)
 # ---------------------------------------------------------------------------
+
 
 async def _make_user(s: AsyncSession) -> uuid.UUID:
     uid = uuid.uuid4()
@@ -173,19 +175,14 @@ class TestEditorPagination:
 
         empty_page = (
             await pg_session.execute(
-                text(
-                    "SELECT id FROM suggestions "
-                    "WHERE analysis_job_id = :jid LIMIT 2 OFFSET 9999"
-                ),
+                text("SELECT id FROM suggestions WHERE analysis_job_id = :jid LIMIT 2 OFFSET 9999"),
                 {"jid": str(job)},
             )
         ).fetchall()
 
         total = (
             await pg_session.execute(
-                text(
-                    "SELECT COUNT(*) FROM suggestions WHERE analysis_job_id = :jid"
-                ),
+                text("SELECT COUNT(*) FROM suggestions WHERE analysis_job_id = :jid"),
                 {"jid": str(job)},
             )
         ).scalar()
@@ -258,8 +255,7 @@ class TestEditorPagination:
         ).scalar()
 
         assert pending + accepted + rejected == total, (
-            f"Сумма счётчиков ({pending}+{accepted}+{rejected}) "
-            f"должна равняться total ({total})"
+            f"Сумма счётчиков ({pending}+{accepted}+{rejected}) должна равняться total ({total})"
         )
         assert pending == 3
         assert accepted == 1

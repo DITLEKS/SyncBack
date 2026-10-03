@@ -19,6 +19,7 @@ P1 / FIX-7: юнит-тесты SourceService.list_sources_for_documents.
   4. multiple_sources_per_document
      — несколько источников одного документа корректно накапливаются в список.
 """
+
 from __future__ import annotations
 
 import uuid

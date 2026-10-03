@@ -15,8 +15,8 @@ C-2 (аудит): статус-код зависит от результата.
 REFACTOR: dispatch делегирован в service.dispatch_job() —
   роутер не импортирует Celery-задачи напрямую.
 """
+
 import uuid
-from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, status
 from fastapi.responses import JSONResponse
@@ -50,7 +50,8 @@ class BulkAnalysisRequest(BaseModel):
     """UI-fix: если document_ids задан — анализ запускается только для них.
     Если null или поле опущено — запустить все analyzable документы проекта.
     """
-    document_ids: Optional[list[uuid.UUID]] = None
+
+    document_ids: list[uuid.UUID] | None = None
 
 
 @router.post(

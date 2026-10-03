@@ -21,9 +21,7 @@ depends_on = None
 def upgrade() -> None:
     # ADD VALUE не требует COMMIT — в PostgreSQL 12+ он выполняется в транзакции.
     # IF NOT EXISTS защищает от повторного применения (idempotent).
-    op.execute(
-        "ALTER TYPE analysis_job_status ADD VALUE IF NOT EXISTS 'partial_success'"
-    )
+    op.execute("ALTER TYPE analysis_job_status ADD VALUE IF NOT EXISTS 'partial_success'")
 
 
 def downgrade() -> None:

@@ -88,7 +88,7 @@ async def get_project(
                 "Пример: ?include=documents&include=sources"
             ),
         ),
-    ] = [],
+    ] = (),
     document_service: DocumentService = Depends(get_document_service),
     source_service: SourceService = Depends(get_source_service),
 ) -> ProjectResponse:
@@ -137,9 +137,7 @@ async def get_project(
                 created_at=d.uploaded_at,
                 updated_at=d.uploaded_at,
                 project=DocumentListProject(id=project.id, name=project.name),
-                suggestions=SuggestionCounters(
-                    total=0, pending=0, accepted=0, rejected=0
-                ),
+                suggestions=SuggestionCounters(total=0, pending=0, accepted=0, rejected=0),
                 sources=[
                     SourceBadge(id=s.id, name=s.name, type=s.type)
                     for s in sources_by_doc.get(d.id, [])

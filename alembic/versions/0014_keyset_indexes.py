@@ -19,6 +19,7 @@ Create Date: 2026-09-26
 обычный CREATE INDEX. На продакшн-базе с большими таблицами лучше применить
 вручную через CONCURRENTLY без Alembic, чтобы не блокировать таблицу.
 """
+
 from alembic import op
 
 revision = "0014"

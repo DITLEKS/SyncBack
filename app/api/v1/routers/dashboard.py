@@ -8,6 +8,7 @@ POST /projects/{id}/documents/{id}/open  — трекинг открытия д�
 
 GET /dashboard/stats удалён — его данные вошли в GET /dashboard (OPT-D1).
 """
+
 import uuid
 
 from fastapi import APIRouter, Depends, status

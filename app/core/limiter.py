@@ -35,6 +35,6 @@ from slowapi.util import get_remote_address
 
 limiter = Limiter(
     key_func=get_remote_address,
-    default_limits=[],          # глобальный лимит не выставляем — только точечно
-    headers_enabled=True,       # X-RateLimit-* заголовки в ответе
+    default_limits=[],  # глобальный лимит не выставляем — только точечно
+    headers_enabled=True,  # X-RateLimit-* заголовки в ответе
 )

@@ -37,6 +37,7 @@ PR4-FIX:
   - EditorDocumentMeta.updated_at: использует document.updated_at (с fallback на uploaded_at),
     а не всегда uploaded_at.
 """
+
 import asyncio
 import logging
 import uuid
@@ -58,7 +59,7 @@ from app.core.dependencies import (
     get_document_service,
     get_suggestion_service,
 )
-from app.domain.exceptions import DocumentNotFoundError, InvalidDocumentStatusError
+from app.domain.exceptions import DocumentNotFoundError
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.domain.services.document_service import DocumentService
 from app.domain.services.suggestion_service import SuggestionService
@@ -73,10 +74,12 @@ router = APIRouter(
     tags=["editor"],
 )
 
-_STATUSES_WITH_APPLIED_CHANGES = frozenset({
-    DocumentStatusVO.AWAITING_APPROVAL,
-    DocumentStatusVO.READY,
-})
+_STATUSES_WITH_APPLIED_CHANGES = frozenset(
+    {
+        DocumentStatusVO.AWAITING_APPROVAL,
+        DocumentStatusVO.READY,
+    }
+)
 
 _STATUS_VIEW_MODE: dict[DocumentStatusVO, str] = {
     DocumentStatusVO.DRAFT: "original",
@@ -85,19 +88,25 @@ _STATUS_VIEW_MODE: dict[DocumentStatusVO, str] = {
     DocumentStatusVO.READY: "clean",
 }
 
-_CAN_ANALYZE_STATUSES = frozenset({
-    DocumentStatusVO.DRAFT,
-    DocumentStatusVO.READY,
-})
+_CAN_ANALYZE_STATUSES = frozenset(
+    {
+        DocumentStatusVO.DRAFT,
+        DocumentStatusVO.READY,
+    }
+)
 
-_LOCKED_STATUSES = frozenset({
-    DocumentStatusVO.IN_PROGRESS,
-})
+_LOCKED_STATUSES = frozenset(
+    {
+        DocumentStatusVO.IN_PROGRESS,
+    }
+)
 
-_SOURCES_NOT_EDITABLE_STATUSES = frozenset({
-    DocumentStatusVO.IN_PROGRESS,
-    DocumentStatusVO.AWAITING_APPROVAL,
-})
+_SOURCES_NOT_EDITABLE_STATUSES = frozenset(
+    {
+        DocumentStatusVO.IN_PROGRESS,
+        DocumentStatusVO.AWAITING_APPROVAL,
+    }
+)
 
 _SUGGESTIONS_MAX_LIMIT = 200
 

@@ -5,6 +5,7 @@ Revision ID: 0010a
 Revises: 0009
 Create Date: 2026-09-27
 """
+
 from alembic import op
 import sqlalchemy as sa
 
@@ -28,10 +29,7 @@ def upgrade() -> None:
         sa.Column("total_count", sa.Integer, nullable=False),
         sa.Column("awaiting_count", sa.Integer, nullable=False),
         sa.Column("relevance_percent", sa.Float, nullable=False),
-        sa.UniqueConstraint(
-            "owner_id", "snapshot_date",
-            name="uq_dashboard_snapshot_owner_date"
-        ),
+        sa.UniqueConstraint("owner_id", "snapshot_date", name="uq_dashboard_snapshot_owner_date"),
     )
     op.create_index(
         "ix_dashboard_snapshots_owner_id",

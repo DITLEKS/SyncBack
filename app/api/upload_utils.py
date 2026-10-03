@@ -11,6 +11,7 @@
 это требует изменения контракта FileStorage на приём стрима, вынесено как
 отдельная задача.
 """
+
 from fastapi import UploadFile
 
 from app.domain.exceptions import FileTooLargeError

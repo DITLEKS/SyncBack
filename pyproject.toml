@@ -64,6 +64,9 @@ ignore = ["E501", "B008"]
 [tool.ruff.lint.per-file-ignores]
 "alembic/*" = ["ALL"]
 "tests/*" = ["ALL"]
+# Ленивые импорты ORM-моделей внутри методов; репозитории переписываются
+# на этапе 2 плана доработки, тогда исключение убрать.
+"app/infrastructure/db/repositories/*" = ["PLC0415"]
 
 [tool.mypy]
 python_version = "3.12"

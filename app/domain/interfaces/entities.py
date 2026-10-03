@@ -16,6 +16,7 @@
 C-4 (issue #37): добавлены decided_by и decided_at в SuggestionProtocol —
   нужны для SuggestionResponse.model_validate(suggestion, from_attributes=True).
 """
+
 from __future__ import annotations
 
 import uuid
@@ -32,6 +33,7 @@ class DocumentProtocol(Protocol):
     Удовлетворяется любым объектом, у которого есть эти атрибуты —
     в том числе SQLAlchemy Document и test fakes.
     """
+
     id: uuid.UUID
     project_id: uuid.UUID
     status: DocumentStatusVO
@@ -46,6 +48,7 @@ class SuggestionProtocol(Protocol):
     Покрывает атрибуты, читаемые в SuggestionService
     и DocumentExportService.
     """
+
     id: uuid.UUID
     analysis_job_id: uuid.UUID
     section_ref: str
@@ -68,6 +71,7 @@ class UserProtocol(Protocol):
     role возвращается как str (.value enum'а или plain string) —
     AuthService передаёт его в JWTHandler.create_access_token(role=...).
     """
+
     id: uuid.UUID
     email: str
     password_hash: str

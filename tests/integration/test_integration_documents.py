@@ -11,6 +11,7 @@
   pip install pytest pytest-asyncio asyncpg
   Схема должна быть накатана: alembic upgrade head
 """
+
 from __future__ import annotations
 
 import os
@@ -20,9 +21,7 @@ import pytest
 
 
 def pytest_configure(config):
-    config.addinivalue_line(
-        "markers", "integration: тесты, требующие реальной БД"
-    )
+    config.addinivalue_line("markers", "integration: тесты, требующие реальной БД")
 
 
 skip_without_db = pytest.mark.skipif(
@@ -122,9 +121,7 @@ async def test_document_list_for_project() -> None:
         )
         await session.commit()
 
-        docs = await repo.list_for_project(
-            project_id, PaginationParams(limit=100, offset=0)
-        )
+        docs = await repo.list_for_project(project_id, PaginationParams(limit=100, offset=0))
         fetched_ids = {d.id for d in docs}
 
         assert set(ids_in_project) == fetched_ids

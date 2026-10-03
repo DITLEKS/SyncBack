@@ -1,4 +1,5 @@
 """Схемы для /system/* эндпоинтов."""
+
 from pydantic import BaseModel, Field
 
 
@@ -11,14 +12,14 @@ class CapabilitiesResponse(BaseModel):
     unsupported_formats: list[str] = Field(
         description="Расширения, которые известны API, но вернут 400 при загрузке"
     )
-    max_file_size_mb: int = Field(
-        description="Максимальный размер загружаемого файла, МБ"
-    )
+    max_file_size_mb: int = Field(description="Максимальный размер загружаемого файла, МБ")
 
-    model_config = {"json_schema_extra": {
-        "example": {
-            "supported_formats": ["pdf", "docx", "txt", "md"],
-            "unsupported_formats": ["doc"],
-            "max_file_size_mb": 50,
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "supported_formats": ["pdf", "docx", "txt", "md"],
+                "unsupported_formats": ["doc"],
+                "max_file_size_mb": 50,
+            }
         }
-    }}
+    }

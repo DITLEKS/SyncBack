@@ -18,7 +18,10 @@ async def _homepage(request):
 
 
 def _build_client(monkeypatch, max_upload_size_bytes: int):
-    fake_settings = SimpleNamespace(max_upload_size_bytes=max_upload_size_bytes, max_upload_size_mb=max_upload_size_bytes // (1024 * 1024) or 1)
+    fake_settings = SimpleNamespace(
+        max_upload_size_bytes=max_upload_size_bytes,
+        max_upload_size_mb=max_upload_size_bytes // (1024 * 1024) or 1,
+    )
     monkeypatch.setattr(body_size_limit_middleware, "get_settings", lambda: fake_settings)
 
     app = Starlette(routes=[Route("/", _homepage, methods=["POST"])])
@@ -30,7 +33,9 @@ def test_rejects_request_over_limit(monkeypatch):
     client = _build_client(monkeypatch, max_upload_size_bytes=10)
     oversized_payload = b"x" * (10 + 2 * 1024 * 1024)  # заведомо больше лимита + overhead
 
-    response = client.post("/", content=oversized_payload, headers={"Content-Length": str(len(oversized_payload))})
+    response = client.post(
+        "/", content=oversized_payload, headers={"Content-Length": str(len(oversized_payload))}
+    )
 
     assert response.status_code == 413
 

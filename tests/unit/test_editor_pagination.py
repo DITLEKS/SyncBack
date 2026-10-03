@@ -8,6 +8,7 @@ PR4 — Editor API: тесты корректности счётчиков пр�
 
 Все тесты — юнит-тесты с моками; не требуют PostgreSQL.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -75,9 +76,7 @@ class TestEditorCountersAreIndependentOfPageSize:
     """PR4-FIX: счётчики берутся из count_by_document_and_status, а не из страницы."""
 
     @pytest.mark.asyncio
-    async def test_first_page_small_limit_counters_correct(
-        self, suggestion_service_mock, job_id
-    ):
+    async def test_first_page_small_limit_counters_correct(self, suggestion_service_mock, job_id):
         pagination = PaginationParams(limit=3, offset=0)
         suggestions, total = await suggestion_service_mock.list_suggestions_for_document(
             uuid.uuid4(), uuid.uuid4(), pagination
@@ -93,9 +92,7 @@ class TestEditorCountersAreIndependentOfPageSize:
         assert counts["rejected"] == 1
 
     @pytest.mark.asyncio
-    async def test_counters_do_not_change_across_pages(
-        self, suggestion_service_mock, job_id
-    ):
+    async def test_counters_do_not_change_across_pages(self, suggestion_service_mock, job_id):
         """Счётчики одинаковы на первой и второй странице — они не из страницы."""
         counts_page1 = await suggestion_service_mock.count_by_document_and_status(
             uuid.uuid4(), uuid.uuid4()
@@ -110,9 +107,7 @@ class TestEditorSecondPage:
     """Вторая страница возвращает правильный срез."""
 
     @pytest.mark.asyncio
-    async def test_second_page_offset_3_limit_3(
-        self, suggestion_service_mock, job_id
-    ):
+    async def test_second_page_offset_3_limit_3(self, suggestion_service_mock, job_id):
         pagination = PaginationParams(limit=3, offset=3)
         suggestions, total = await suggestion_service_mock.list_suggestions_for_document(
             uuid.uuid4(), uuid.uuid4(), pagination
@@ -121,9 +116,7 @@ class TestEditorSecondPage:
         assert len(suggestions) == 3
 
     @pytest.mark.asyncio
-    async def test_second_page_partial_last_page(
-        self, suggestion_service_mock, job_id
-    ):
+    async def test_second_page_partial_last_page(self, suggestion_service_mock, job_id):
         pagination = PaginationParams(limit=5, offset=5)
         suggestions, total = await suggestion_service_mock.list_suggestions_for_document(
             uuid.uuid4(), uuid.uuid4(), pagination
@@ -136,9 +129,7 @@ class TestEditorEmptyPage:
     """Пустая страница (offset >= total) — suggestions=[], total не изменяется."""
 
     @pytest.mark.asyncio
-    async def test_empty_page_beyond_total(
-        self, suggestion_service_mock, job_id
-    ):
+    async def test_empty_page_beyond_total(self, suggestion_service_mock, job_id):
         pagination = PaginationParams(limit=50, offset=100)
         suggestions, total = await suggestion_service_mock.list_suggestions_for_document(
             uuid.uuid4(), uuid.uuid4(), pagination
@@ -147,9 +138,7 @@ class TestEditorEmptyPage:
         assert suggestions == []
 
     @pytest.mark.asyncio
-    async def test_empty_page_counters_still_correct(
-        self, suggestion_service_mock, job_id
-    ):
+    async def test_empty_page_counters_still_correct(self, suggestion_service_mock, job_id):
         counts = await suggestion_service_mock.count_by_document_and_status(
             uuid.uuid4(), uuid.uuid4()
         )
@@ -180,6 +169,7 @@ class TestEditorUpdatedAt:
 
     def test_updated_at_fallback_to_uploaded_at_when_none(self):
         from datetime import datetime, timezone
+
         doc = MagicMock()
         doc.updated_at = None
         doc.uploaded_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -188,6 +178,7 @@ class TestEditorUpdatedAt:
 
     def test_updated_at_uses_updated_at_when_present(self):
         from datetime import datetime, timezone
+
         doc = MagicMock()
         doc.updated_at = datetime(2026, 9, 1, tzinfo=timezone.utc)
         doc.uploaded_at = datetime(2026, 1, 1, tzinfo=timezone.utc)

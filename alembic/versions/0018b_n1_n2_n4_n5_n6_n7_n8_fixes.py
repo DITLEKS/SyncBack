@@ -14,6 +14,7 @@ N-1, N-3, N-7, N-8 are Python-only fixes; no schema migration needed.
 
 Note: CONCURRENTLY removed — indexes dropped with plain DROP INDEX inside transaction.
 """
+
 from alembic import op
 import sqlalchemy as sa
 

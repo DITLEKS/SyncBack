@@ -16,7 +16,9 @@ from app.infrastructure.db.models.enums import DocumentStatus
 
 @pytest.mark.asyncio
 async def test_analysis_requires_draft_document():
-    document = SimpleNamespace(id=uuid.uuid4(), project_id=uuid.uuid4(), status=DocumentStatus.READY)
+    document = SimpleNamespace(
+        id=uuid.uuid4(), project_id=uuid.uuid4(), status=DocumentStatus.READY
+    )
     documents = SimpleNamespace(get_by_id=AsyncMock(return_value=document))
     jobs = SimpleNamespace(get_active_by_document_id=AsyncMock())
     service = AnalysisJobService(jobs, documents)
@@ -26,7 +28,9 @@ async def test_analysis_requires_draft_document():
 
 @pytest.mark.asyncio
 async def test_second_active_analysis_is_rejected():
-    document = SimpleNamespace(id=uuid.uuid4(), project_id=uuid.uuid4(), status=DocumentStatus.DRAFT)
+    document = SimpleNamespace(
+        id=uuid.uuid4(), project_id=uuid.uuid4(), status=DocumentStatus.DRAFT
+    )
     documents = SimpleNamespace(get_by_id=AsyncMock(return_value=document))
     jobs = SimpleNamespace(get_active_by_document_id=AsyncMock(return_value=object()))
     service = AnalysisJobService(jobs, documents)
@@ -42,7 +46,9 @@ async def test_review_cannot_finalize_with_pending_suggestions():
         status=DocumentStatus.AWAITING_APPROVAL,
         current_analysis_job_id=uuid.uuid4(),
     )
-    documents = SimpleNamespace(get_by_id=AsyncMock(return_value=document), update_status=AsyncMock())
+    documents = SimpleNamespace(
+        get_by_id=AsyncMock(return_value=document), update_status=AsyncMock()
+    )
     suggestions = SimpleNamespace(count_by_analysis_job_and_status=AsyncMock(return_value=2))
     service = SuggestionService(suggestions, documents)
     with pytest.raises(ReviewNotCompleteError):

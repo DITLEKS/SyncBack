@@ -13,5 +13,7 @@ class MarkdownParser:
         for i, match in enumerate(matches):
             start = match.start()
             end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-            sections.append(DocumentSection(ref=match.group(2).strip(), start_offset=start, end_offset=end))
+            sections.append(
+                DocumentSection(ref=match.group(2).strip(), start_offset=start, end_offset=end)
+            )
         return ParsedDocument(plain_text=text, sections=sections)

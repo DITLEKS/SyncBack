@@ -21,9 +21,10 @@ FIX-review-4: DocumentListItem.created_at → uploaded_at.
      failed/cancelled/completed) вынесено в отдельное поле analysis: AnalysisStateResponse.
      Хелпер resolve_document_public_status_and_analysis выполняет маппинг.
 """
+
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
 
@@ -36,6 +37,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Техническое состояние анализа (не путать с публичным статусом документа)
 # ---------------------------------------------------------------------------
+
 
 class AnalysisStateResponse(BaseModel):
     """Объект, описывающий состояние последнего analysis job.
@@ -51,6 +53,7 @@ class AnalysisStateResponse(BaseModel):
         error_message — человекочитаемое описание (при failed / cancelled).
         can_retry    — True, если фронт может показать кнопку «Анализировать».
     """
+
     job_id: uuid.UUID | None = None
     state: Literal["pending", "processing", "completed", "failed", "cancelled"]
     error_code: str | None = None
@@ -63,6 +66,7 @@ class AnalysisStateResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Хелпер маппинга (domain → API-контракт)
 # ---------------------------------------------------------------------------
+
 
 def resolve_document_public_status_and_analysis(
     doc_status: str,
@@ -128,6 +132,7 @@ def resolve_document_public_status_and_analysis(
 # Схемы ответов
 # ---------------------------------------------------------------------------
 
+
 class DocumentResponse(BaseModel):
     id: uuid.UUID
     project_id: uuid.UUID
@@ -173,6 +178,7 @@ class AttachSourcesResponse(BaseModel):
     прикреплённых к нему источников, чтобы фронт не делал дополнительный
     GET /sources после операции attach.
     """
+
     document: DocumentResponse
     sources: list["SourceResponse"]
 
@@ -180,6 +186,7 @@ class AttachSourcesResponse(BaseModel):
 
 
 # ── P0-6 ──────────────────────────────────────────────────────────────────────────
+
 
 class DocumentListProject(BaseModel):
     id: uuid.UUID

@@ -49,9 +49,7 @@ class ProjectRepository(IProjectRepository):
         result = await self._session.execute(select(func.count()).select_from(Project))
         return result.scalar_one()
 
-    async def list_by_owner(
-        self, owner_id: uuid.UUID, limit: int, offset: int
-    ) -> list[Project]:
+    async def list_by_owner(self, owner_id: uuid.UUID, limit: int, offset: int) -> list[Project]:
         result = await self._session.execute(
             select(Project)
             .where(Project.owner_id == owner_id)
@@ -63,9 +61,7 @@ class ProjectRepository(IProjectRepository):
 
     async def count_by_owner(self, owner_id: uuid.UUID) -> int:
         result = await self._session.execute(
-            select(func.count())
-            .select_from(Project)
-            .where(Project.owner_id == owner_id)
+            select(func.count()).select_from(Project).where(Project.owner_id == owner_id)
         )
         return result.scalar_one()
 

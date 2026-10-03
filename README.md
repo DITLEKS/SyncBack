@@ -295,8 +295,9 @@ Query-параметры пагинации правок:
 
 ```python
 import app.workers.tasks.analysis_tasks as t
-t._get_storage    = lambda: FakeStorage()
-t._get_connector  = lambda: FakeConnector()
+
+t._get_storage = lambda: FakeStorage()
+t._get_connector = lambda: FakeConnector()
 t._get_llm_client = lambda: FakeLLMClient()
 ```
 

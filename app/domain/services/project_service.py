@@ -6,6 +6,7 @@
   - Нет импортов из app.infrastructure.* при выполнении.
   - Один uow.commit() на операцию.
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -25,8 +26,8 @@ class ProjectService:
         self._storage = file_storage
 
     async def create_project(
-        self, owner: "User", name: str, description: str | None = None
-    ) -> "Project":
+        self, owner: User, name: str, description: str | None = None
+    ) -> Project:
         async with self._uow:
             project = await self._uow.projects.create(
                 owner_id=owner.id, name=name, description=description
@@ -35,34 +36,30 @@ class ProjectService:
         return project
 
     async def list_projects_for_user(
-        self, user: "User", limit: int, offset: int
-    ) -> "tuple[list[Project], int]":
+        self, user: User, limit: int, offset: int
+    ) -> tuple[list[Project], int]:
         async with self._uow:
             if user.role == UserRoleVO.ADMIN:
                 items = await self._uow.projects.list_all(limit=limit, offset=offset)
                 total = await self._uow.projects.count_all()
             else:
-                items = await self._uow.projects.list_by_owner(
-                    user.id, limit=limit, offset=offset
-                )
+                items = await self._uow.projects.list_by_owner(user.id, limit=limit, offset=offset)
                 total = await self._uow.projects.count_by_owner(user.id)
         return items, total
 
     async def update_project(
         self,
-        project: "Project",
+        project: Project,
         name: str | None = None,
         description: str | None = None,
-    ) -> "Project":
+    ) -> Project:
         """Частичное обновление полей проекта."""
         async with self._uow:
-            updated = await self._uow.projects.update(
-                project, name=name, description=description
-            )
+            updated = await self._uow.projects.update(project, name=name, description=description)
             await self._uow.commit()
         return updated
 
-    async def delete_project(self, project: "Project") -> None:
+    async def delete_project(self, project: Project) -> None:
         """
         Каскадное удаление:
         1. Собираем storage_key всех файлов проекта.

@@ -8,6 +8,7 @@ coroutine в одном event loop через asyncio.gather. Использую
 Для тестов с реальной PostgreSQL (row-level locking через SELECT ... FOR UPDATE)
 см. TODO в конце файла.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -29,9 +30,11 @@ from app.domain.value_objects import (
 # Stubs (те же что в test_atomic_review.py, но с атомарным CAS-счётчиком)
 # ---------------------------------------------------------------------------
 
+
 def _doc(document_id, project_id, job_id, review_version=0):
     class _D:
         pass
+
     d = _D()
     d.id = document_id
     d.project_id = project_id
@@ -44,6 +47,7 @@ def _doc(document_id, project_id, job_id, review_version=0):
 def _sug(suggestion_id, job_id):
     class _S:
         pass
+
     s = _S()
     s.id = suggestion_id
     s.analysis_job_id = job_id
@@ -64,7 +68,7 @@ class _ConcurrentDocRepo:
     async def compare_and_increment_review_version(self, document_id, expected_version):
         async with self._lock:
             if self._doc.review_version != expected_version:
-                return None          # CAS failed
+                return None  # CAS failed
             self._doc.review_version += 1
             return self._doc
 
@@ -120,15 +124,16 @@ class _ConcurrentUoW:
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture()
 def cids():
     return {
-        "project":  uuid.uuid4(),
+        "project": uuid.uuid4(),
         "document": uuid.uuid4(),
-        "job":      uuid.uuid4(),
-        "user":     uuid.uuid4(),
-        "s1":       uuid.uuid4(),
-        "s2":       uuid.uuid4(),
+        "job": uuid.uuid4(),
+        "user": uuid.uuid4(),
+        "s1": uuid.uuid4(),
+        "s2": uuid.uuid4(),
     }
 
 
@@ -142,6 +147,7 @@ def shared_uow(cids):
 # ---------------------------------------------------------------------------
 # TEST 1: Оба запроса с version=0 — ровно один побеждает, второй — OptimisticLockError
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.anyio
 async def test_concurrent_same_version_one_wins_one_fails(shared_uow, cids):
@@ -170,10 +176,10 @@ async def test_concurrent_same_version_one_wins_one_fails(shared_uow, cids):
     )
 
     successes = [r for r in results if not isinstance(r, Exception)]
-    failures  = [r for r in results if isinstance(r, OptimisticLockError)]
+    failures = [r for r in results if isinstance(r, OptimisticLockError)]
 
     assert len(successes) == 1, "Ровно один запрос должен пройти"
-    assert len(failures)  == 1, "Ровно один запрос должен получить OptimisticLockError"
+    assert len(failures) == 1, "Ровно один запрос должен получить OptimisticLockError"
     # После победившего запроса версия должна стать 1
     assert shared_uow.documents._doc.review_version == 1
 
@@ -181,6 +187,7 @@ async def test_concurrent_same_version_one_wins_one_fails(shared_uow, cids):
 # ---------------------------------------------------------------------------
 # TEST 2: Второй запрос с актуальной версией после первого — оба проходят
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.anyio
 async def test_sequential_concurrent_both_succeed(shared_uow, cids):
@@ -219,6 +226,7 @@ async def test_sequential_concurrent_both_succeed(shared_uow, cids):
 # TEST 3: Три параллельных запроса с одной версией — ровно один победитель
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.anyio
 async def test_three_concurrent_one_wins(cids):
     """
@@ -248,7 +256,7 @@ async def test_three_concurrent_one_wins(cids):
     successes = [r for r in results if not isinstance(r, Exception)]
     lock_errors = [r for r in results if isinstance(r, OptimisticLockError)]
 
-    assert len(successes)   == 1
+    assert len(successes) == 1
     assert len(lock_errors) == 2
     assert uow.documents._doc.review_version == 1
 
@@ -256,6 +264,7 @@ async def test_three_concurrent_one_wins(cids):
 # ---------------------------------------------------------------------------
 # TEST 4: Стаггеред race — первый получил lock, второй стартует сразу после
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.anyio
 async def test_staggered_race_second_sees_updated_version(cids):
@@ -280,20 +289,20 @@ async def test_staggered_race_second_sees_updated_version(cids):
         )
 
     async def _second():
-        await asyncio.sleep(0)   # yield — даём первому захватить lock
+        await asyncio.sleep(0)  # yield — даём первому захватить lock
         return await service.atomic_review_save(
             project_id=cids["project"],
             document_id=cids["document"],
             user_id=cids["user"],
-            review_version=0,    # намеренно устаревшая
+            review_version=0,  # намеренно устаревшая
             accepted_ids=(cids["s1"],),
             rejected_ids=(),
             finalize=False,
         )
 
     results = await asyncio.gather(_first(), _second(), return_exceptions=True)
-    successes  = [r for r in results if not isinstance(r, Exception)]
-    lock_errs  = [r for r in results if isinstance(r, OptimisticLockError)]
+    successes = [r for r in results if not isinstance(r, Exception)]
+    lock_errs = [r for r in results if isinstance(r, OptimisticLockError)]
 
     assert len(successes) == 1
     assert len(lock_errs) == 1

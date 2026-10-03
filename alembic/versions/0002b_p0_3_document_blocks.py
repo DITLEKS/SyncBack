@@ -4,6 +4,7 @@ Revision ID: 0002b
 Revises: 0002a
 Create Date: 2026-09-26
 """
+
 import sqlalchemy as sa
 from alembic import op
 
@@ -22,9 +23,7 @@ def upgrade() -> None:
         sa.Column("block_type", sa.String(length=64), nullable=False),
         sa.Column("content", sa.Text(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
-        sa.ForeignKeyConstraint(
-            ["document_id"], ["documents.id"], ondelete="CASCADE"
-        ),
+        sa.ForeignKeyConstraint(["document_id"], ["documents.id"], ondelete="CASCADE"),
     )
     op.create_index(
         "ix_document_blocks_document_id",

@@ -76,7 +76,10 @@ def _job_response(job, http_status: int = status.HTTP_201_CREATED) -> JSONRespon
     status_code=status.HTTP_201_CREATED,
     responses={
         201: {"model": AnalysisJobResponse, "description": "Задача создана"},
-        200: {"model": AnalysisJobResponse, "description": "Идемпотентный запрос — задача уже существует"},
+        200: {
+            "model": AnalysisJobResponse,
+            "description": "Идемпотентный запрос — задача уже существует",
+        },
         409: {
             "model": AnalysisJobConflictResponse,
             "description": "Анализ уже запущен, или документ READY/ERROR/CANCELLED — нужен force=True (P0-9)",
@@ -118,17 +121,14 @@ async def start_analysis_job(
             status_code=status.HTTP_409_CONFLICT,
             detail=AnalysisJobConflictResponse(
                 detail=(
-                    "Документ уже проходил анализ. "
-                    "Перезапустить анализ? Передайте force=true."
+                    "Документ уже проходил анализ. Перезапустить анализ? Передайте force=true."
                 ),
                 confirmation_required=True,
             ).model_dump(),
         )
 
     try:
-        job = await service.create_job(
-            project.id, document_id, idempotency_key=idempotency_key
-        )
+        job = await service.create_job(project.id, document_id, idempotency_key=idempotency_key)
     except (AnalysisAlreadyRunningError, InvalidDocumentStatusError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

@@ -5,6 +5,7 @@ L-C: DashboardRepository — это query-модель, а не агрегатн
 Unit of Work управляет агрегатами; read-model’ы инжектируются
 напрямую через FastAPI Depends.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -20,9 +21,7 @@ class IDashboardQueryService(ABC):
         """Агрегатная статистика: {total, awaiting, ready}."""
 
     @abstractmethod
-    async def get_trends(
-        self, owner_id: uuid.UUID, days: int = 7
-    ) -> list[dict]:
+    async def get_trends(self, owner_id: uuid.UUID, days: int = 7) -> list[dict]:
         """Снэпшоты за `days` дней из dashboard_snapshots.
 
         Возвращает отсортированный по дате список:
@@ -46,19 +45,13 @@ class IDashboardQueryService(ABC):
         """
 
     @abstractmethod
-    async def get_attention_documents(
-        self, owner_id: uuid.UUID, limit: int = 4
-    ) -> list[dict]:
+    async def get_attention_documents(self, owner_id: uuid.UUID, limit: int = 4) -> list[dict]:
         """Топ-N документов AWAITING_APPROVAL по pending_suggestions DESC."""
 
     @abstractmethod
-    async def get_recent_documents(
-        self, user_id: uuid.UUID, limit: int = 5
-    ) -> list[dict]:
+    async def get_recent_documents(self, user_id: uuid.UUID, limit: int = 5) -> list[dict]:
         """N последних открытых документов."""
 
     @abstractmethod
-    async def upsert_open(
-        self, user_id: uuid.UUID, document_id: uuid.UUID
-    ) -> None:
+    async def upsert_open(self, user_id: uuid.UUID, document_id: uuid.UUID) -> None:
         """Зафиксировать открытие документа (ON CONFLICT DO UPDATE)."""

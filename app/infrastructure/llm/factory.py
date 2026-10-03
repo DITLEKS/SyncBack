@@ -1,4 +1,5 @@
 """Выбор реализации LLMClient по LLM_PROVIDER: stub / remote_http / onprem."""
+
 from app.core.config import Settings, get_settings
 from app.domain.interfaces.llm_client import LLMClient
 from app.infrastructure.llm.http_llm_client import HttpLLMClient

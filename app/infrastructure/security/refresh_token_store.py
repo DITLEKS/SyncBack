@@ -9,6 +9,7 @@ REVIEW-1: хранилище активных refresh-токенов в Redis.
 Каждый refresh-токен несёт claim `jti` (JWT ID, uuid4).
 JWTHandler.create_refresh_token добавляет `jti` автоматически (см. изменения).
 """
+
 from __future__ import annotations
 
 import uuid

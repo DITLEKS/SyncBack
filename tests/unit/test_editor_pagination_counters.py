@@ -10,6 +10,7 @@ PR4 — тест пагинации счётчиков Editor API.
   2. Пустая вторая страница: счётчики корректно возвращают числа по всему job,
      даже если suggestions на этой странице = [].
 """
+
 from __future__ import annotations
 
 import uuid
@@ -52,11 +53,13 @@ async def test_counters_on_second_page_are_full_document_counts():
     mock_suggestions = MagicMock()
     mock_suggestions.get_by_id = AsyncMock(return_value=mock_doc)
     mock_suggestions.list_with_total = AsyncMock(return_value=(page2_suggestions, 82))
-    mock_suggestions.count_by_analysis_job_and_status = AsyncMock(side_effect=[
-        80,  # PENDING
-        30,  # ACCEPTED
-        10,  # REJECTED
-    ])
+    mock_suggestions.count_by_analysis_job_and_status = AsyncMock(
+        side_effect=[
+            80,  # PENDING
+            30,  # ACCEPTED
+            10,  # REJECTED
+        ]
+    )
 
     mock_documents = MagicMock()
     mock_documents.get_by_id = AsyncMock(return_value=mock_doc)
@@ -97,11 +100,13 @@ async def test_counters_on_empty_second_page_return_full_counts():
     mock_suggestions = MagicMock()
     mock_suggestions.get_by_id = AsyncMock(return_value=mock_doc)
     mock_suggestions.list_with_total = AsyncMock(return_value=([], 0))
-    mock_suggestions.count_by_analysis_job_and_status = AsyncMock(side_effect=[
-        5,   # PENDING
-        45,  # ACCEPTED
-        0,   # REJECTED
-    ])
+    mock_suggestions.count_by_analysis_job_and_status = AsyncMock(
+        side_effect=[
+            5,  # PENDING
+            45,  # ACCEPTED
+            0,  # REJECTED
+        ]
+    )
 
     mock_documents = MagicMock()
     mock_documents.get_by_id = AsyncMock(return_value=mock_doc)

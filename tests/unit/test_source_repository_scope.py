@@ -8,6 +8,7 @@
 Для replace_document_sources и attach_to_document мокируется session:
 тесты проверяют переданные аргументы, а не SQL-рез-т.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -61,8 +62,8 @@ def _src(name: str = "s", scope: str = "document") -> SimpleNamespace:
 # 7a. list_by_document_ids — корректная группировка кортежей
 # ---------------------------------------------------------------------------
 
-class TestListByDocumentIds:
 
+class TestListByDocumentIds:
     @pytest.mark.asyncio
     async def test_groups_sources_by_document(self) -> None:
         """Кортежи (source, doc_id) корректно группируются в dict."""
@@ -120,8 +121,8 @@ class TestListByDocumentIds:
 # 8. attach_to_document — идемпотентность
 # ---------------------------------------------------------------------------
 
-class TestAttachToDocumentIdempotence:
 
+class TestAttachToDocumentIdempotence:
     @pytest.mark.asyncio
     async def test_double_attach_does_not_raise(self) -> None:
         """Двойной вызов attach_to_document не бросает исключений.
@@ -146,13 +147,19 @@ class TestAttachToDocumentIdempotence:
 
         # Первый вызов
         await svc.create_url_source(
-            project, name="s1", url="https://a.com",
-            scope=SourceScopeVO.DOCUMENT, document_id=doc_id,
+            project,
+            name="s1",
+            url="https://a.com",
+            scope=SourceScopeVO.DOCUMENT,
+            document_id=doc_id,
         )
         # Второй вызов — тот же document_id
         await svc.create_url_source(
-            project, name="s2", url="https://b.com",
-            scope=SourceScopeVO.DOCUMENT, document_id=doc_id,
+            project,
+            name="s2",
+            url="https://b.com",
+            scope=SourceScopeVO.DOCUMENT,
+            document_id=doc_id,
         )
 
         # Оба вызова attach прошли без исключений
@@ -173,7 +180,9 @@ class TestAttachToDocumentIdempotence:
 
         svc = SourceService(uow=uow, file_storage=AsyncMock())
         await svc.create_url_source(
-            project, name="proj-src", url="https://c.com",
+            project,
+            name="proj-src",
+            url="https://c.com",
             scope=SourceScopeVO.PROJECT,
         )
 
@@ -184,8 +193,8 @@ class TestAttachToDocumentIdempotence:
 # 9. replace_document_sources — очистка старых связей
 # ---------------------------------------------------------------------------
 
-class TestReplaceDocumentSources:
 
+class TestReplaceDocumentSources:
     @pytest.mark.asyncio
     async def test_replace_calls_repo_replace_with_new_sources(self) -> None:
         """replace_document_sources передаёт новые источники в репозиторий."""

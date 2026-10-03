@@ -32,7 +32,9 @@ class JWTHandler:
             "iat": now,
             "exp": now + timedelta(seconds=expires_in),
         }
-        token = jwt.encode(payload, self._settings.jwt_secret, algorithm=self._settings.jwt_algorithm)
+        token = jwt.encode(
+            payload, self._settings.jwt_secret, algorithm=self._settings.jwt_algorithm
+        )
         return token, expires_in
 
     def create_refresh_token(self, user_id: uuid.UUID, role: str) -> tuple[str, int, str]:
@@ -52,12 +54,16 @@ class JWTHandler:
             "iat": now,
             "exp": now + timedelta(seconds=expires_in),
         }
-        token = jwt.encode(payload, self._settings.jwt_secret, algorithm=self._settings.jwt_algorithm)
+        token = jwt.encode(
+            payload, self._settings.jwt_secret, algorithm=self._settings.jwt_algorithm
+        )
         return token, expires_in, jti
 
     def decode_token(self, token: str) -> dict:
         try:
-            return jwt.decode(token, self._settings.jwt_secret, algorithms=[self._settings.jwt_algorithm])
+            return jwt.decode(
+                token, self._settings.jwt_secret, algorithms=[self._settings.jwt_algorithm]
+            )
         except jwt.ExpiredSignatureError as exc:
             raise InvalidTokenError("Токен истёк") from exc
         except jwt.InvalidTokenError as exc:

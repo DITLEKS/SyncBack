@@ -3,6 +3,7 @@
 PK — составной (user_id, document_id) для эффективного upsert:
   INSERT ... ON CONFLICT (user_id, document_id) DO UPDATE SET last_opened_at = now()
 """
+
 from __future__ import annotations
 
 import uuid

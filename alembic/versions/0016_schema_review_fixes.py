@@ -4,6 +4,7 @@ Revision ID: 0016
 Revises: 0015
 Create Date: 2026-09-27
 """
+
 from __future__ import annotations
 
 import sqlalchemy as sa
@@ -20,6 +21,7 @@ depends_on = None
 # helpers
 # ---------------------------------------------------------------------------
 
+
 def _add_enum_value(pg_type: str, value: str) -> None:
     """ALTER TYPE ... ADD VALUE IF NOT EXISTS (idempotent)."""
     op.execute(f"ALTER TYPE {pg_type} ADD VALUE IF NOT EXISTS '{value}'")
@@ -32,6 +34,7 @@ def _exec(sql: str) -> None:
 # ---------------------------------------------------------------------------
 # upgrade
 # ---------------------------------------------------------------------------
+
 
 def upgrade() -> None:
     bind = op.get_bind()
@@ -66,10 +69,7 @@ def upgrade() -> None:
         batch_op.drop_column("id")
     # After batch, recreate PK constraint explicitly (SQLite-style batch already
     # handles this; on Postgres we do it directly).
-    _exec(
-        "ALTER TABLE document_sources "
-        "ADD PRIMARY KEY (document_id, source_id)"
-    )
+    _exec("ALTER TABLE document_sources ADD PRIMARY KEY (document_id, source_id)")
 
     # ── 3. document_opens — composite PK (drop surrogate id) ────────────────
     # 0010 created the table with a surrogate id PK + a separate unique constraint.
@@ -77,10 +77,7 @@ def upgrade() -> None:
     op.drop_constraint("uq_document_opens_user_document", "document_opens", type_="unique")
     with op.batch_alter_table("document_opens") as batch_op:
         batch_op.drop_column("id")
-    _exec(
-        "ALTER TABLE document_opens "
-        "ADD PRIMARY KEY (user_id, document_id)"
-    )
+    _exec("ALTER TABLE document_opens ADD PRIMARY KEY (user_id, document_id)")
 
     # ── 4. documents — add updated_at; fix current_analysis_job_id FK ───────
     op.add_column(
@@ -94,10 +91,7 @@ def upgrade() -> None:
     )
     # Re-create FK with SET NULL (previously it was CASCADE or no ondelete).
     # First, find and drop the existing FK by name conventions.
-    _exec(
-        "ALTER TABLE documents "
-        "DROP CONSTRAINT IF EXISTS documents_current_analysis_job_id_fkey"
-    )
+    _exec("ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_current_analysis_job_id_fkey")
     _exec(
         "ALTER TABLE documents "
         "ADD CONSTRAINT documents_current_analysis_job_id_fkey "
@@ -133,10 +127,7 @@ def upgrade() -> None:
             ),
         )
     # 5c. fix user_id FK: CASCADE → SET NULL
-    _exec(
-        "ALTER TABLE audit_logs "
-        "DROP CONSTRAINT IF EXISTS audit_logs_user_id_fkey"
-    )
+    _exec("ALTER TABLE audit_logs DROP CONSTRAINT IF EXISTS audit_logs_user_id_fkey")
     _exec(
         "ALTER TABLE audit_logs "
         "ADD CONSTRAINT audit_logs_user_id_fkey "
@@ -180,8 +171,7 @@ def upgrade() -> None:
     # 6d. add order_index
     op.add_column(
         "suggestions",
-        sa.Column("order_index", sa.Integer(), nullable=False,
-                  server_default="0"),
+        sa.Column("order_index", sa.Integer(), nullable=False, server_default="0"),
     )
 
     # ── 7. document_blocks — add block_ref ───────────────────────────────────
@@ -252,6 +242,7 @@ def upgrade() -> None:
 # downgrade
 # ---------------------------------------------------------------------------
 
+
 def downgrade() -> None:
     # 9
     op.drop_column("projects", "updated_at")
@@ -304,8 +295,12 @@ def downgrade() -> None:
     _exec("ALTER TABLE document_opens DROP CONSTRAINT IF EXISTS document_opens_pkey")
     op.add_column(
         "document_opens",
-        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False,
-                  server_default=sa.func.gen_random_uuid()),
+        sa.Column(
+            "id",
+            postgresql.UUID(as_uuid=True),
+            nullable=False,
+            server_default=sa.func.gen_random_uuid(),
+        ),
     )
     _exec("ALTER TABLE document_opens ADD PRIMARY KEY (id)")
     op.create_unique_constraint(
@@ -318,8 +313,12 @@ def downgrade() -> None:
     _exec("ALTER TABLE document_sources DROP CONSTRAINT IF EXISTS document_sources_pkey")
     op.add_column(
         "document_sources",
-        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False,
-                  server_default=sa.func.gen_random_uuid()),
+        sa.Column(
+            "id",
+            postgresql.UUID(as_uuid=True),
+            nullable=False,
+            server_default=sa.func.gen_random_uuid(),
+        ),
     )
     _exec("ALTER TABLE document_sources ADD PRIMARY KEY (id)")
 

@@ -3,6 +3,7 @@
 
 Архитектурное правило: зависит только от IUnitOfWork.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -43,6 +44,4 @@ class AuditLogService:
         offset: int = 0,
     ) -> list[AuditLog]:
         async with self._uow:
-            return await self._uow.audit.list_for_document(
-                document_id, limit=limit, offset=offset
-            )
+            return await self._uow.audit.list_for_document(document_id, limit=limit, offset=offset)

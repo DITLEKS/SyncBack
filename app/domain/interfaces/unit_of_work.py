@@ -22,6 +22,7 @@ L-C: dashboard УБРАН из IUnitOfWork. DashboardRepository — read-model, 
   Инжектируется как IDashboardQueryService через FastAPI Depends(get_dashboard_query_service).
   См. app/domain/interfaces/dashboard_query_service.py.
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -54,20 +55,20 @@ class IUnitOfWork(ABC):
     """
 
     # Core
-    documents:   "IDocumentRepository"
-    suggestions: "ISuggestionRepository"
-    jobs:        "IAnalysisJobRepository"
-    audit:       "IAuditLogRepository"
+    documents: IDocumentRepository
+    suggestions: ISuggestionRepository
+    jobs: IAnalysisJobRepository
+    audit: IAuditLogRepository
 
     # Extended
-    projects:    "IProjectRepository"
-    sources:     "ISourceRepository"
+    projects: IProjectRepository
+    sources: ISourceRepository
 
     # Auth — HIGH: заменён UserRepository (инфра) на IUserRepository (порт)
-    users:       "IUserRepository"
+    users: IUserRepository
 
     @abstractmethod
-    async def __aenter__(self) -> "IUnitOfWork":
+    async def __aenter__(self) -> IUnitOfWork:
         """Войти в транзакционный контекст."""
 
     @abstractmethod

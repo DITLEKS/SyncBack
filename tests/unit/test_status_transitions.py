@@ -3,6 +3,7 @@ Unit-тесты статусных переходов документа по т
 
 Проверяются только доменные инварианты без обращения к БД или очереди.
 """
+
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 

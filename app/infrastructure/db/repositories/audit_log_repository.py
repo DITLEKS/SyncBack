@@ -6,6 +6,7 @@ SQLAlchemy-адаптер для AuditLog.
 M-NEW-3: create() переходит на фабричный паттерн: принимает параметры,
 а не готовый ORM-инстанс AuditLog.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -31,9 +32,10 @@ class AuditLogRepository(IAuditLogRepository):
         user_id: uuid.UUID | None,
         action: str,
         details: Any | None = None,
-    ) -> "AuditLog":
+    ) -> AuditLog:
         """M-NEW-3: фабричный метод — сервис не импортирует AuditLog ORM."""
         from app.infrastructure.db.models.audit_log import AuditLog as M
+
         entry = M(
             document_id=document_id,
             user_id=user_id,
@@ -49,8 +51,9 @@ class AuditLogRepository(IAuditLogRepository):
         document_id: uuid.UUID,
         limit: int,
         offset: int,
-    ) -> "list[AuditLog]":
+    ) -> list[AuditLog]:
         from app.infrastructure.db.models.audit_log import AuditLog as M
+
         result = await self._session.execute(
             select(M)
             .where(M.document_id == document_id)

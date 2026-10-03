@@ -17,6 +17,7 @@ M-5: get_document_content ловит конкретные ошибки:
 R-1: POST /{id}/sources возвращает AttachSourcesResponse(document, sources)
      вместо голого DocumentResponse — фронт не делает лишний GET /sources.
 """
+
 import logging
 import uuid
 from typing import Literal  # noqa: F401
@@ -60,19 +61,15 @@ from app.infrastructure.db.models.user import User
 
 logger = logging.getLogger("syncscribe.api.documents")
 
-_document_list_adapter: TypeAdapter[list[DocumentResponse]] = TypeAdapter(
-    list[DocumentResponse]
-)
+_document_list_adapter: TypeAdapter[list[DocumentResponse]] = TypeAdapter(list[DocumentResponse])
 
 _EXPORT_FORMAT_MAP: dict[str, DocumentFormatVO] = {
-    "md":   DocumentFormatVO.MARKDOWN,
+    "md": DocumentFormatVO.MARKDOWN,
     "docx": DocumentFormatVO.DOCX,
-    "txt":  DocumentFormatVO.TXT,
+    "txt": DocumentFormatVO.TXT,
 }
 
-_STATUS_FILTER_MAP: dict[str, DocumentStatusVO] = {
-    vo.value: vo for vo in DocumentStatusVO
-}
+_STATUS_FILTER_MAP: dict[str, DocumentStatusVO] = {vo.value: vo for vo in DocumentStatusVO}
 
 router = APIRouter(prefix="/projects/{project_id}/documents", tags=["documents"])
 
@@ -99,9 +96,7 @@ async def upload_document(
     settings: Settings = Depends(get_settings),
 ) -> DocumentResponse:
     if not file.filename:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Имя файла обязательно"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Имя файла обязательно")
     try:
         content = await read_upload_within_limit(file, settings.max_upload_size_bytes)
     except FileTooLargeError as exc:
@@ -131,8 +126,7 @@ async def list_documents(
         default=None,
         alias="status",
         description=(
-            "Фильтр по статусу документа. "
-            f"Допустимые значения: {', '.join(_STATUS_FILTER_MAP)}"
+            f"Фильтр по статусу документа. Допустимые значения: {', '.join(_STATUS_FILTER_MAP)}"
         ),
     ),
     project: Project = Depends(get_allowed_project),
@@ -226,9 +220,7 @@ async def get_document_content(
     return DocumentContentResponse(
         plain_text=parsed.plain_text,
         sections=[
-            DocumentSectionResponse(
-                ref=s.ref, start_offset=s.start_offset, end_offset=s.end_offset
-            )
+            DocumentSectionResponse(ref=s.ref, start_offset=s.start_offset, end_offset=s.end_offset)
             for s in parsed.sections
         ],
     )

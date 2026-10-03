@@ -15,10 +15,11 @@ SQLAlchemy-реализация Unit of Work.
     через FastAPI Depends(get_dashboard_service) (DashboardService получает UoW,
     но не DashboardRepository в IUnitOfWork).
 """
+
 from __future__ import annotations
 
-from typing import Any
 from types import TracebackType
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,19 +45,19 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         self._session = session
 
         # Core repositories
-        self.documents   = DocumentRepository(session)
+        self.documents = DocumentRepository(session)
         self.suggestions = SuggestionRepository(session)
-        self.jobs        = AnalysisJobRepository(session)
-        self.audit       = AuditLogRepository(session)
+        self.jobs = AnalysisJobRepository(session)
+        self.audit = AuditLogRepository(session)
 
         # Extended repositories
-        self.projects    = ProjectRepository(session)
-        self.sources     = SourceRepository(session)
+        self.projects = ProjectRepository(session)
+        self.sources = SourceRepository(session)
 
         # Auth repositories (HIGH-A: добавлен, чтобы uow.users не давал AttributeError)
-        self.users       = UserRepository(session)
+        self.users = UserRepository(session)
 
-    async def __aenter__(self) -> "SqlAlchemyUnitOfWork":
+    async def __aenter__(self) -> SqlAlchemyUnitOfWork:
         return self
 
     async def __aexit__(

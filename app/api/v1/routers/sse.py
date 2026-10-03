@@ -28,6 +28,7 @@ FIX-5: endpoint теперь возвращает HTTP 422 если переда
 FIX-4: get_redis_client() использует Redis.from_url() — конструктор без
   сетевого вызова (соединение ленивое). Блокировок event loop нет — no-op.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -35,8 +36,8 @@ import json
 import logging
 import uuid
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass, field
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
@@ -55,6 +56,7 @@ DOCUMENT_IDS_MAX = 50
 @dataclass
 class SSEEvent:
     """Одно SSE-событие, отправляемое клиенту."""
+
     event: str
     data: dict = field(default_factory=dict)
     document_id: uuid.UUID | None = None
@@ -62,21 +64,20 @@ class SSEEvent:
 
     def to_sse_bytes(self) -> bytes:
         payload = {"event": self.event, **self.data}
-        return (
-            f"event: {self.event}\n"
-            f"data: {json.dumps(payload)}\n\n"
-        ).encode()
+        return (f"event: {self.event}\ndata: {json.dumps(payload)}\n\n").encode()
 
     def to_json(self) -> str:
-        return json.dumps({
-            "event": self.event,
-            "data": self.data,
-            "document_id": str(self.document_id) if self.document_id else None,
-            "user_id": str(self.user_id) if self.user_id else None,
-        })
+        return json.dumps(
+            {
+                "event": self.event,
+                "data": self.data,
+                "document_id": str(self.document_id) if self.document_id else None,
+                "user_id": str(self.user_id) if self.user_id else None,
+            }
+        )
 
     @staticmethod
-    def from_json(raw: str) -> "SSEEvent":
+    def from_json(raw: str) -> SSEEvent:
         d = json.loads(raw)
         return SSEEvent(
             event=d["event"],
@@ -168,7 +169,8 @@ class RedisPubSubBroker(ISSEBroker):
         self._pubsub = None
 
     async def start(self) -> None:
-        import redis.asyncio as aioredis
+        import redis.asyncio as aioredis  # noqa: PLC0415
+
         self._redis = aioredis.from_url(self._redis_url, decode_responses=True)
         self._pubsub = self._redis.pubsub()
         await self._pubsub.subscribe(self._channel)
@@ -251,7 +253,9 @@ class RedisPubSubBroker(ISSEBroker):
 _broker: ISSEBroker | None = None
 
 
-async def init_sse_broker(redis_url: str | None = None, channel: str = "syncscribe:sse") -> ISSEBroker:
+async def init_sse_broker(
+    redis_url: str | None = None, channel: str = "syncscribe:sse"
+) -> ISSEBroker:
     """Инициализировать брокер при старте приложения (вызывать из lifespan)."""
     global _broker
     if redis_url:
@@ -261,9 +265,7 @@ async def init_sse_broker(redis_url: str | None = None, channel: str = "syncscri
             _broker = broker
             logger.info("SSE: использует Redis Pub/Sub (%s)", channel)
         except Exception as exc:
-            logger.warning(
-                "SSE: Redis недоступен (%s), fallback на in-memory брокер", exc
-            )
+            logger.warning("SSE: Redis недоступен (%s), fallback на in-memory брокер", exc)
             _broker = InMemorySSEBroker()
     else:
         _broker = InMemorySSEBroker()
@@ -295,10 +297,8 @@ async def _event_stream(
     try:
         while True:
             try:
-                event: SSEEvent | None = await asyncio.wait_for(
-                    q.get(), timeout=PING_INTERVAL
-                )
-            except asyncio.TimeoutError:
+                event: SSEEvent | None = await asyncio.wait_for(q.get(), timeout=PING_INTERVAL)
+            except TimeoutError:
                 yield b"event: ping\ndata: {}\n\n"
                 continue
 

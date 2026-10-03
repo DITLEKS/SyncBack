@@ -12,6 +12,7 @@ REVIEW-7: AuthService больше не импортирует ORM-модель 
   Инстансирование User вынесено в UserRepository.create_from_credentials,
   чтобы domain-сервис не знал об инфраструктурном слое.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -81,7 +82,9 @@ class AuthService:
             raise InvalidCredentialsError("Пользователь не найден")
 
         access_token, expires_in = self._jwt.create_access_token(user.id, user.role)
-        new_refresh_token, refresh_expires_in, new_jti = self._jwt.create_refresh_token(user.id, user.role)
+        new_refresh_token, refresh_expires_in, new_jti = self._jwt.create_refresh_token(
+            user.id, user.role
+        )
         await self._refresh_store.save(new_jti, user.id, refresh_expires_in)
         return access_token, new_refresh_token, expires_in, refresh_expires_in
 

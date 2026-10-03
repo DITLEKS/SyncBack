@@ -23,7 +23,9 @@ from app.infrastructure.storage.minio_storage import MinioStorage
 
 
 @pytest.mark.asyncio
-async def test_document_upload_deletes_orphan_file_on_db_failure(db_session, minio_storage: MinioStorage, monkeypatch):
+async def test_document_upload_deletes_orphan_file_on_db_failure(
+    db_session, minio_storage: MinioStorage, monkeypatch
+):
     repo = DocumentRepository(db_session)
     service = DocumentService(repo, minio_storage)
     project = Project(
@@ -32,7 +34,9 @@ async def test_document_upload_deletes_orphan_file_on_db_failure(db_session, min
         owner_id=uuid.UUID("22222222-2222-2222-2222-222222222222"),
     )
     expected_document_id = uuid.UUID("33333333-3333-3333-3333-333333333333")
-    monkeypatch.setattr("app.domain.services.document_service.uuid.uuid4", lambda: expected_document_id)
+    monkeypatch.setattr(
+        "app.domain.services.document_service.uuid.uuid4", lambda: expected_document_id
+    )
     repo.create = AsyncMock(side_effect=Exception("DB create failed"))
 
     with pytest.raises(Exception, match="DB create failed"):
@@ -43,7 +47,9 @@ async def test_document_upload_deletes_orphan_file_on_db_failure(db_session, min
 
 
 @pytest.mark.asyncio
-async def test_source_upload_deletes_orphan_file_on_db_failure(db_session, minio_storage: MinioStorage, monkeypatch):
+async def test_source_upload_deletes_orphan_file_on_db_failure(
+    db_session, minio_storage: MinioStorage, monkeypatch
+):
     repo = SourceRepository(db_session)
     service = SourceService(repo, minio_storage)
     project = Project(
@@ -56,7 +62,9 @@ async def test_source_upload_deletes_orphan_file_on_db_failure(db_session, minio
     repo.create = AsyncMock(side_effect=Exception("DB create failed"))
 
     with pytest.raises(Exception, match="DB create failed"):
-        await service.create_file_source(project, "Test source", "upload.txt", b"hello world", "text/plain")
+        await service.create_file_source(
+            project, "Test source", "upload.txt", b"hello world", "text/plain"
+        )
 
     storage_key = f"projects/{project.id}/sources/{expected_source_id}/upload.txt"
     assert not await minio_storage.exists(storage_key)

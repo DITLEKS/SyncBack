@@ -6,6 +6,7 @@ RESET:  SuggestionResponse расширен nullable-полями decided_by / d
 PATCH:  PatchSuggestionsRequest/Response — единый bulk/single update статуса правок.
         Заменяет удалённые BulkAcceptResponse / BulkRejectResponse и RPC-суффиксы.
 """
+
 import uuid
 from datetime import datetime
 from typing import Literal
@@ -33,6 +34,7 @@ class SuggestionResponse(BaseModel):
 # PATCH /suggestions — единый эндпоинт обновления статуса правок
 # ---------------------------------------------------------------------------
 
+
 class PatchSuggestionsRequest(BaseModel):
     """Тело запроса для PATCH /suggestions.
 
@@ -58,7 +60,7 @@ class PatchSuggestionsRequest(BaseModel):
         if has_ids == has_filter:  # оба True или оба False
             raise ValueError(
                 "Укажите ровно одно из полей: 'ids' (список UUID) "
-                "или 'filter' (\"pending\"|\"decided\"|\"all\")."
+                'или \'filter\' ("pending"|"decided"|"all").'
             )
         return self
 

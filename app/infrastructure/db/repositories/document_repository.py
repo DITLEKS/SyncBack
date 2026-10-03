@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import delete, exists, func, select, text, tuple_, update
+from sqlalchemy import delete, exists, func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.repositories import IDocumentRepository
@@ -13,16 +13,19 @@ if TYPE_CHECKING:
     from app.infrastructure.db.models.document import Document
     from app.infrastructure.db.models.enums import DocumentFormat
 
-_ANALYZABLE_STATUSES: frozenset[DocumentStatusVO] = frozenset({
-    DocumentStatusVO.DRAFT,
-    DocumentStatusVO.AWAITING_APPROVAL,
-})
+_ANALYZABLE_STATUSES: frozenset[DocumentStatusVO] = frozenset(
+    {
+        DocumentStatusVO.DRAFT,
+        DocumentStatusVO.AWAITING_APPROVAL,
+    }
+)
 
 _SORT_COLUMNS = frozenset({"created_at", "updated_at", "name"})
 
 
 def _status_to_orm(vo: DocumentStatusVO):
     from app.infrastructure.db.models.enums import DocumentStatus
+
     return DocumentStatus(vo.value)
 
 
@@ -36,11 +39,12 @@ class DocumentRepository(IDocumentRepository):
         id: uuid.UUID,
         project_id: uuid.UUID,
         name: str,
-        format: "DocumentFormat",
+        format: DocumentFormat,
         storage_key: str,
-    ) -> "Document":
+    ) -> Document:
         from app.infrastructure.db.models.document import Document as M
         from app.infrastructure.db.models.enums import DocumentStatus
+
         doc = M(
             id=id,
             project_id=project_id,
@@ -53,8 +57,9 @@ class DocumentRepository(IDocumentRepository):
         await self._session.flush()
         return doc
 
-    async def get_by_id(self, document_id: uuid.UUID) -> "Document | None":
+    async def get_by_id(self, document_id: uuid.UUID) -> Document | None:
         from app.infrastructure.db.models.document import Document as M
+
         return await self._session.get(M, document_id)
 
     async def list_for_project(
@@ -63,7 +68,7 @@ class DocumentRepository(IDocumentRepository):
         pagination: KeysetPage | PaginationParams,
         *,
         status: DocumentStatusVO | None = None,
-    ) -> list["Document"]:
+    ) -> list[Document]:
         from app.infrastructure.db.models.document import Document as M
 
         q = (
@@ -94,11 +99,8 @@ class DocumentRepository(IDocumentRepository):
         status: DocumentStatusVO | None = None,
     ) -> int:
         from app.infrastructure.db.models.document import Document as M
-        q = (
-            select(func.count())
-            .select_from(M)
-            .where(M.project_id == project_id)
-        )
+
+        q = select(func.count()).select_from(M).where(M.project_id == project_id)
         if status is not None:
             q = q.where(M.status == _status_to_orm(status))
         result = await self._session.execute(q)
@@ -107,8 +109,9 @@ class DocumentRepository(IDocumentRepository):
     async def list_analyzable_for_project(
         self,
         project_id: uuid.UUID,
-    ) -> list["Document"]:
+    ) -> list[Document]:
         from app.infrastructure.db.models.document import Document as M
+
         analyzable_orm = tuple(_status_to_orm(s) for s in _ANALYZABLE_STATUSES)
         result = await self._session.execute(
             select(M).where(
@@ -130,9 +133,7 @@ class DocumentRepository(IDocumentRepository):
         ]
         stat_cols.append(func.count().label("total"))
 
-        rows = await self._session.execute(
-            select(*stat_cols).where(M.project_id == project_id)
-        )
+        rows = await self._session.execute(select(*stat_cols).where(M.project_id == project_id))
         row = rows.one()
         result: dict[str, int] = {vo.value: getattr(row, vo.value) for vo in DocumentStatusVO}
         result["total"] = row.total
@@ -219,7 +220,8 @@ class DocumentRepository(IDocumentRepository):
                 func.count().over().label("_total"),
             )
             .order_by(
-                getattr(cte.c, sort_by).asc() if sort_dir == "asc"
+                getattr(cte.c, sort_by).asc()
+                if sort_dir == "asc"
                 else getattr(cte.c, sort_by).desc(),
                 cte.c.doc_id.desc(),
             )
@@ -249,16 +251,16 @@ class DocumentRepository(IDocumentRepository):
 
     async def update_status(
         self,
-        document: "Document",
+        document: Document,
         status: DocumentStatusVO,
-    ) -> "Document":
+    ) -> Document:
         document.status = _status_to_orm(status)
         await self._session.flush()
         return document
 
     async def update_exported_key(
         self,
-        document: "Document",
+        document: Document,
         export_key: str,
     ) -> None:
         document.exported_storage_key = export_key
@@ -268,8 +270,9 @@ class DocumentRepository(IDocumentRepository):
         self,
         document_id: uuid.UUID,
         expected_version: int,
-    ) -> "Document | None":
+    ) -> Document | None:
         from app.infrastructure.db.models.document import Document as M
+
         stmt = (
             update(M)
             .where(
@@ -313,23 +316,16 @@ class DocumentRepository(IDocumentRepository):
         from app.infrastructure.db.models.source import Source as S
         from app.infrastructure.db.models.source_scope import SourceScope
 
-        subq = (
-            select(DS.c.source_id)
-            .where(DS.c.document_id == document_id)
-            .scalar_subquery()
-        )
-        stmt = (
-            delete(S)
-            .where(
-                S.scope == SourceScope.DOCUMENT,
-                S.id.in_(subq),
-            )
+        subq = select(DS.c.source_id).where(DS.c.document_id == document_id).scalar_subquery()
+        stmt = delete(S).where(
+            S.scope == SourceScope.DOCUMENT,
+            S.id.in_(subq),
         )
         result = await self._session.execute(stmt)
         await self._session.flush()
         return result.rowcount
 
-    async def delete(self, document: "Document") -> None:
+    async def delete(self, document: Document) -> None:
         await self._session.delete(document)
         await self._session.flush()
 

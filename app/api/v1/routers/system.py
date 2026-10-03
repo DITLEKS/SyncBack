@@ -1,8 +1,8 @@
 """Служебные эндпоинты диагностики окружения и возможностей системы."""
+
 from fastapi import APIRouter, Depends
 
 from app.api.deps import get_current_user
-from app.api.schemas.system import CapabilitiesResponse
 from app.core.config import Settings, get_settings
 from app.core.dependencies import get_llm_client_instance
 from app.infrastructure.db.models.enums import DocumentFormat
@@ -47,7 +47,7 @@ async def get_capabilities(
             "supported_formats": supported_formats,
             "supported_mime_types": [
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
-                "text/plain",   # .txt
+                "text/plain",  # .txt
                 "text/markdown",  # .md
                 "text/x-markdown",
             ],

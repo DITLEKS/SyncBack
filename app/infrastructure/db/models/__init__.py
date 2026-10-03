@@ -2,6 +2,7 @@
 Регистрация ORM-моделей — импортируется в alembic/env.py и app.core.dependencies
 для того, чтобы Base.metadata содержала все таблицы.
 """
+
 from app.infrastructure.db.models.analysis_job import AnalysisJob  # noqa: F401
 from app.infrastructure.db.models.audit_log import AuditLog  # noqa: F401
 from app.infrastructure.db.models.dashboard_snapshot import DashboardSnapshot  # noqa: F401

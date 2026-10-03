@@ -64,9 +64,12 @@ async def login(
     до достижения lockout на уровне сервиса (login_max_attempts).
     """
     try:
-        access_token, refresh_token, expires_in, refresh_expires_in = await auth_service.authenticate(
-            payload.email, payload.password
-        )
+        (
+            access_token,
+            refresh_token,
+            expires_in,
+            refresh_expires_in,
+        ) = await auth_service.authenticate(payload.email, payload.password)
     except AccountTemporarilyLockedError as exc:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
     except InvalidCredentialsError as exc:
@@ -85,9 +88,12 @@ async def refresh_tokens(
     auth_service: AuthService = Depends(get_auth_service),
 ) -> TokenResponse:
     try:
-        access_token, refresh_token, expires_in, refresh_expires_in = await auth_service.refresh_access_token(
-            payload.refresh_token
-        )
+        (
+            access_token,
+            refresh_token,
+            expires_in,
+            refresh_expires_in,
+        ) = await auth_service.refresh_access_token(payload.refresh_token)
     except (InvalidTokenError, InvalidCredentialsError) as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
     return TokenResponse(

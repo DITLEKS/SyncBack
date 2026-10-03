@@ -42,6 +42,7 @@ PR4-FIX:
   - reset_suggestion(): если reset_status() вернул None (concurrent reset
     уже сбросил правку) — бросаем SuggestionResetNotAllowedError.
 """
+
 from __future__ import annotations
 
 import logging
@@ -79,6 +80,7 @@ logger = logging.getLogger("syncscribe.services.suggestion")
 @dataclass
 class ReviewSaveResult:
     """Результат атомарного сохранения сессии ревью."""
+
     document: DocumentProtocol
     accepted_count: int = 0
     rejected_count: int = 0
@@ -89,6 +91,7 @@ class ReviewSaveResult:
 @dataclass
 class BulkAcceptResult:
     """Результат bulk-accept — список правок + актуальный документ."""
+
     suggestions: list[SuggestionProtocol]
     document: DocumentProtocol
 
@@ -96,6 +99,7 @@ class BulkAcceptResult:
 @dataclass
 class BulkRejectResult:
     """Результат bulk-reject — список правок + актуальный документ."""
+
     suggestions: list[SuggestionProtocol]
     document: DocumentProtocol
 
@@ -113,9 +117,7 @@ class SuggestionService:
     ) -> DocumentProtocol:
         document = await self._uow.documents.get_by_id(document_id)
         if document is None or document.project_id != project_id:
-            raise DocumentNotFoundError(
-                f"Документ {document_id} не найден в проекте {project_id}"
-            )
+            raise DocumentNotFoundError(f"Документ {document_id} не найден в проекте {project_id}")
         return document
 
     async def _get_suggestion_for_document(
@@ -126,9 +128,7 @@ class SuggestionService:
         """M-9: явно разграничивает «не найдена» vs «не та версия анализа»."""
         suggestion = await self._uow.suggestions.get_by_id(suggestion_id)
         if suggestion is None:
-            raise SuggestionNotFoundError(
-                f"Правка {suggestion_id} не найдена"
-            )
+            raise SuggestionNotFoundError(f"Правка {suggestion_id} не найдена")
         if suggestion.analysis_job_id != document.current_analysis_job_id:
             raise StaleSuggestionJobError(
                 f"Правка {suggestion_id} принадлежит устаревшему analysis job "
@@ -140,7 +140,7 @@ class SuggestionService:
     async def _run_export(
         self,
         document: DocumentProtocol,
-        export_service: "DocumentExportService",
+        export_service: DocumentExportService,
     ) -> None:
         try:
             await export_service.export_and_save(document)
@@ -161,9 +161,7 @@ class SuggestionService:
 
     def _assert_has_active_job(self, document: DocumentProtocol) -> uuid.UUID:
         if document.current_analysis_job_id is None:
-            raise ReviewNotCompleteError(
-                "У документа отсутствует текущий результат анализа"
-            )
+            raise ReviewNotCompleteError("У документа отсутствует текущий результат анализа")
         return document.current_analysis_job_id
 
     # ------------------------------------------------------------------
@@ -198,9 +196,7 @@ class SuggestionService:
             document = await self._get_document_or_raise(project_id, document_id)
             return await self._get_suggestion_for_document(document, suggestion_id)
 
-    async def get_accepted_changes(
-        self, document_id: uuid.UUID
-    ) -> list[AppliedChange]:
+    async def get_accepted_changes(self, document_id: uuid.UUID) -> list[AppliedChange]:
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
             if document is None or document.current_analysis_job_id is None:
@@ -409,7 +405,7 @@ class SuggestionService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         user_id: uuid.UUID,
-        export_service: "DocumentExportService | None" = None,
+        export_service: DocumentExportService | None = None,
     ) -> DocumentProtocol:
         """M-7: принимает user_id для аудита кто финализировал ревью."""
         async with self._uow:
@@ -426,9 +422,7 @@ class SuggestionService:
                 )
             if export_service is not None:
                 await self._run_export(document, export_service)
-            document = await self._uow.documents.update_status(
-                document, DocumentStatusVO.READY
-            )
+            document = await self._uow.documents.update_status(document, DocumentStatusVO.READY)
             await self._uow.commit()
         return document
 
@@ -441,7 +435,7 @@ class SuggestionService:
         accepted_ids: tuple[uuid.UUID, ...] = (),
         rejected_ids: tuple[uuid.UUID, ...] = (),
         finalize: bool = True,
-        export_service: "DocumentExportService | None" = None,
+        export_service: DocumentExportService | None = None,
     ) -> ReviewSaveResult:
         """Сохранить решения под одним оптимистичным локом.
 
@@ -462,7 +456,7 @@ class SuggestionService:
             self._assert_awaiting_approval(document)
             job_id = self._assert_has_active_job(document)
 
-            decisions_list = tuple([
+            decisions_list = (
                 *[
                     SuggestionDecision(
                         suggestion_id=sid,
@@ -479,7 +473,7 @@ class SuggestionService:
                     )
                     for sid in rejected_ids
                 ],
-            ])
+            )
             decisions_vo = ReviewDecisions(
                 decisions=decisions_list,
                 document_id=document_id,
@@ -517,9 +511,7 @@ class SuggestionService:
                     )
                 if export_service is not None:
                     await self._run_export(document, export_service)
-                document = await self._uow.documents.update_status(
-                    document, DocumentStatusVO.READY
-                )
+                document = await self._uow.documents.update_status(document, DocumentStatusVO.READY)
                 finalized = True
 
             await self._uow.commit()
