@@ -7,15 +7,18 @@ from datetime import datetime
 
 from pydantic import BaseModel, EmailStr, Field
 
+# bcrypt учитывает только первые 72 байта пароля — длиннее не принимаем.
+_PASSWORD_MAX = 72
+
 
 class UserRegisterRequest(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
+    password: str = Field(min_length=8, max_length=_PASSWORD_MAX)
 
 
 class UserLoginRequest(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=_PASSWORD_MAX)
 
 
 class RefreshTokenRequest(BaseModel):
