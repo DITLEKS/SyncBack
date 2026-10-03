@@ -129,6 +129,7 @@ class DocumentService:
                     name=filename,
                     format=document_format,
                     storage_key=storage_key,
+                    size_bytes=len(content),
                 )
                 await self._uow.commit()
         except Exception:

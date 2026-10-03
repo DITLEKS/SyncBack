@@ -31,15 +31,16 @@ class AuditLogRepository(IAuditLogRepository):
         document_id: uuid.UUID,
         user_id: uuid.UUID | None,
         action: str,
+        suggestion_id: uuid.UUID | None = None,
         details: Any | None = None,
     ) -> AuditLog:
-        """M-NEW-3: фабричный метод — сервис не импортирует AuditLog ORM."""
         from app.infrastructure.db.models.audit_log import AuditLog as M
 
         entry = M(
             document_id=document_id,
             user_id=user_id,
             action=action,
+            suggestion_id=suggestion_id,
             details=details,
         )
         self._session.add(entry)

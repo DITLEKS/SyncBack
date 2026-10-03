@@ -208,8 +208,8 @@ class SuggestionService:
             AppliedChange(
                 section_ref=s.section_ref,
                 change_type=s.change_type.value,
-                old_text=s.old_text,
-                new_text=s.new_text,
+                old_text=s.original_text,
+                new_text=s.suggested_text,
             )
             for s in suggestions
         ]

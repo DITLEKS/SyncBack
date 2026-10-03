@@ -112,6 +112,7 @@ class IDocumentRepository(ABC):
         name: str,
         format: Any,
         storage_key: str,
+        size_bytes: int,
     ) -> Document: ...
 
     @abstractmethod
@@ -514,6 +515,7 @@ class IAuditLogRepository(ABC):
         document_id: uuid.UUID,
         user_id: uuid.UUID | None,
         action: str,
+        suggestion_id: uuid.UUID | None = None,
         details: Any | None = None,
     ) -> AuditLog: ...
 

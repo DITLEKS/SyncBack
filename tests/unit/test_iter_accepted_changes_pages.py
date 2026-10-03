@@ -37,8 +37,8 @@ def _make_suggestion(section_ref: str = "s1") -> MagicMock:
     s.section_ref = section_ref
     s.change_type = MagicMock()
     s.change_type.value = "update"
-    s.old_text = "old"
-    s.new_text = "new"
+    s.original_text = "old"
+    s.suggested_text = "new"
     return s
 
 
@@ -46,7 +46,7 @@ def _make_document(job_id: uuid.UUID | None = None) -> MagicMock:
     doc = MagicMock()
     doc.current_analysis_job_id = job_id or uuid.uuid4()
     doc.storage_key = "key"
-    doc.title = "doc.docx"
+    doc.name = "doc.docx"
     doc.format = MagicMock()
     return doc
 

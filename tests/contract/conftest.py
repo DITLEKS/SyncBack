@@ -15,6 +15,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+import app.core.dependencies as dependencies
 import app.infrastructure.db.models  # noqa: F401
 from app.core.dependencies import get_login_rate_limiter, get_refresh_token_store, get_settings
 from app.core.limiter import limiter
@@ -23,6 +24,35 @@ from app.infrastructure.db.session import get_db_session
 from app.infrastructure.security.login_rate_limiter import LoginRateLimiter
 from app.infrastructure.security.refresh_token_store import RefreshTokenStore
 from app.main import app
+
+
+class InMemoryFileStorage:
+    """Замена MinIO для контрактных тестов: файлы живут в словаре."""
+
+    def __init__(self) -> None:
+        self.files: dict[str, bytes] = {}
+
+    async def upload(self, key: str, content: bytes, content_type: str) -> None:
+        self.files[key] = content
+
+    async def download(self, key: str) -> bytes:
+        return self.files[key]
+
+    async def get_presigned_url(self, key: str, expires_in: int) -> str:
+        return f"http://storage.test/{key}?expires={expires_in}"
+
+    async def delete(self, key: str) -> None:
+        self.files.pop(key, None)
+
+    async def exists(self, key: str) -> bool:
+        return key in self.files
+
+
+@pytest.fixture
+def file_storage(monkeypatch: pytest.MonkeyPatch) -> InMemoryFileStorage:
+    storage = InMemoryFileStorage()
+    monkeypatch.setattr(dependencies, "_get_minio_storage", lambda: storage)
+    return storage
 
 
 @pytest_asyncio.fixture
@@ -39,7 +69,9 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 
 
 @pytest_asyncio.fixture
-async def client(sessionmaker: async_sessionmaker[AsyncSession]) -> AsyncIterator[AsyncClient]:
+async def client(
+    sessionmaker: async_sessionmaker[AsyncSession], file_storage: InMemoryFileStorage
+) -> AsyncIterator[AsyncClient]:
     redis = fakeredis.aioredis.FakeRedis()
 
     async def _session() -> AsyncIterator[AsyncSession]:
@@ -72,3 +104,26 @@ async def register_and_login(
     response = await client.post("/api/v1/auth/login", json={"email": email, "password": password})
     assert response.status_code == 200, response.text
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+async def create_project(client: AsyncClient, headers: dict[str, str], name: str = "Проект") -> str:
+    response = await client.post("/api/v1/projects", json={"name": name}, headers=headers)
+    assert response.status_code == 201, response.text
+    return response.json()["id"]
+
+
+async def upload_document(
+    client: AsyncClient,
+    headers: dict[str, str],
+    project_id: str,
+    filename: str = "spec.txt",
+    content: bytes = b"Hello world\n",
+    content_type: str = "text/plain",
+) -> dict:
+    response = await client.post(
+        f"/api/v1/projects/{project_id}/documents",
+        files={"file": (filename, content, content_type)},
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()

@@ -53,8 +53,8 @@ class SuggestionProtocol(Protocol):
     analysis_job_id: uuid.UUID
     section_ref: str
     change_type: object  # SuggestionChangeType enum — доступен через .value
-    old_text: str | None
-    new_text: str | None
+    original_text: str | None
+    suggested_text: str | None
     status: SuggestionStatusVO
     # C-4: required by SuggestionResponse serialization
     decided_by: uuid.UUID | None

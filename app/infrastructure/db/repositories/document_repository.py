@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import delete, exists, func, select, tuple_, update
@@ -41,6 +42,7 @@ class DocumentRepository(IDocumentRepository):
         name: str,
         format: DocumentFormat,
         storage_key: str,
+        size_bytes: int,
     ) -> Document:
         from app.infrastructure.db.models.document import Document as M
         from app.infrastructure.db.models.enums import DocumentStatus
@@ -51,6 +53,8 @@ class DocumentRepository(IDocumentRepository):
             name=name,
             format=format,
             storage_key=storage_key,
+            size_bytes=size_bytes,
+            uploaded_at=datetime.now(UTC),
             status=DocumentStatus.DRAFT,
         )
         self._session.add(doc)
