@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.repositories import IAuditLogRepository
-
-if TYPE_CHECKING:
-    from app.infrastructure.db.models.audit_log import AuditLog
+from app.infrastructure.db.models.audit_log import AuditLog
 
 
 class AuditLogRepository(IAuditLogRepository):
@@ -28,9 +26,7 @@ class AuditLogRepository(IAuditLogRepository):
         suggestion_id: uuid.UUID | None = None,
         details: Any | None = None,
     ) -> AuditLog:
-        from app.infrastructure.db.models.audit_log import AuditLog as M
-
-        entry = M(
+        entry = AuditLog(
             document_id=document_id,
             user_id=user_id,
             action=action,
@@ -49,12 +45,10 @@ class AuditLogRepository(IAuditLogRepository):
         action: str,
         suggestion_ids: Sequence[uuid.UUID],
     ) -> int:
-        from app.infrastructure.db.models.audit_log import AuditLog as M
-
         if not suggestion_ids:
             return 0
         self._session.add_all(
-            M(document_id=document_id, user_id=user_id, action=action, suggestion_id=sid)
+            AuditLog(document_id=document_id, user_id=user_id, action=action, suggestion_id=sid)
             for sid in suggestion_ids
         )
         await self._session.flush()
@@ -66,12 +60,10 @@ class AuditLogRepository(IAuditLogRepository):
         limit: int,
         offset: int,
     ) -> list[AuditLog]:
-        from app.infrastructure.db.models.audit_log import AuditLog as M
-
         result = await self._session.execute(
-            select(M)
-            .where(M.document_id == document_id)
-            .order_by(M.created_at.desc())
+            select(AuditLog)
+            .where(AuditLog.document_id == document_id)
+            .order_by(AuditLog.created_at.desc())
             .limit(limit)
             .offset(offset)
         )

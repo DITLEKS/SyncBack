@@ -166,3 +166,37 @@ async def test_delete_document(client: AsyncClient) -> None:
     assert (await client.delete(url, headers=headers)).status_code == 204
     assert (await client.get(url, headers=headers)).status_code == 404
     assert (await client.delete(url, headers=headers)).status_code == 404
+
+
+async def test_global_upload_requires_own_project(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    project_id = await create_project(client, headers)
+
+    response = await client.post(
+        "/api/v1/documents",
+        data={"project_id": project_id},
+        files={"file": ("spec.txt", b"Hello", "text/plain")},
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["project_id"] == project_id
+
+    response = await client.post(
+        "/api/v1/documents",
+        data={"project_id": project_id},
+        files={"file": ("legacy.doc", b"x", "application/msword")},
+        headers=headers,
+    )
+    assert response.status_code == 415, response.text
+
+    other_headers = await register_and_login(client, email="other@example.com")
+    response = await client.post(
+        "/api/v1/documents",
+        data={"project_id": project_id},
+        files={"file": ("spec.txt", b"Hello", "text/plain")},
+        headers=other_headers,
+    )
+    assert response.status_code == 404, response.text
+
+    response = await client.get(f"/api/v1/projects/{project_id}/documents", headers=headers)
+    assert response.json()["total"] == 1
