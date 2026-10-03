@@ -23,12 +23,10 @@ from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import get_current_user
 from app.api.schemas.document import (
-    DocumentListItem,
     DocumentListPage,
-    DocumentListProject,
     SuggestionCounters,
+    document_list_item,
 )
-from app.api.schemas.source import SourceBadge
 from app.core.dependencies import get_document_service, get_source_service
 from app.domain.services.document_service import DocumentService
 from app.domain.services.source_service import SourceService
@@ -89,33 +87,16 @@ async def list_my_documents(
         sources_by_doc.update(batch)
 
     items = [
-        DocumentListItem(
-            id=row["document"].id,
-            name=row["document"].name,
-            format=row["document"].format,
-            size_bytes=row["document"].size_bytes,
-            status=row["document"].status,
-            current_analysis_job_id=row["document"].current_analysis_job_id,
-            created_at=row["document"].created_at,
-            updated_at=row["document"].updated_at,
-            project=DocumentListProject(
-                id=row["document"].project_id,
-                name=row["project_name"],
-            ),
+        document_list_item(
+            row["document"],
+            project_name=row["project_name"],
             suggestions=SuggestionCounters(
                 total=row["suggestions_total"],
                 pending=row["suggestions_pending"],
                 accepted=row["suggestions_accepted"],
                 rejected=row["suggestions_rejected"],
             ),
-            sources=[
-                SourceBadge(
-                    id=s.id,
-                    name=s.name,
-                    type=s.type,
-                )
-                for s in sources_by_doc.get(row["document"].id, [])
-            ],
+            sources=sources_by_doc.get(row["document"].id, []),
         )
         for row in rows
     ]

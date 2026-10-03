@@ -46,7 +46,7 @@ async def upload_document_global(
 
     Ошибки:
     - 400 — имя файла не указано
-    - 403 — project_id не принадлежит текущему пользователю
+    - 404 — проект не найден или не принадлежит текущему пользователю
     - 413 — файл превышает допустимый размер
     - 415 — формат файла не поддерживается (.doc, неизвестные расширения)
     """
@@ -59,10 +59,7 @@ async def upload_document_global(
     try:
         project = await project_service.get_project_for_user(project_id, current_user)
     except ProjectNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Проект не найден или недоступен: {exc}",
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     try:
         content = await read_upload_within_limit(file, settings.max_upload_size_bytes)
@@ -74,7 +71,7 @@ async def upload_document_global(
 
     try:
         document = await document_service.upload_document(
-            project,
+            project.id,
             file.filename,
             content,
             file.content_type or "application/octet-stream",
