@@ -18,6 +18,11 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Колонки есть в 0001; миграция пропускается на базах, созданных с нуля,
+    # и добавляет их только там, где начальная схема была старее.
+    existing = {c["name"] for c in sa.inspect(op.get_bind()).get_columns("suggestions")}
+    if {"decided_by", "decided_at"} <= existing:
+        return
     op.add_column(
         "suggestions",
         sa.Column(
@@ -38,5 +43,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_column("suggestions", "decided_at")
-    op.drop_column("suggestions", "decided_by")
+    # Колонки принадлежат 0001, здесь ничего не удаляем.
+    pass

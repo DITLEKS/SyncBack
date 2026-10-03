@@ -9,7 +9,7 @@ R-1  Drop documents.current_analysis_job_id (circular FK, never read).
 R-2  Add suggestions.document_id (denorm, avoids JOIN through analysis_jobs).
      Add composite index ix_suggestions_document_status.
 R-3  Drop document_blocks.raw_markdown (duplicated content for md-docs).
-R-4  Drop sources.uploaded_at (duplicated created_at).
+R-4  Rename sources.uploaded_at → created_at (как в ORM-модели; отдельной created_at в БД не было).
 R-5  Drop index ix_audit_logs_document_id.
 R-6  Drop index ix_analysis_jobs_idempotency_key.
 
@@ -70,7 +70,8 @@ def upgrade() -> None:
     op.drop_column("document_blocks", "raw_markdown")
 
     # ---- R-4
-    op.drop_column("sources", "uploaded_at")
+    op.execute("UPDATE sources SET uploaded_at = now() WHERE uploaded_at IS NULL")
+    op.alter_column("sources", "uploaded_at", new_column_name="created_at", nullable=False)
 
     # ---- R-5
     op.drop_index("ix_audit_logs_document_id", table_name="audit_logs")
@@ -85,10 +86,7 @@ def downgrade() -> None:
     # R-5
     op.create_index("ix_audit_logs_document_id", "audit_logs", ["document_id"])
     # R-4
-    op.add_column(
-        "sources",
-        sa.Column("uploaded_at", sa.DateTime(timezone=True), nullable=True),
-    )
+    op.alter_column("sources", "created_at", new_column_name="uploaded_at", nullable=True)
     # R-3
     op.add_column(
         "document_blocks",

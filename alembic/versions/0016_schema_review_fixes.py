@@ -40,24 +40,27 @@ def upgrade() -> None:
     bind = op.get_bind()
 
     # ── 1. ENUM extensions ──────────────────────────────────────────────────
-    # analysis_job_status: add DISPATCHED between PENDING and PROCESSING
-    _add_enum_value("analysis_job_status", "dispatched")
+    # Новое значение enum нельзя использовать в той же транзакции, где оно
+    # добавлено, поэтому ADD VALUE выполняются вне транзакции миграции.
+    with op.get_context().autocommit_block():
+        # analysis_job_status: add DISPATCHED between PENDING and PROCESSING
+        _add_enum_value("analysis_job_status", "dispatched")
 
-    # user_role: add EDITOR, VIEWER
-    _add_enum_value("user_role", "editor")
-    _add_enum_value("user_role", "viewer")
+        # user_role: add EDITOR, VIEWER
+        _add_enum_value("user_role", "editor")
+        _add_enum_value("user_role", "viewer")
 
-    # audit_action: add BULK_ACCEPT, FINALIZE, REOPEN
-    _add_enum_value("audit_action", "bulk_accept")
-    _add_enum_value("audit_action", "finalize")
-    _add_enum_value("audit_action", "reopen")
+        # audit_action: add BULK_ACCEPT, FINALIZE, REOPEN
+        _add_enum_value("audit_action", "bulk_accept")
+        _add_enum_value("audit_action", "finalize")
+        _add_enum_value("audit_action", "reopen")
 
-    # source_type: rename note→text, link→url
-    # PostgreSQL does NOT support renaming enum values before 14; safest approach:
-    # add new values, migrate data, old values become unused (no rows reference them
-    # in a fresh DB; in prod you'd also UPDATE sources SET type = 'text' WHERE type='note')
-    _add_enum_value("source_type", "text")
-    _add_enum_value("source_type", "url")
+        # source_type: rename note→text, link→url
+        # PostgreSQL does NOT support renaming enum values before 14; safest approach:
+        # add new values, migrate data, old values become unused (no rows reference them
+        # in a fresh DB; in prod you'd also UPDATE sources SET type = 'text' WHERE type='note')
+        _add_enum_value("source_type", "text")
+        _add_enum_value("source_type", "url")
     # Migrate any legacy data that might exist
     _exec("UPDATE sources SET type = 'text' WHERE type = 'note'")
     _exec("UPDATE sources SET type = 'url'  WHERE type = 'link'")
@@ -79,18 +82,15 @@ def upgrade() -> None:
         batch_op.drop_column("id")
     _exec("ALTER TABLE document_opens ADD PRIMARY KEY (user_id, document_id)")
 
-    # ── 4. documents — add updated_at; fix current_analysis_job_id FK ───────
-    op.add_column(
-        "documents",
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            nullable=False,
-            server_default=sa.func.now(),
-        ),
-    )
+    # ── 4. documents — updated_at NOT NULL; fix current_analysis_job_id FK ──
+    # Колонка создана в 0001 как nullable; здесь только ужесточаем её.
+    _exec("UPDATE documents SET updated_at = COALESCE(updated_at, created_at, now())")
+    _exec("ALTER TABLE documents ALTER COLUMN updated_at SET NOT NULL")
+    _exec("ALTER TABLE documents ALTER COLUMN updated_at SET DEFAULT now()")
     # Re-create FK with SET NULL (previously it was CASCADE or no ondelete).
-    # First, find and drop the existing FK by name conventions.
+    # В 0001 ограничение называется fk_documents_current_analysis_job; снимаем оба
+    # имени, чтобы на колонке не осталось двух FK.
+    _exec("ALTER TABLE documents DROP CONSTRAINT IF EXISTS fk_documents_current_analysis_job")
     _exec("ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_current_analysis_job_id_fkey")
     _exec(
         "ALTER TABLE documents "
@@ -98,7 +98,27 @@ def upgrade() -> None:
         "FOREIGN KEY (current_analysis_job_id) "
         "REFERENCES analysis_jobs(id) ON DELETE SET NULL"
     )
-    # Also add size_bytes CHECK (idempotent via IF NOT EXISTS equivalent)
+    # Колонки name, size_bytes и uploaded_at до этой ревизии ни одна миграция
+    # не создавала, хотя ORM-модель, CHECK ниже и индекс в 0019 на них рассчитывают.
+    document_columns = {c["name"] for c in sa.inspect(bind).get_columns("documents")}
+    if "name" not in document_columns and "title" in document_columns:
+        op.alter_column("documents", "title", new_column_name="name", type_=sa.String(512))
+    if "size_bytes" not in document_columns:
+        op.add_column(
+            "documents",
+            sa.Column("size_bytes", sa.Integer(), nullable=False, server_default="0"),
+        )
+    if "uploaded_at" not in document_columns:
+        op.add_column(
+            "documents",
+            sa.Column(
+                "uploaded_at",
+                sa.DateTime(timezone=True),
+                nullable=False,
+                server_default=sa.func.now(),
+            ),
+        )
+        _exec("UPDATE documents SET uploaded_at = created_at WHERE created_at IS NOT NULL")
     _exec(
         "ALTER TABLE documents "
         "ADD CONSTRAINT ck_documents_size_bytes_non_negative "
@@ -160,14 +180,11 @@ def upgrade() -> None:
         "CHECK (confidence_score IS NULL OR "
         "       (confidence_score >= 0 AND confidence_score <= 1)) NOT VALID"
     )
-    # 6c. block_id: add FK → document_blocks.block_ref ON DELETE SET NULL
-    #     (block_id column was added in 0013 as plain varchar)
-    _exec(
-        "ALTER TABLE suggestions "
-        "ADD CONSTRAINT suggestions_block_id_fkey "
-        "FOREIGN KEY (block_id) "
-        "REFERENCES document_blocks(block_ref) ON DELETE SET NULL"
-    )
+    # 6c. FK suggestions.block_id → document_blocks.block_ref здесь не создаётся:
+    #     block_ref уникален только в паре с document_id, и PostgreSQL не примет
+    #     ссылку на него в одиночку. Корректная составная ссылка
+    #     (document_id, block_id) → (document_id, block_ref) требует правки
+    #     ORM-модели и выполняется отдельной миграцией.
     # 6d. add order_index
     op.add_column(
         "suggestions",
@@ -282,6 +299,9 @@ def downgrade() -> None:
 
     # 4
     _exec("ALTER TABLE documents DROP CONSTRAINT IF EXISTS ck_documents_size_bytes_non_negative")
+    op.drop_column("documents", "uploaded_at")
+    op.drop_column("documents", "size_bytes")
+    op.alter_column("documents", "name", new_column_name="title", type_=sa.String(500))
     _exec("ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_current_analysis_job_id_fkey")
     _exec(
         "ALTER TABLE documents "
@@ -289,7 +309,7 @@ def downgrade() -> None:
         "FOREIGN KEY (current_analysis_job_id) "
         "REFERENCES analysis_jobs(id) ON DELETE CASCADE"
     )
-    op.drop_column("documents", "updated_at")
+    _exec("ALTER TABLE documents ALTER COLUMN updated_at DROP NOT NULL")
 
     # 3 — restore surrogate id PK on document_opens
     _exec("ALTER TABLE document_opens DROP CONSTRAINT IF EXISTS document_opens_pkey")

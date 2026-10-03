@@ -226,7 +226,12 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_table("audit_logs")
     op.drop_table("suggestions")
-    op.drop_constraint("fk_documents_current_analysis_job", "documents", type_="foreignkey")
+    # Имя FK могло смениться в 0016/0017a; циклическую ссылку documents ↔ analysis_jobs
+    # нужно разорвать до удаления таблиц под любым из имён.
+    op.execute("ALTER TABLE documents DROP CONSTRAINT IF EXISTS fk_documents_current_analysis_job")
+    op.execute(
+        "ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_current_analysis_job_id_fkey"
+    )
     op.drop_table("analysis_jobs")
     op.drop_table("document_sources")
     op.drop_table("documents")
