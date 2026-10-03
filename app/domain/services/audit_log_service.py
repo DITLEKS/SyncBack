@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import uuid
+from collections import defaultdict
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from app.domain.interfaces.unit_of_work import IUnitOfWork
@@ -18,6 +20,42 @@ class AuditLogService:
 
     async def log_download(self, user_id: uuid.UUID, document_id: uuid.UUID) -> AuditLog:
         return await self._write(document_id, AuditActionVO.DOWNLOAD, user_id)
+
+    async def log_suggestion_decision(
+        self,
+        user_id: uuid.UUID,
+        document_id: uuid.UUID,
+        suggestion_id: uuid.UUID,
+        action: AuditActionVO,
+    ) -> AuditLog:
+        return await self._write(document_id, action, user_id, suggestion_id=suggestion_id)
+
+    async def log_suggestion_decisions(
+        self,
+        user_id: uuid.UUID,
+        document_id: uuid.UUID,
+        decisions: Iterable[tuple[uuid.UUID, AuditActionVO]],
+    ) -> int:
+        """Записать решения по набору правок одной транзакцией.
+
+        Возвращает число созданных записей.
+        """
+        by_action: dict[AuditActionVO, list[uuid.UUID]] = defaultdict(list)
+        for suggestion_id, action in decisions:
+            by_action[action].append(suggestion_id)
+        if not by_action:
+            return 0
+        written = 0
+        async with self._uow:
+            for action, suggestion_ids in by_action.items():
+                written += await self._uow.audit.create_many(
+                    document_id=document_id,
+                    user_id=user_id,
+                    action=action.value,
+                    suggestion_ids=suggestion_ids,
+                )
+            await self._uow.commit()
+        return written
 
     async def list_for_document(
         self,

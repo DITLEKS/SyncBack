@@ -1,54 +1,19 @@
-"""
-Бизнес-логика работы с правками (suggestions).
+"""Бизнес-логика работы с правками (suggestions).
 
-Архитектурные правила:
-  - Сервис зависит только от IUnitOfWork (порт) и domain value-objects.
-  - Никаких импортов из app.infrastructure.* — ни при выполнении, ни под TYPE_CHECKING.
-  - Один uow.commit() на операцию — атомарность гарантируется УоУ.
-  - M-1: Document/Suggestion аннотируются через Protocol,
-    а не ORM-модель.
-
-HIGH-2-FIX: atomic_review_save — публичный метод с единственным `async with self._uow`.
-  Вложенный `async with self._uow` удалён: если IUnitOfWork не реализует
-  reentrant-семантику (а SQLAlchemy UoW её не реализует), повторный вход
-  открывает новую сессию/транзакцию, и все flush() первого уровня пропадают.
-  Метод помечен комментарием — НЕ вызывать внутри уже открытого uow-блока.
-
-REVIEW-5: get_suggestion_by_id удалён — был мёртвым алиасом
-  get_suggestion_for_document. Используйте get_suggestion_for_document напрямую.
-
-RESET: reset_suggestion() — отмена ранее принятого/отклонённого решения.
-  Проверяет awaiting_approval, делегирует атомарный UPDATE в репозиторий.
-
-S-1 (issue #37): list_suggestions_for_document — PaginationParams распакован
-  в limit/offset при вызове list_with_total.
-
-S-2 (issue #37): удалена мёртвая проверка `if updated is None` в _decide();
-  update_status() бросает исключение, None никогда не возвращается.
-
-review #3: reset_suggestion выровнен с _decide — проверка `if updated is None`
-  заменена на ожидание исключения из reset_status(). Это устраняет расхождение
-  стиля обработки ошибок внутри одного класса. reset_status() обязан бросать
-  SuggestionResetNotAllowedError если правка уже PENDING (concurrent reset),
-  а не возвращать None.
-
-review #5: удалены дублирующие импорты внутри atomic_review_save —
-  ReviewDecisions, SuggestionDecision и OptimisticLockError уже импортированы
-  на уровне модуля.
-
-PR4-FIX:
-  - count_by_document_and_status() добавлен — делегирует в репозиторий
-    по каждому статусу; устраняет AttributeError в editor._safe_count_by_status.
-  - reset_suggestion(): если reset_status() вернул None (concurrent reset
-    уже сбросил правку) — бросаем SuggestionResetNotAllowedError.
+Сервис зависит только от IUnitOfWork и доменных value objects; каждая публичная
+операция сама открывает `async with self._uow` и делает один commit, поэтому
+вызывать их внутри уже открытого UoW-блока нельзя (UoW не реентерабелен).
+Принятые правки читаются напрямую через uow.suggestions, а не через
+DocumentExportService — иначе возникает циклическая зависимость сервисов.
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Literal
 
 from app.domain.exceptions import (
     DocumentNotFoundError,
@@ -89,19 +54,18 @@ class ReviewSaveResult:
 
 
 @dataclass
-class BulkAcceptResult:
-    """Результат bulk-accept — список правок + актуальный документ."""
+class PatchSuggestionsResult:
+    """Результат массового изменения статуса правок."""
 
-    suggestions: list[SuggestionProtocol]
     document: DocumentProtocol
+    updated_ids: list[uuid.UUID] = field(default_factory=list)
+
+    @property
+    def updated_count(self) -> int:
+        return len(self.updated_ids)
 
 
-@dataclass
-class BulkRejectResult:
-    """Результат bulk-reject — список правок + актуальный документ."""
-
-    suggestions: list[SuggestionProtocol]
-    document: DocumentProtocol
+PatchFilter = Literal["pending", "decided", "all"]
 
 
 class SuggestionService:
@@ -173,8 +137,9 @@ class SuggestionService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         pagination: PaginationParams,
+        status_filter: SuggestionStatusVO | None = None,
     ) -> tuple[list[SuggestionProtocol], int]:
-        """S-1 (issue #37): PaginationParams распакован в limit/offset."""
+        """Страница правок текущего анализа документа и их общее число."""
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             if document.current_analysis_job_id is None:
@@ -183,6 +148,7 @@ class SuggestionService:
                 document.current_analysis_job_id,
                 limit=pagination.limit,
                 offset=pagination.offset,
+                status=status_filter,
             )
         return items, total
 
@@ -219,13 +185,7 @@ class SuggestionService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
     ) -> dict[str, int]:
-        """PR4-FIX: агрегатный счётчик правок по статусам для текущего job.
-
-        Используется в editor._safe_count_by_status() для корректного
-        отображения counters.pending/accepted/rejected при пагинации.
-        Три отдельных COUNT вместо O(n) прохода по странице.
-        Возвращает {'pending': N, 'accepted': N, 'rejected': N}.
-        """
+        """Счётчики правок текущего анализа: {'pending': N, 'accepted': N, 'rejected': N}."""
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             if document.current_analysis_job_id is None:
@@ -243,64 +203,8 @@ class SuggestionService:
         return {"pending": pending, "accepted": accepted, "rejected": rejected}
 
     # ------------------------------------------------------------------
-    # Single-suggestion decisions
+    # Decisions
     # ------------------------------------------------------------------
-
-    async def _decide(
-        self,
-        document: DocumentProtocol,
-        suggestion: SuggestionProtocol,
-        decision: SuggestionDecision,
-    ) -> SuggestionProtocol:
-        """CAS-обновление одной правки.
-
-        S-2 (issue #37): мёртвая проверка `if updated is None` удалена;
-        update_status() бросает SuggestionAlreadyDecidedError вместо
-        возврата None — сервис больше не дублирует эту логику.
-        """
-        self._assert_awaiting_approval(document)
-        await self._uow.suggestions.update_status(suggestion, decision)
-        # refresh suggestion from identity map after UPDATE
-        await self._uow.suggestions.get_by_id(suggestion.id)
-        return suggestion
-
-    async def accept_suggestion(
-        self,
-        project_id: uuid.UUID,
-        document_id: uuid.UUID,
-        suggestion_id: uuid.UUID,
-        user_id: uuid.UUID,
-    ) -> SuggestionProtocol:
-        async with self._uow:
-            document = await self._get_document_or_raise(project_id, document_id)
-            suggestion = await self._get_suggestion_for_document(document, suggestion_id)
-            decision = SuggestionDecision(
-                suggestion_id=suggestion_id,
-                status=SuggestionStatusVO.ACCEPTED,
-                user_id=user_id,
-            )
-            result = await self._decide(document, suggestion, decision)
-            await self._uow.commit()
-        return result
-
-    async def reject_suggestion(
-        self,
-        project_id: uuid.UUID,
-        document_id: uuid.UUID,
-        suggestion_id: uuid.UUID,
-        user_id: uuid.UUID,
-    ) -> SuggestionProtocol:
-        async with self._uow:
-            document = await self._get_document_or_raise(project_id, document_id)
-            suggestion = await self._get_suggestion_for_document(document, suggestion_id)
-            decision = SuggestionDecision(
-                suggestion_id=suggestion_id,
-                status=SuggestionStatusVO.REJECTED,
-                user_id=user_id,
-            )
-            result = await self._decide(document, suggestion, decision)
-            await self._uow.commit()
-        return result
 
     async def reset_suggestion(
         self,
@@ -309,17 +213,10 @@ class SuggestionService:
         suggestion_id: uuid.UUID,
         user_id: uuid.UUID,
     ) -> SuggestionProtocol:
-        """Отменить ранее принятое или отклонённое решение — вернуть в PENDING.
+        """Отменить ранее принятое или отклонённое решение — вернуть правку в PENDING.
 
-        Бизнес-правила:
-          1. Документ обязан быть в статусе AWAITING_APPROVAL.
-          2. Правка обязана принадлежать текущему analysis job (stale-проверка).
-          3. Правка должна быть ACCEPTED или REJECTED.
-
-        PR4-FIX: если reset_status() вернул None — правка была сброшена
-        параллельным запросом между нашей проверкой и UPDATE.
-        Бросаем SuggestionResetNotAllowedError (409) вместо возврата None,
-        который привёл бы к ошибке сериализации ответа.
+        Документ должен быть в AWAITING_APPROVAL, правка — принадлежать текущему
+        анализу и быть ACCEPTED/REJECTED.
         """
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
@@ -333,7 +230,6 @@ class SuggestionService:
 
             updated = await self._uow.suggestions.reset_status(suggestion)
             if updated is None:
-                # Concurrent reset: параллельный запрос уже сбросил эту правку.
                 raise SuggestionResetNotAllowedError(
                     f"Правка {suggestion_id} была сброшена параллельным запросом. "
                     "Обновите список правок и повторите."
@@ -345,60 +241,98 @@ class SuggestionService:
     # Bulk operations
     # ------------------------------------------------------------------
 
-    async def bulk_accept(
+    async def patch_suggestions(
         self,
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         user_id: uuid.UUID,
-    ) -> BulkAcceptResult:
-        """Принять все PENDING-правки одним UPDATE без загрузки UUID в память (H-4)."""
-        async with self._uow:
-            document = await self._get_document_or_raise(project_id, document_id)
-            self._assert_awaiting_approval(document)
-            job_id = self._assert_has_active_job(document)
-            accepted = await self._uow.suggestions.bulk_accept_all(job_id, user_id)
-            refreshed = await self._uow.documents.get_by_id(document_id)
-            await self._uow.commit()
-        return BulkAcceptResult(suggestions=accepted, document=refreshed or document)
+        target_status: SuggestionStatusVO,
+        ids: Sequence[uuid.UUID] | None = None,
+        filter: PatchFilter | None = None,
+    ) -> PatchSuggestionsResult:
+        """Перевести правки текущего анализа в target_status одним UPDATE.
 
-    async def bulk_reject(
-        self,
-        project_id: uuid.UUID,
-        document_id: uuid.UUID,
-        user_id: uuid.UUID,
-    ) -> BulkRejectResult:
-        """Отклонить все PENDING-правки одним UPDATE (зеркало bulk_accept)."""
-        async with self._uow:
-            document = await self._get_document_or_raise(project_id, document_id)
-            self._assert_awaiting_approval(document)
-            job_id = self._assert_has_active_job(document)
-            rejected = await self._uow.suggestions.bulk_reject_all(job_id, user_id)
-            refreshed = await self._uow.documents.get_by_id(document_id)
-            await self._uow.commit()
-        return BulkRejectResult(suggestions=rejected, document=refreshed or document)
-
-    async def apply_review(
-        self,
-        project_id: uuid.UUID,
-        document_id: uuid.UUID,
-        user_id: uuid.UUID,
-        review_version: int,
-        accepted_ids: tuple[uuid.UUID, ...],
-        rejected_ids: tuple[uuid.UUID, ...],
-    ) -> int:
-        """Применить решения ревью без финализации.
-        Возвращает новую review_version документа.
+        Выбор правок — либо явный список ids, либо filter ("pending", "decided",
+        "all"). Допустимые переходы: pending → accepted/rejected и
+        accepted/rejected → pending (сброс решения). Для явного списка ids все
+        правки обязаны быть в допустимом исходном статусе, иначе
+        SuggestionAlreadyDecidedError / SuggestionResetNotAllowedError; для
+        фильтра неподходящие правки просто пропускаются.
         """
-        result = await self.atomic_review_save(
-            project_id=project_id,
-            document_id=document_id,
-            user_id=user_id,
-            review_version=review_version,
-            accepted_ids=accepted_ids,
-            rejected_ids=rejected_ids,
-            finalize=False,
-        )
-        return result.document.review_version
+        if (ids is None) == (filter is None):
+            raise ValueError("Укажите ровно одно из: ids или filter")
+
+        async with self._uow:
+            document = await self._get_document_or_raise(project_id, document_id)
+            self._assert_awaiting_approval(document)
+            job_id = self._assert_has_active_job(document)
+
+            if target_status == SuggestionStatusVO.PENDING:
+                updated_ids = await self._reset_to_pending(job_id, ids, filter)
+            else:
+                updated_ids = await self._decide_pending(
+                    document_id, job_id, user_id, target_status, ids, filter
+                )
+
+            refreshed = await self._uow.documents.get_by_id(document_id)
+            await self._uow.commit()
+        return PatchSuggestionsResult(document=refreshed or document, updated_ids=updated_ids)
+
+    async def _decide_pending(
+        self,
+        document_id: uuid.UUID,
+        job_id: uuid.UUID,
+        user_id: uuid.UUID,
+        target_status: SuggestionStatusVO,
+        ids: Sequence[uuid.UUID] | None,
+        filter: PatchFilter | None,
+    ) -> list[uuid.UUID]:
+        if ids is not None:
+            unique_ids = list(dict.fromkeys(ids))
+            decisions = ReviewDecisions(
+                decisions=tuple(
+                    SuggestionDecision(suggestion_id=sid, status=target_status, user_id=user_id)
+                    for sid in unique_ids
+                ),
+                document_id=document_id,
+                user_id=user_id,
+                analysis_job_id=job_id,
+            )
+            updated = await self._uow.suggestions.bulk_update_status(decisions)
+            if updated != len(unique_ids):
+                raise SuggestionAlreadyDecidedError(
+                    "Часть правок не найдена в текущем анализе или уже обработана"
+                )
+            return unique_ids
+
+        if filter == "decided":
+            raise SuggestionAlreadyDecidedError(
+                "Принять или отклонить можно только правки в статусе pending"
+            )
+        if target_status == SuggestionStatusVO.ACCEPTED:
+            updated_suggestions = await self._uow.suggestions.bulk_accept_all(job_id, user_id)
+        else:
+            updated_suggestions = await self._uow.suggestions.bulk_reject_all(job_id, user_id)
+        return [s.id for s in updated_suggestions]
+
+    async def _reset_to_pending(
+        self,
+        job_id: uuid.UUID,
+        ids: Sequence[uuid.UUID] | None,
+        filter: PatchFilter | None,
+    ) -> list[uuid.UUID]:
+        if ids is None:
+            if filter == "pending":
+                return []
+            return await self._uow.suggestions.reset_to_pending(job_id)
+
+        unique_ids = list(dict.fromkeys(ids))
+        reset_ids = await self._uow.suggestions.reset_to_pending(job_id, unique_ids)
+        if len(reset_ids) != len(unique_ids):
+            raise SuggestionResetNotAllowedError(
+                "Часть правок не найдена в текущем анализе или уже в статусе pending"
+            )
+        return reset_ids
 
     async def finalize_review(
         self,
@@ -407,7 +341,7 @@ class SuggestionService:
         user_id: uuid.UUID,
         export_service: DocumentExportService | None = None,
     ) -> DocumentProtocol:
-        """M-7: принимает user_id для аудита кто финализировал ревью."""
+        """Завершить ревью: все правки рассмотрены → документ в READY."""
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             self._assert_awaiting_approval(document)
@@ -437,19 +371,10 @@ class SuggestionService:
         finalize: bool = True,
         export_service: DocumentExportService | None = None,
     ) -> ReviewSaveResult:
-        """Сохранить решения под одним оптимистичным локом.
+        """Сохранить решения ревью под одним оптимистичным локом (review_version).
 
-        HIGH-2-FIX: единственный `async with self._uow` — вложенный блок удалён.
-        IUnitOfWork (SQLAlchemy) не реализует reentrant-семантику: повторный
-        вход в `async with uow` открывал бы новую сессию/транзакцию, теряя
-        все flush() внешнего уровня и нарушая атомарность.
-
-        ВАЖНО: метод сам открывает uow-блок — НЕ вызывать внутри
-        уже открытого `async with self._uow`.
-
-        review #5: дублирующие импорты ReviewDecisions, SuggestionDecision и
-        OptimisticLockError внутри метода удалены — они уже импортированы
-        на уровне модуля.
+        При finalize=True документ переводится в READY, если не осталось
+        pending-правок.
         """
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
@@ -478,6 +403,7 @@ class SuggestionService:
                 decisions=decisions_list,
                 document_id=document_id,
                 user_id=user_id,
+                analysis_job_id=job_id,
             )
 
             locked_doc = await self._uow.documents.compare_and_increment_review_version(

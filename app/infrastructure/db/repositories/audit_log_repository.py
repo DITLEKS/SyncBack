@@ -1,15 +1,9 @@
-"""
-SQLAlchemy-адаптер для AuditLog.
-
-Правило: НИКАКИХ session.commit() здесь.
-
-M-NEW-3: create() переходит на фабричный паттерн: принимает параметры,
-а не готовый ORM-инстанс AuditLog.
-"""
+"""SQLAlchemy-адаптер для AuditLog. Фиксация транзакции — на стороне UoW."""
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
@@ -46,6 +40,25 @@ class AuditLogRepository(IAuditLogRepository):
         self._session.add(entry)
         await self._session.flush()
         return entry
+
+    async def create_many(
+        self,
+        *,
+        document_id: uuid.UUID,
+        user_id: uuid.UUID | None,
+        action: str,
+        suggestion_ids: Sequence[uuid.UUID],
+    ) -> int:
+        from app.infrastructure.db.models.audit_log import AuditLog as M
+
+        if not suggestion_ids:
+            return 0
+        self._session.add_all(
+            M(document_id=document_id, user_id=user_id, action=action, suggestion_id=sid)
+            for sid in suggestion_ids
+        )
+        await self._session.flush()
+        return len(suggestion_ids)
 
     async def list_for_document(
         self,
