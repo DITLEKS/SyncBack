@@ -77,6 +77,7 @@ class RecentDocumentItem(BaseModel):
     project_id: uuid.UUID
     project_name: str
     status: str
+    uploaded_at: datetime
     last_opened_at: datetime
     suggestions_total: int = 0
     suggestions_resolved: int = 0  # accepted + rejected
