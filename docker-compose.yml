@@ -1,4 +1,4 @@
-# Базовая конфигурация: инфраструктура (Postgres, Redis, MinIO) доступна
+# Базовая конфигурация: инфраструктура (Postgres, Redis, SeaweedFS) доступна
 # только внутри сети compose, пароли берутся из .env без значений по умолчанию.
 # Для локальной разработки с доступом к портам с хоста:
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
@@ -9,7 +9,7 @@ networks:
 
 volumes:
   postgres-data:
-  minio-data:
+  seaweedfs-data:
 
 services:
   postgres:
@@ -40,39 +40,25 @@ services:
     networks:
       - syncscribe-net
 
-  minio:
-    image: minio/minio:latest
+  # S3-совместимое хранилище. Один процесс (weed mini): master, volume, filer и
+  # S3-шлюз на 8333. Бакет и единственный пользователь с правами только на него
+  # создаются при старте из S3_* в .env (см. docker/seaweedfs-start.sh).
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.48
     restart: unless-stopped
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-syncscribe-admin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Задайте MINIO_ROOT_PASSWORD в .env}
-    command: server /data --console-address ":9001"
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?Задайте S3_ACCESS_KEY в .env}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?Задайте S3_SECRET_KEY в .env}
+      S3_BUCKET: ${S3_BUCKET:-syncscribe-documents}
+    entrypoint: ["/bin/sh", "/usr/local/bin/seaweedfs-start.sh"]
     volumes:
-      - minio-data:/data
+      - seaweedfs-data:/data
+      - ./docker/seaweedfs-start.sh:/usr/local/bin/seaweedfs-start.sh:ro
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "curl", "-f", "http://localhost:8333/healthz"]
       interval: 5s
       timeout: 5s
       retries: 10
-    networks:
-      - syncscribe-net
-
-  # Создаёт бакет и сервисного пользователя с правами только на этот бакет:
-  # приложение не должно ходить в хранилище под root-учёткой.
-  minio-init:
-    image: minio/mc:latest
-    depends_on:
-      minio:
-        condition: service_healthy
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-syncscribe-admin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Задайте MINIO_ROOT_PASSWORD в .env}
-      MINIO_BUCKET: ${MINIO_BUCKET:-syncscribe-documents}
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Задайте MINIO_ACCESS_KEY в .env}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Задайте MINIO_SECRET_KEY в .env}
-    volumes:
-      - ./docker/minio-init.sh:/usr/local/bin/minio-init.sh:ro
-    entrypoint: ["/bin/sh", "/usr/local/bin/minio-init.sh"]
     networks:
       - syncscribe-net
 
@@ -87,8 +73,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
+      seaweedfs:
+        condition: service_healthy
     ports:
       - "8000:8000"
     networks:
@@ -105,7 +91,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
+      seaweedfs:
+        condition: service_healthy
     networks:
       - syncscribe-net

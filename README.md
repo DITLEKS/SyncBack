@@ -12,7 +12,7 @@
 app/
 ├── api/            — HTTP: роутеры FastAPI, Pydantic-схемы, зависимости авторизации
 ├── domain/         — сервисы сценариев, жизненные циклы, VO, доменные события и исключения, порты
-├── infrastructure/ — адаптеры портов: PostgreSQL (SQLAlchemy), MinIO, Redis, Celery, LLM,
+├── infrastructure/ — адаптеры портов: PostgreSQL (SQLAlchemy), S3-хранилище, Redis, Celery, LLM,
 │                     SSE, парсеры и экспортёры документов, security
 ├── workers/        — Celery-задачи пайплайна анализа
 └── core/           — Settings, логирование, DI, middleware
@@ -29,7 +29,7 @@ app/
 - **БД**: PostgreSQL 16 + SQLAlchemy 2 (async, asyncpg) + Alembic
 - **Очередь**: Celery + Redis (брокер и result backend)
 - **Real-time**: SSE через Redis Pub/Sub (fallback: in-memory)
-- **Хранилище**: MinIO (S3-совместимое, приватный бакет)
+- **Хранилище**: SeaweedFS через S3-шлюз (приватный бакет); клиент — minio-py как универсальный S3-клиент
 - **Аутентификация**: JWT (PyJWT, HS256) + bcrypt, refresh-токены с ротацией в Redis
 - **Документы**: python-docx (docx), txt и markdown — нативно
 - **LLM**: httpx, провайдер выбирается через `LLM_PROVIDER`
@@ -43,9 +43,9 @@ docker compose exec backend alembic upgrade head
 curl http://localhost:8000/health
 ```
 
-Compose поднимает `backend`, `worker`, `postgres`, `redis`, `minio` и `minio-init` (создаёт приватный бакет, политику и сервисного пользователя приложения). Секреты обязательны: compose падает с ошибкой, если переменная из `${VAR:?}` не задана.
+Compose поднимает `backend`, `worker`, `postgres`, `redis` и `seaweedfs`. SeaweedFS работает одним процессом (`weed mini`: master, volume, filer и S3-шлюз на 8333); при старте он сам создаёт бакет и единственного пользователя с правами только на этот бакет из `S3_*` в `.env` (`docker/seaweedfs-start.sh`), root-учётки и init-контейнера нет. Секреты обязательны: compose падает с ошибкой, если переменная из `${VAR:?}` не задана.
 
-Базовый compose не публикует порты Postgres/Redis/MinIO на хост. Для доступа с машины разработчика:
+Базовый compose не публикует порты Postgres/Redis/SeaweedFS на хост. Для доступа с машины разработчика:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build   # порты на 127.0.0.1
@@ -60,13 +60,13 @@ ruff check app tests && ruff format --check app tests
 python scripts/check_layer_imports.py app
 python scripts/check_layer_contracts.py app
 pytest -m "not integration" tests --cov=app    # unit + контрактные, без внешних сервисов
-pytest -m integration tests/integration         # нужны PostgreSQL, Redis, MinIO
+pytest -m integration tests/integration         # нужны PostgreSQL, Redis, SeaweedFS
 mypy app
 ```
 
-Тестов 340: 307 unit и контрактных (SQLite in-memory, fakeredis, in-memory хранилище) и 33 интеграционных / системных. Порог покрытия в CI — 70%.
+Тестов 343: 314 unit и контрактных (SQLite in-memory, fakeredis, in-memory хранилище) и 29 интеграционных (PostgreSQL, Redis, SeaweedFS). Порог покрытия в CI — 70%.
 
-CI (`.github/workflows/ci.yml`): `lint-and-test` (ruff, проверки слоёв, mypy в режиме `continue-on-error`, pytest с покрытием), `check-migrations` (`alembic upgrade head` на чистой БД и `alembic check`), `build-images`, `integration-tests`. Последний сейчас падает на запуске MinIO: образ недоступен (issue #43).
+CI (`.github/workflows/ci.yml`): `lint-and-test` (ruff, проверки слоёв, mypy в режиме `continue-on-error`, pytest с покрытием), `check-migrations` (`alembic upgrade head` на чистой БД и `alembic check`), `build-images`, `integration-tests` (PostgreSQL и Redis как services, SeaweedFS — `docker run chrislusf/seaweedfs:4.48` с тем же стартовым скриптом, что и в compose).
 
 ## Переменные окружения
 
@@ -78,7 +78,7 @@ CI (`.github/workflows/ci.yml`): `lint-and-test` (ruff, проверки сло�
 | Rate limit | `RATE_LIMIT_STORAGE_URI` | `memory://` для одного процесса; при нескольких — Redis (отдельная база) |
 | Прокси | `TRUSTED_PROXY_HOSTS` | Чьим `X-Forwarded-For` верить; пусто — заголовок игнорируется, `*` запрещено |
 | CORS | `CORS_ALLOWED_ORIGINS` | Список origin через запятую; `*` не используется (credentials включены) |
-| MinIO | `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET`, `MINIO_SECURE`, `MINIO_PRESIGNED_URL_EXPIRE_SECONDS` | Приложение ходит под сервисным пользователем с правами на один бакет; `MINIO_ROOT_*` нужны только контейнерам MinIO |
+| Хранилище | `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_SECURE`, `S3_PRESIGNED_URL_EXPIRE_SECONDS` | Любой S3-совместимый endpoint (в compose — SeaweedFS `seaweedfs:8333`); те же переменные читает контейнер `seaweedfs`, чтобы создать бакет и пользователя. Старые имена `MINIO_*` принимаются как алиасы |
 | JWT | `JWT_SECRET` (≥ 32 байт), `JWT_ALGORITHM`, `JWT_ACCESS_TOKEN_EXPIRE_MINUTES`, `JWT_REFRESH_TOKEN_EXPIRE_DAYS` | Подпись и срок жизни токенов |
 | Вход | `LOGIN_MAX_ATTEMPTS`, `LOGIN_LOCKOUT_SECONDS` | Блокировка по паре (email, IP) |
 | Загрузка | `MAX_UPLOAD_SIZE_MB` | Лимит файла документа или источника (по умолчанию 50) |
@@ -149,7 +149,7 @@ GET    /health                            без префикса
 
 - **Пагинация**: `limit` / `offset`, ответ `{"items": [...], "total", "limit", "offset"}`; срез выполняется в SQL.
 - **Ошибки** отдаются как `{"detail": "..."}`. Основные коды: `404` — ресурс не найден или чужой; `409` — недопустимо в текущем статусе, анализ уже идёт, правка уже обработана, ревью не завершено; `412` — устаревший `If-Match`; `413` — файл или тело больше лимита; `415` — неподдерживаемый формат; `422` — валидация, невалидный пароль, документ не разбирается; `423` — источники заблокированы на время анализа и ревью; `429` — rate limit или блокировка входа. Необработанное `DomainError` → `400`.
-- **Загрузка файлов**: тело ограничено `BodySizeLimitMiddleware` — по `Content-Length` сразу и по фактически прочитанным байтам для chunked-запросов (лимит файла + 1 МБ на служебные поля multipart). Файл не читается в память целиком: Starlette держит его во временном файле, MinIO получает поток. Точный лимит файла проверяется до записи в хранилище; ключ объекта — `projects/{p}/documents/{id}.ext` или `projects/{p}/sources/{id}.ext`, исходное имя хранится в БД и отдаётся через `Content-Disposition`.
+- **Загрузка файлов**: тело ограничено `BodySizeLimitMiddleware` — по `Content-Length` сразу и по фактически прочитанным байтам для chunked-запросов (лимит файла + 1 МБ на служебные поля multipart). Файл не читается в память целиком: Starlette держит его во временном файле, хранилище получает поток. Точный лимит файла проверяется до записи в хранилище; ключ объекта — `projects/{p}/documents/{id}.ext` или `projects/{p}/sources/{id}.ext`, исходное имя хранится в БД и отдаётся через `Content-Disposition`.
 - **Ревью**: `PUT /suggestions/review` атомарно сохраняет решения и инкрементирует `review_version` (CAS). При расхождении версии — `412`, если передан `If-Match`, иначе `409`. С `finalize=true` и без оставшихся `pending` документ переходит в `ready`; итоговый файл собирается при запросе `/export`. `PATCH /suggestions` статус документа не меняет.
 - **Запуск анализа**: из `draft` и `awaiting_approval` — сразу; из `ready` — только с `force=true` (иначе `409`, прежнее ревью будет сброшено). Повторный запрос с тем же `Idempotency-Key` возвращает ту же задачу. На документ допускается одна активная задача.
 - **Экспорт**: только для `ready` (иначе `409`) и только в исходном формате документа; другой `export_format` → `400`.
@@ -176,7 +176,7 @@ ready ──POST /editor/reset──▶ awaiting_approval ◀──────�
 
 1. API создаёт задачу, переводит её в `dispatched` до отправки и ставит Celery chord: `process_source_for_analysis_job` на каждый источник документа и проекта → `finalize_analysis_job`.
 2. Первая подзадача переводит задачу в `processing` (если её не успели отменить). Текст документа разбирается один раз и кэшируется в Redis на час (`parsed_doc:{job_id}`).
-3. Подзадача получает текст источника (файл из MinIO или URL с защитой от SSRF), вызывает LLM и сохраняет правки, если задача всё ещё активна.
+3. Подзадача получает текст источника (файл из хранилища или URL с защитой от SSRF), вызывает LLM и сохраняет правки, если задача всё ещё активна.
 4. Промпт (`infrastructure/llm/prompt.py`) отделяет инструкцию от данных: документ и источник обёрнуты в `<document>` / `<source>`, совпадающие теги внутри текста экранируются. Если документ + источник длиннее `LLM_MAX_INPUT_CHARS`, источник завершается ошибкой `LLM_INPUT_TOO_LARGE` без обрезки.
 5. HTTP-клиент LLM повторяет обрыв соединения, таймаут, `429` и `5xx` до `LLM_MAX_RETRIES` раз с задержкой 1, 2, 4… с (до 30 с, `Retry-After` важнее); прочие `4xx` не повторяются.
 6. Ошибки подзадач: `LLM_INPUT_TOO_LARGE`, `LLM_UNAVAILABLE`, `LLM_INVALID_RESPONSE`, `DOCUMENT_PARSE_ERROR`, `GENERATION_ERROR`.
@@ -214,7 +214,7 @@ PostgreSQL, миграции Alembic (`alembic/versions`, одна голова 
 - Access-JWT с обязательным сроком жизни; refresh-токены с `jti` хранятся в Redis и ротируются, logout отзывает токен.
 - Блокировка входа по (email, IP) и rate limit `/auth/*`; адрес клиента берётся из `X-Forwarded-For` только от `TRUSTED_PROXY_HOSTS`.
 - Источники по URL: только http/https, запрет приватных, loopback и link-local адресов с проверкой после DNS-резолва и на каждом редиректе, лимиты размера и таймаута.
-- Приватный бакет MinIO, скачивание — presigned URL с TTL; приложение работает под сервисным пользователем MinIO с доступом к одному бакету.
+- Приватный бакет в SeaweedFS, скачивание — presigned URL с TTL и `response-content-disposition` (поддерживается SeaweedFS с 4.01); приложение работает под единственным S3-пользователем с правами Read/Write/List на один бакет, админских учёток в хранилище нет. Внутри сети compose у SeaweedFS открыты служебные порты (master 9333, filer 8888, gRPC admin-воркера без mTLS) — наружу они не публикуются.
 - CORS без `*`; `X-Request-ID` санитизируется; логи структурированы, секреты вырезаются рекурсивно.
 
 ## Ограничения и известные нюансы
@@ -230,7 +230,7 @@ PostgreSQL, миграции Alembic (`alembic/versions`, одна голова 
 
 ```
 SyncBack/
-├── docker/                  Dockerfile backend и worker, minio-init.sh
+├── docker/                  Dockerfile backend и worker, seaweedfs-start.sh
 ├── docker-compose.yml       + docker-compose.dev.yml (порты на 127.0.0.1)
 ├── alembic/versions/        миграции 0001…0025
 ├── scripts/                 проверки границ слоёв

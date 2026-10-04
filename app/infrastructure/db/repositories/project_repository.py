@@ -84,7 +84,7 @@ class ProjectRepository(IProjectRepository):
         return project
 
     async def collect_storage_keys(self, project_id: uuid.UUID) -> list[str]:
-        """Собирает MinIO-ключи документов и файл-источников проекта."""
+        """Собирает ключи хранилища для документов и файл-источников проекта."""
         doc_keys_result = await self._session.execute(
             select(Document.storage_key).where(
                 Document.project_id == project_id,

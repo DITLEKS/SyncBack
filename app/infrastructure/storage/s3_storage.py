@@ -1,6 +1,8 @@
 """
-Реализация FileStorage поверх Minio. Клиент minio-py синхронный, поэтому все вызовы
-оборачиваются в asyncio.to_thread — иначе они блокировали бы event loop FastAPI.
+Реализация FileStorage поверх S3-совместимого хранилища (в compose — SeaweedFS).
+
+Клиент minio-py используется как универсальный S3-клиент: он синхронный, поэтому все
+вызовы оборачиваются в asyncio.to_thread — иначе они блокировали бы event loop FastAPI.
 
 Скачивание файлов идёт либо через presigned URL с ограниченным временем жизни,
 либо потоково через backend (download) — прямых публичных ссылок на приватный бакет нет.
@@ -34,16 +36,16 @@ def content_disposition(filename: str) -> str:
     return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{utf8_name}"
 
 
-class MinioStorage:
+class S3FileStorage:
     def __init__(self, settings: Settings | None = None):
         self._settings = settings or get_settings()
         self._client = Minio(
-            self._settings.minio_endpoint,
-            access_key=self._settings.minio_access_key,
-            secret_key=self._settings.minio_secret_key,
-            secure=self._settings.minio_secure,
+            self._settings.s3_endpoint,
+            access_key=self._settings.s3_access_key,
+            secret_key=self._settings.s3_secret_key,
+            secure=self._settings.s3_secure,
         )
-        self._bucket = self._settings.minio_bucket
+        self._bucket = self._settings.s3_bucket
 
     async def upload(self, key: str, content: UploadContent) -> None:
         # minio-py читает поток частями по part_size и при больших файлах сам

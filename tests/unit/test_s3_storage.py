@@ -1,8 +1,8 @@
 """
 Проверяем, что presigned URL на скачивание документа действительно запрашивается с
-ограниченным сроком жизни (timedelta из settings.minio_presigned_url_expire_seconds),
-а не выдаётся бессрочным. Реального Minio для теста не поднимаем — подменяем внутренний
-клиент minio.Minio заглушкой и проверяем, с каким аргументом expires он был вызван.
+ограниченным сроком жизни (timedelta из settings.s3_presigned_url_expire_seconds),
+а не выдаётся бессрочным. Реального хранилища для теста не поднимаем — подменяем
+внутренний S3-клиент заглушкой и проверяем, с каким аргументом expires он был вызван.
 """
 
 from datetime import timedelta
@@ -12,26 +12,26 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.domain.interfaces.file_storage import UploadContent
-from app.infrastructure.storage.minio_storage import MinioStorage
+from app.infrastructure.storage.s3_storage import S3FileStorage
 
 
 def _fake_settings(expire_seconds: int = 300):
     return SimpleNamespace(
-        minio_endpoint="minio:9000",
-        minio_access_key="user",
-        minio_secret_key="password",
-        minio_bucket="bucket",
-        minio_secure=False,
-        minio_presigned_url_expire_seconds=expire_seconds,
+        s3_endpoint="seaweedfs:8333",
+        s3_access_key="user",
+        s3_secret_key="password",
+        s3_bucket="bucket",
+        s3_secure=False,
+        s3_presigned_url_expire_seconds=expire_seconds,
     )
 
 
 @pytest.mark.parametrize("expire_seconds", [60, 300, 3600])
 async def test_presigned_url_uses_configured_ttl(monkeypatch, expire_seconds):
-    storage = MinioStorage(_fake_settings(expire_seconds))
+    storage = S3FileStorage(_fake_settings(expire_seconds))
     fake_client = MagicMock()
     fake_client.presigned_get_object.return_value = "https://example.invalid/signed"
-    storage._client = fake_client  # подменяем внутренний minio-клиент на мок
+    storage._client = fake_client  # подменяем внутренний S3-клиент на мок
 
     url = await storage.get_presigned_url("some/key", expire_seconds)
 
@@ -44,7 +44,7 @@ async def test_presigned_url_uses_configured_ttl(monkeypatch, expire_seconds):
 
 
 async def test_presigned_url_sets_download_name():
-    storage = MinioStorage(_fake_settings())
+    storage = S3FileStorage(_fake_settings())
     fake_client = MagicMock()
     fake_client.presigned_get_object.return_value = "https://example.invalid/signed"
     storage._client = fake_client
@@ -59,7 +59,7 @@ async def test_presigned_url_sets_download_name():
 
 
 async def test_presigned_url_without_name_has_no_response_headers():
-    storage = MinioStorage(_fake_settings())
+    storage = S3FileStorage(_fake_settings())
     fake_client = MagicMock()
     fake_client.presigned_get_object.return_value = "https://example.invalid/signed"
     storage._client = fake_client
@@ -71,7 +71,7 @@ async def test_presigned_url_without_name_has_no_response_headers():
 
 
 async def test_upload_passes_stream_with_exact_length():
-    storage = MinioStorage(_fake_settings())
+    storage = S3FileStorage(_fake_settings())
     fake_client = MagicMock()
     storage._client = fake_client
     content = UploadContent.from_bytes(b"payload", "text/plain")

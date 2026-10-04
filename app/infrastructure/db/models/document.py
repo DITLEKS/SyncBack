@@ -94,7 +94,7 @@ class Document(Base):
     )
     # C-1: добавлено поле original_storage_key — колонка существует в БД
     # с миграции 0011. Без ORM-объявления RETURNING storage_key, original_storage_key
-    # в delete_by_id падал с AttributeError, а MinIO-снапшот никогда не удалялся.
+    # в delete_by_id падал с AttributeError, а снапшот в хранилище никогда не удалялся.
     original_storage_key = Column(String(1024), nullable=True)
     # N-2: exported_storage_key — используется в DocumentRepository.update_exported_key().
     exported_storage_key = Column(String(1024), nullable=True)

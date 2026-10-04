@@ -184,7 +184,7 @@ class DocumentService:
           2. delete(document) — удаляем саму запись документа;
              FK-каскад по document_sources срабатывает здесь.
           3. commit() — единственный коммит на операцию.
-        После коммита — best-effort удаление файлов из MinIO.
+        После коммита — best-effort удаление файлов из хранилища.
 
         Используется когда ORM-объект уже загружен.
         Для удаления только по ID без предварительного SELECT — см. delete_document_by_id.
@@ -203,7 +203,7 @@ class DocumentService:
                 await self._storage.delete(key)
             except Exception:  # noqa: BLE001
                 logger.warning(
-                    "Не удалось удалить файл из MinIO после удаления документа",
+                    "Не удалось удалить файл из хранилища после удаления документа",
                     exc_info=True,
                     extra={"storage_key": key, "document_id": str(document.id)},
                 )
@@ -221,7 +221,7 @@ class DocumentService:
           2. delete_by_id — DELETE FROM documents RETURNING storage_key.
              FK-каскад по document_sources срабатывает здесь.
           3. commit() — единственный коммит на операцию.
-        После коммита — best-effort удаление файлов из MinIO.
+        После коммита — best-effort удаление файлов из хранилища.
 
         DocumentNotFoundError — документа нет в проекте;
         InvalidDocumentStatusError — документ сейчас анализируется.
@@ -255,7 +255,7 @@ class DocumentService:
                 await self._storage.delete(key)
             except Exception:  # noqa: BLE001
                 logger.warning(
-                    "Не удалось удалить файл из MinIO (delete_by_id)",
+                    "Не удалось удалить файл из хранилища (delete_by_id)",
                     exc_info=True,
                     extra={"storage_key": key, "document_id": str(document_id)},
                 )

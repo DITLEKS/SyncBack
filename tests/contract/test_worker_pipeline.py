@@ -77,7 +77,7 @@ def worker(
     file_storage: InMemoryFileStorage,
     published_events: list[DomainEvent],
 ) -> FakeLLM:
-    """Воркер работает с той же SQLite-БД, что и API, без Celery, MinIO и Redis."""
+    """Воркер работает с той же SQLite-БД, что и API, без Celery, S3-хранилища и Redis."""
 
     @asynccontextmanager
     async def uow_factory() -> AsyncIterator[SqlAlchemyUnitOfWork]:

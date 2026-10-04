@@ -1,5 +1,5 @@
 # Дополнение для локальной разработки: открывает порты инфраструктуры на хост,
-# чтобы подключаться к Postgres/Redis/MinIO с машины разработчика.
+# чтобы подключаться к Postgres/Redis/SeaweedFS с машины разработчика.
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 services:
   postgres:
@@ -8,7 +8,6 @@ services:
   redis:
     ports:
       - "127.0.0.1:6379:6379"
-  minio:
+  seaweedfs:
     ports:
-      - "127.0.0.1:9000:9000"
-      - "127.0.0.1:9001:9001"
+      - "127.0.0.1:8333:8333"
