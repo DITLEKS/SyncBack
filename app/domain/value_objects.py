@@ -102,6 +102,14 @@ class AuditActionVO(StrEnum):
 
 
 @dataclass(frozen=True)
+class ProjectContentCounts:
+    """Сколько в проекте документов и базовых (project-scope) источников."""
+
+    documents: int = 0
+    sources: int = 0
+
+
+@dataclass(frozen=True)
 class PaginationParams:
     """Параметры постраничной навигации на основе OFFSET."""
 

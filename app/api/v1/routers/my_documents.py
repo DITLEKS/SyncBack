@@ -86,6 +86,7 @@ async def list_my_documents(
         batch = await source_service.list_sources_for_documents(project_id, doc_ids)
         sources_by_doc.update(batch)
 
+    jobs = await document_service.current_analysis_jobs([row["document"] for row in rows])
     items = [
         document_list_item(
             row["document"],
@@ -97,6 +98,7 @@ async def list_my_documents(
                 rejected=row["suggestions_rejected"],
             ),
             sources=sources_by_doc.get(row["document"].id, []),
+            latest_job=jobs.get(row["document"].id),
         )
         for row in rows
     ]

@@ -16,6 +16,7 @@ from app.domain.value_objects import (
     AnalysisJobStatusVO,
     DocumentFormatVO,
     DocumentStatusVO,
+    ProjectContentCounts,
     SourceScopeVO,
     SuggestionStatusVO,
 )
@@ -512,7 +513,12 @@ class IProjectRepository(ABC):
 
     @abstractmethod
     async def create(
-        self, owner_id: uuid.UUID, name: str, description: str | None = None
+        self,
+        owner_id: uuid.UUID,
+        name: str,
+        description: str | None = None,
+        color: str | None = None,
+        icon: str | None = None,
     ) -> Project:
         """Создать проект; сущность собирает инфраструктура."""
 
@@ -536,7 +542,15 @@ class IProjectRepository(ABC):
         project: Project,
         name: str | None = None,
         description: str | None = None,
+        color: str | None = None,
+        icon: str | None = None,
     ) -> Project: ...
+
+    @abstractmethod
+    async def count_contents(
+        self, project_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, ProjectContentCounts]:
+        """Счётчики документов и project-scope источников; проекты без них в словарь не попадают."""
 
     @abstractmethod
     async def collect_storage_keys(self, project_id: uuid.UUID) -> list[str]: ...

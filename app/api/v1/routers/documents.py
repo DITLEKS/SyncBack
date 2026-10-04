@@ -5,7 +5,6 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
-from pydantic import TypeAdapter
 
 from app.api.deps import get_allowed_project, get_current_user
 from app.api.schemas.document import (
@@ -15,6 +14,7 @@ from app.api.schemas.document import (
     DocumentDownloadResponse,
     DocumentResponse,
     DocumentSectionResponse,
+    document_response,
 )
 from app.api.schemas.pagination import Page
 from app.api.schemas.source import SourceResponse
@@ -47,7 +47,6 @@ from app.infrastructure.db.models.user import User
 
 logger = logging.getLogger("syncscribe.api.documents")
 
-_document_list_adapter: TypeAdapter[list[DocumentResponse]] = TypeAdapter(list[DocumentResponse])
 
 _EXPORT_FORMAT_MAP: dict[str, DocumentFormatVO] = {
     "md": DocumentFormatVO.MARKDOWN,
@@ -132,8 +131,9 @@ async def list_documents(
     documents, total = await document_service.list_documents(
         project.id, pagination, status_filter=status_vo
     )
+    jobs = await document_service.current_analysis_jobs(documents)
     return Page[DocumentResponse](
-        items=_document_list_adapter.validate_python(documents, from_attributes=True),
+        items=[document_response(d, jobs.get(d.id)) for d in documents],
         total=total,
         limit=limit,
         offset=offset,
@@ -150,7 +150,8 @@ async def get_document(
         document = await document_service.get_document(project.id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    return DocumentResponse.model_validate(document)
+    jobs = await document_service.current_analysis_jobs([document])
+    return document_response(document, jobs.get(document.id))
 
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -146,6 +146,15 @@ class DocumentResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+def document_response(document: Any, latest_job: Any = None) -> DocumentResponse:
+    """Ответ по документу с публичным статусом и состоянием его текущей задачи анализа."""
+    public_status, analysis = resolve_document_public_status_and_analysis(
+        str(document.status), latest_job
+    )
+    response = DocumentResponse.model_validate(document)
+    return response.model_copy(update={"status": public_status, "analysis": analysis})
+
+
 class DocumentContentResponse(BaseModel):
     plain_text: str
     sections: list["DocumentSectionResponse"]

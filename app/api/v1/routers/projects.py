@@ -29,10 +29,11 @@ from app.api.schemas.pagination import Page
 from app.api.schemas.project import ProjectCreateRequest, ProjectResponse, ProjectUpdateRequest
 from app.api.schemas.source import SourceResponse
 from app.core.dependencies import get_document_service, get_project_service, get_source_service
+from app.domain.exceptions import InvalidProjectColorError
 from app.domain.services.document_service import DocumentService
 from app.domain.services.project_service import ProjectService
 from app.domain.services.source_service import SourceService
-from app.domain.value_objects import PaginationParams, SourceScopeVO
+from app.domain.value_objects import PaginationParams, ProjectContentCounts, SourceScopeVO
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.user import User
 
@@ -44,16 +45,32 @@ _VALID_INCLUDES = frozenset({"sources", "documents"})
 _INCLUDE_LIMIT = 200
 
 
-def _project_response(project: Project) -> ProjectResponse:
+def _project_response(
+    project: Project, counts: ProjectContentCounts | None = None
+) -> ProjectResponse:
     """Ответ только из скалярных полей: relationship-атрибуты ORM не трогаем,
     иначе в async-сессии ленивая загрузка падает с MissingGreenlet."""
+    counts = counts or ProjectContentCounts()
     return ProjectResponse(
         id=project.id,
         name=project.name,
         description=project.description,
         owner_id=project.owner_id,
         created_at=project.created_at,
+        document_count=counts.documents,
+        source_count=counts.sources,
+        color=project.color,
+        icon=project.icon,
     )
+
+
+async def _counts_for(project_service: ProjectService, project: Project) -> ProjectContentCounts:
+    counts = await project_service.content_counts([project.id])
+    return counts.get(project.id, ProjectContentCounts())
+
+
+def _invalid_color(exc: InvalidProjectColorError) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 
 
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
@@ -62,7 +79,16 @@ async def create_project(
     current_user: User = Depends(get_current_user),
     project_service: ProjectService = Depends(get_project_service),
 ) -> ProjectResponse:
-    project = await project_service.create_project(current_user, payload.name, payload.description)
+    try:
+        project = await project_service.create_project(
+            current_user,
+            payload.name,
+            payload.description,
+            color=payload.color,
+            icon=payload.icon,
+        )
+    except InvalidProjectColorError as exc:
+        raise _invalid_color(exc) from exc
     return _project_response(project)
 
 
@@ -76,8 +102,9 @@ async def list_projects(
     projects, total = await project_service.list_projects_for_user(
         current_user, limit=limit, offset=offset
     )
+    counts = await project_service.content_counts([p.id for p in projects])
     return Page[ProjectResponse](
-        items=[_project_response(p) for p in projects],
+        items=[_project_response(p, counts.get(p.id)) for p in projects],
         total=total,
         limit=limit,
         offset=offset,
@@ -104,6 +131,7 @@ async def get_project(
     ] = (),
     document_service: DocumentService = Depends(get_document_service),
     source_service: SourceService = Depends(get_source_service),
+    project_service: ProjectService = Depends(get_project_service),
 ) -> ProjectResponse:
     """Получить проект по ID.
 
@@ -115,7 +143,7 @@ async def get_project(
     """
     includes = _VALID_INCLUDES.intersection(include)
 
-    response = _project_response(project)
+    response = _project_response(project, await _counts_for(project_service, project))
 
     if "sources" in includes:
         raw_sources, _ = await source_service.list_sources(
@@ -130,6 +158,7 @@ async def get_project(
         sources_by_doc = await source_service.list_sources_for_documents(
             project.id, [d.id for d in raw_docs]
         )
+        jobs = await document_service.current_analysis_jobs(raw_docs)
         # Счётчики правок на странице проекта пока не считаются: нужен отдельный запрос.
         response.documents = [
             document_list_item(
@@ -137,6 +166,7 @@ async def get_project(
                 project_name=project.name,
                 suggestions=SuggestionCounters(total=0, pending=0, accepted=0, rejected=0),
                 sources=sources_by_doc.get(d.id, []),
+                latest_job=jobs.get(d.id),
             )
             for d in raw_docs
         ]
@@ -150,18 +180,27 @@ async def update_project(
     project: Project = Depends(get_allowed_project),
     project_service: ProjectService = Depends(get_project_service),
 ) -> ProjectResponse:
-    """Частичное обновление проекта (переименование, изменение описания)."""
-    if payload.name is None and payload.description is None:
+    """Частичное обновление проекта: название, описание, цвет, иконка."""
+    fields = (payload.name, payload.description, payload.color, payload.icon)
+    if all(value is None for value in fields):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Необходимо указать хотя бы одно поле для обновления: name или description.",
+            detail=(
+                "Необходимо указать хотя бы одно поле для обновления: "
+                "name, description, color или icon."
+            ),
         )
-    updated = await project_service.update_project(
-        project,
-        name=payload.name,
-        description=payload.description,
-    )
-    return _project_response(updated)
+    try:
+        updated = await project_service.update_project(
+            project,
+            name=payload.name,
+            description=payload.description,
+            color=payload.color,
+            icon=payload.icon,
+        )
+    except InvalidProjectColorError as exc:
+        raise _invalid_color(exc) from exc
+    return _project_response(updated, await _counts_for(project_service, updated))
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)

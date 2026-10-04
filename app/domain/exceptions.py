@@ -26,6 +26,10 @@ class ProjectNotFoundError(DomainError):
     pass
 
 
+class InvalidProjectColorError(DomainError):
+    """Цвет карточки проекта не входит в палитру."""
+
+
 class SourceNotFoundError(DomainError):
     pass
 

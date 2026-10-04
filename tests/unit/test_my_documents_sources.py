@@ -101,6 +101,7 @@ def mock_current_user():
 @pytest.fixture()
 def mock_doc_svc():
     svc = AsyncMock()
+    svc.current_analysis_jobs.return_value = {}
     app.dependency_overrides[get_document_service] = lambda: svc
     yield svc
     app.dependency_overrides.pop(get_document_service, None)
