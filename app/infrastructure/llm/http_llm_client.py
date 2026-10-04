@@ -10,8 +10,8 @@ from app.core.config import Settings, get_settings
 from app.domain.exceptions import LLMInvalidResponseError
 from app.domain.interfaces.llm_client import LLMSuggestionBatch, LLMSuggestionItem
 from app.infrastructure.llm.http_retry_mixin import HttpConnectionRetryMixin
+from app.infrastructure.llm.prompt import build_prompt
 from app.infrastructure.llm.schemas import LLMHttpSuggestionResponse
-from app.workers.pipeline.llm_prompt_builder import build_prompt
 
 
 class HttpLLMClient(HttpConnectionRetryMixin):
@@ -21,12 +21,18 @@ class HttpLLMClient(HttpConnectionRetryMixin):
     async def generate_suggestions(
         self, document_text: str, source_text: str, document_format: str
     ) -> LLMSuggestionBatch:
-        prompt = build_prompt(document_text, source_text, document_format)
-        response = await self._post_with_connection_retry(
+        prompt = build_prompt(
+            document_text,
+            source_text,
+            document_format,
+            max_input_chars=self._settings.llm_max_input_chars,
+        )
+        response = await self._post_with_retries(
             url=self._settings.llm_endpoint,
             headers={"Authorization": f"Bearer {self._settings.llm_api_key}"},
             json_payload={"prompt": prompt},
             timeout_seconds=self._settings.llm_timeout_seconds,
+            max_retries=self._settings.llm_max_retries,
         )
         try:
             parsed = LLMHttpSuggestionResponse.model_validate_json(response.text)

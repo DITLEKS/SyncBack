@@ -67,6 +67,8 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_timeout_seconds: int = 60
     llm_max_retries: int = 3
+    # Документ + источник в символах; запас под контекст модели и ответ.
+    llm_max_input_chars: int = 200_000
 
     log_level: str = "INFO"
     log_format: Literal["json", "text"] = "json"

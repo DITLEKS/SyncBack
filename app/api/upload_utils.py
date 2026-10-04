@@ -1,30 +1,29 @@
-"""
-Путь в репозитории: app/api/upload_utils.py
+"""Приём загруженного файла без чтения его в память."""
 
-ИСПРАВЛЕНО: раньше upload_document/upload_file_source читали файл целиком в память
-(`await file.read()`) до проверки лимита размера. Клиент без заголовка Content-Length
-(chunked transfer encoding) мог обойти проверку в BodySizeLimitMiddleware (она смотрит
-только на заголовок) и заставить backend буферизовать сколь угодно большой файл в
-памяти процесса. Теперь чтение идёт чанками, а превышение лимита останавливает
-чтение немедленно, не дожидаясь конца загрузки. Потоковая запись в MinIO (без
-полной сборки в памяти перед записью) остаётся следующим шагом улучшения —
-это требует изменения контракта FileStorage на приём стрима, вынесено как
-отдельная задача.
-"""
+import os
 
 from fastapi import UploadFile
 
 from app.domain.exceptions import FileTooLargeError
+from app.domain.interfaces.file_storage import UploadContent
 
-_CHUNK_SIZE = 1024 * 1024  # 1 МБ
 
+def upload_content(file: UploadFile, max_bytes: int) -> UploadContent:
+    """Обернуть загруженный файл в UploadContent, проверив размер.
 
-async def read_upload_within_limit(file: UploadFile, max_bytes: int) -> bytes:
-    total = 0
-    chunks: list[bytes] = []
-    while chunk := await file.read(_CHUNK_SIZE):
-        total += len(chunk)
-        if total > max_bytes:
-            raise FileTooLargeError(f"Файл превышает лимит {max_bytes // (1024 * 1024)} МБ")
-        chunks.append(chunk)
-    return b"".join(chunks)
+    Starlette уже сохранил часть multipart во временный файл (в памяти до 1 МБ,
+    дальше на диске), а общий объём тела ограничен BodySizeLimitMiddleware.
+    Здесь остаётся узнать точный размер файла и вернуть поток в начало.
+    """
+    stream = file.file
+    size = file.size
+    if size is None:
+        size = stream.seek(0, os.SEEK_END)
+    stream.seek(0)
+    if size > max_bytes:
+        raise FileTooLargeError(f"Файл превышает лимит {max_bytes // (1024 * 1024)} МБ")
+    return UploadContent(
+        stream=stream,
+        size=size,
+        content_type=file.content_type or "application/octet-stream",
+    )

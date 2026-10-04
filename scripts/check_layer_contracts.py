@@ -173,6 +173,9 @@ def _check_call(
     receiver_text = ast.unparse(receiver)
     method = _resolve_method(classes, class_name, method_name)
     if method is None:
+        # Вызов вызываемого атрибута экземпляра (`self.app(...)` в ASGI-middleware).
+        if _resolve_attr(classes, class_name, method_name) is not None:
+            return None
         # Метод может прийти от базового класса вне пакета (например, Protocol/ABC из stdlib)
         if any(base not in classes for base in classes[class_name].bases):
             return None

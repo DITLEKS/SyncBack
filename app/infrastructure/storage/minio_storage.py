@@ -7,7 +7,6 @@
 """
 
 import asyncio
-import io
 import re
 import unicodedata
 from datetime import timedelta
@@ -17,8 +16,10 @@ from minio import Minio
 from minio.error import S3Error
 
 from app.core.config import Settings, get_settings
+from app.domain.interfaces.file_storage import UploadContent
 
 _UNSAFE_ASCII_RE = re.compile(r"[^A-Za-z0-9._ -]")
+_PART_SIZE_BYTES = 10 * 1024 * 1024
 
 
 def content_disposition(filename: str) -> str:
@@ -44,14 +45,17 @@ class MinioStorage:
         )
         self._bucket = self._settings.minio_bucket
 
-    async def upload(self, key: str, content: bytes, content_type: str) -> None:
+    async def upload(self, key: str, content: UploadContent) -> None:
+        # minio-py читает поток частями по part_size и при больших файлах сам
+        # переходит на multipart upload, поэтому файл целиком в памяти не нужен.
         await asyncio.to_thread(
             self._client.put_object,
             self._bucket,
             key,
-            io.BytesIO(content),
-            length=len(content),
-            content_type=content_type,
+            content.stream,
+            length=content.size,
+            content_type=content.content_type,
+            part_size=_PART_SIZE_BYTES,
         )
 
     async def download(self, key: str) -> bytes:

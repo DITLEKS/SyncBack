@@ -1,481 +1,247 @@
 # SyncScribe Backend
 
-**SyncScribe** — B2B SaaS-инструмент автоматического обновления технической документации на основе источников истины (release notes, код, Jira, Confluence, транскрибации созвонов). Продукт находит смысловые различия между документом и источником, предлагает точечные правки (добавить/изменить/удалить), а пользователь подтверждает или отклоняет каждую правку.
+**SyncScribe** — B2B SaaS-инструмент обновления технической документации по источникам истины (release notes, заметки, файлы, ссылки). Сервис сравнивает документ с источниками через LLM, предлагает точечные правки (добавить / изменить / удалить), а пользователь принимает или отклоняет каждую и выгружает итоговый файл.
 
-Целевые пользователи: технические писатели, solution/implementation engineers, presale-инженеры в B2B IT/SaaS/ИБ-компаниях.
+Целевые пользователи: технические писатели, solution/implementation и presale-инженеры B2B IT/SaaS/ИБ-компаний.
 
 ---
 
 ## Архитектура
 
-Backend построен по принципам чистой (hexagonal) архитектуры с чётким разделением слоёв:
-
 ```
 app/
-├── api/            — HTTP-слой (FastAPI роутеры, Pydantic-схемы, зависимости авторизации)
-├── domain/         — бизнес-логика (сервисы), доменные исключения, порты (интерфейсы/Protocol)
-├── infrastructure/ — реализации портов: БД (SQLAlchemy), Minio, Redis, LLM-клиенты,
-│                     парсеры документов, экспортёры, security
-├── workers/        — Celery: приложение, задачи пайплайна анализа, вспомогательные модули
-└── core/           — конфигурация (Settings), логирование, DI-фабрики, middleware
+├── api/            — HTTP: роутеры FastAPI, Pydantic-схемы, зависимости авторизации
+├── domain/         — сервисы сценариев, жизненные циклы, VO, доменные события и исключения, порты
+├── infrastructure/ — адаптеры портов: PostgreSQL (SQLAlchemy), MinIO, Redis, Celery, LLM,
+│                     SSE, парсеры и экспортёры документов, security
+├── workers/        — Celery-задачи пайплайна анализа
+└── core/           — Settings, логирование, DI, middleware
 ```
 
-Ключевой принцип: **зависимости направлены внутрь** — `domain` не знает о FastAPI, SQLAlchemy или Celery. Все внешние системы (LLM-провайдер, источники истины, файловое хранилище, парсер документа, экспортёр) подключены через абстрактные `Protocol`-интерфейсы в `domain/interfaces`, что позволяет менять конкретную реализацию без правок бизнес-логики.
+- Зависимости направлены внутрь: `domain` не импортирует FastAPI, SQLAlchemy, Redis и `infrastructure.*`; внешние системы подключаются через порты в `domain/interfaces` (`IUnitOfWork`, репозитории, `FileStorage`, `AnalysisQueue`, `LLMClient`, `IEventPublisher` и др.).
+- Сервисы работают с сущностями через `Protocol` (`DocumentProtocol`, `SuggestionProtocol`); ORM-модели остаются в инфраструктуре и на read-side. Импорт ORM-моделей в домене допускается только под `TYPE_CHECKING` как временный компромисс.
+- Правила переходов статусов собраны в одном месте — `domain/lifecycle.py` (`DocumentLifecycle`, `AnalysisJobLifecycle`); сервисы, воркер и роутеры не держат своих наборов статусов.
+- Границы слоёв проверяются в CI скриптами `scripts/check_layer_imports.py` (запрещённые импорты) и `scripts/check_layer_contracts.py` (вызовы несуществующих методов портов и неизвестные аргументы).
 
-Доменные сущности (`Document`, `Suggestion`, `AnalysisJob` и т.д.) аннотированы через `Protocol` (`DocumentProtocol`, `SuggestionProtocol`), а не через ORM-модели — сервисный слой не импортирует `infrastructure.*` ни при выполнении, ни под `TYPE_CHECKING`.
+## Стек
 
-## Технологический стек
-
-- **API**: FastAPI + Pydantic v2, Uvicorn/Gunicorn
-- **БД**: PostgreSQL + SQLAlchemy (async) + Alembic
-- **Очереди**: Celery + Redis (брокер и result backend)
-- **Real-time**: SSE (Server-Sent Events) через Redis Pub/Sub (fallback: in-memory)
-- **Файловое хранилище**: Minio (S3-совместимое, приватный бакет)
-- **Аутентификация**: JWT (PyJWT) + bcrypt
-- **Парсинг документов**: python-docx (docx), нативная обработка (txt/markdown)
-- **LLM-интеграция**: httpx, конфигурируемый провайдер через `.env`
+- **API**: FastAPI + Pydantic v2, Uvicorn/Gunicorn, slowapi (rate limit)
+- **БД**: PostgreSQL 16 + SQLAlchemy 2 (async, asyncpg) + Alembic
+- **Очередь**: Celery + Redis (брокер и result backend)
+- **Real-time**: SSE через Redis Pub/Sub (fallback: in-memory)
+- **Хранилище**: MinIO (S3-совместимое, приватный бакет)
+- **Аутентификация**: JWT (PyJWT, HS256) + bcrypt, refresh-токены с ротацией в Redis
+- **Документы**: python-docx (docx), txt и markdown — нативно
+- **LLM**: httpx, провайдер выбирается через `LLM_PROVIDER`
 
 ## Быстрый старт
 
 ```bash
-cp .env.example .env
-# при необходимости поправьте LLM_ENDPOINT/LLM_API_KEY — по умолчанию LLM_PROVIDER=stub,
-# реальный внешний вызов не требуется для локальной разработки
-
-# Базовый compose не публикует порты Postgres/Redis/MinIO на хост.
-# Если нужен доступ к ним с машины разработчика — добавьте docker-compose.dev.yml:
-#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
-# ВАЖНО (Windows): при этом порт 5432 не должен быть занят другим PostgreSQL —
-# конфликт приводит к asyncpg.InvalidPasswordError при подключении с хоста.
-
+cp .env.example .env            # заполните секреты; по умолчанию LLM_PROVIDER=stub
 docker compose up --build
 docker compose exec backend alembic upgrade head
-
 curl http://localhost:8000/health
 ```
 
-Все сервисы поднимаются одной командой: `backend` (FastAPI), `worker` (Celery), `postgres`, `redis`, `minio` + `minio-init` (создаёт приватный бакет автоматически).
+Compose поднимает `backend`, `worker`, `postgres`, `redis`, `minio` и `minio-init` (создаёт приватный бакет, политику и сервисного пользователя приложения). Секреты обязательны: compose падает с ошибкой, если переменная из `${VAR:?}` не задана.
 
-Swagger-документация API доступна на `http://localhost:8000/docs` — удобно для ручного тестирования сценариев без ожидания фронтенда.
-
-## Тестирование
+Базовый compose не публикует порты Postgres/Redis/MinIO на хост. Для доступа с машины разработчика:
 
 ```bash
-docker compose exec backend pytest tests/unit -v
-docker compose exec backend pytest tests/integration -v
-docker compose exec backend ruff check .
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build   # порты на 127.0.0.1
 ```
 
-### Unit-тесты (`tests/unit/`)
+Swagger — `http://localhost:8000/docs`.
 
-Все тесты без реальных внешних зависимостей (мок-объекты, `@functools.cache` override):
+## Проверки и тесты
 
-| Файл | Что проверяет |
-|---|---|
-| `test_app_startup.py` | Приложение стартует без исключений |
-| `test_body_size_limit_middleware.py` | Middleware отклоняет запросы сверх `MAX_UPLOAD_SIZE_MB` |
-| `test_jwt_handler.py` | JWT всегда имеет срок жизни; невалидные токены отклоняются |
-| `test_login_rate_limiter.py` | Rate limiter изолирует попытки по email; блокировка снимается корректно |
-| `test_minio_presigned_url_ttl.py` | Presigned URL никогда не бессрочный |
-| `test_password_hasher.py` | Пароль хранится только как bcrypt-хэш; plain-text не проходит verify |
-| `test_analysis_tasks_missing_records.py` | `_process_source` возвращает `…_NOT_FOUND` вместо падения при удалённых сущностях |
-| `test_atomic_review.py` | Инварианты оптимистичного лока review (unit-уровень) |
-| `test_contract_auth.py` | Контракт сервиса авторизации (мок репозитория) |
-| `test_contract_projects_documents.py` | Контракт сервисов проектов и документов (мок) |
-| `test_contract_suggestions_editor.py` | Контракт сервиса правок со стороны редактора (мок) |
-| `test_document_list_service.py` | Пагинация и фильтрация списка документов |
-| `test_document_status_lifecycle.py` | Переходы статусов документа (draft → in_progress → …) |
-| `test_editor_aggregate.py` | Агрегат редактора (заглушки, скипнутые сценарии) |
-| `test_iter_accepted_changes_pages.py` | Пагинированный итератор принятых правок |
-| `test_status_transitions.py` | Полная матрица допустимых/недопустимых переходов статусов |
-| `test_unit_of_work_abc.py` | ABC UoW: реализации обязаны переопределять все методы |
-| `test_my_documents_sources.py` | Фильтрация источников в «Мои документы» |
-| `test_source_document_m2m.py` | M:N привязка источников к документам |
-| `test_source_repository_scope.py` | Изоляция источников по scope и владельцу |
-| `test_source_service_batch.py` | Пакетные операции с источниками |
-| `test_list_with_total_window_count.py` | Пагинатор с оконным COUNT |
+```bash
+ruff check app tests && ruff format --check app tests
+python scripts/check_layer_imports.py app
+python scripts/check_layer_contracts.py app
+pytest -m "not integration" tests --cov=app    # unit + контрактные, без внешних сервисов
+pytest -m integration tests/integration         # нужны PostgreSQL, Redis, MinIO
+mypy app
+```
 
-### Integration-тесты (`tests/integration/`)
+Тестов 340: 307 unit и контрактных (SQLite in-memory, fakeredis, in-memory хранилище) и 33 интеграционных / системных. Порог покрытия в CI — 70%.
 
-Гоняют реальный Postgres/Redis/MinIO через `AsyncClient` поверх ASGI-приложения. Fixture `_isolated_redis_client` (autouse, `tests/integration/conftest.py`) сбрасывает глобальный Redis-синглтон между тестами, чтобы асинхронное соединение не оказывалось привязанным к закрытому event loop предыдущего теста.
+CI (`.github/workflows/ci.yml`): `lint-and-test` (ruff, проверки слоёв, mypy в режиме `continue-on-error`, pytest с покрытием), `check-migrations` (`alembic upgrade head` на чистой БД и `alembic check`), `build-images`, `integration-tests`. Последний сейчас падает на запуске MinIO: образ недоступен (issue #43).
 
-| Файл | Что проверяет |
-|---|---|
-| `test_upload_rollback.py` | Откат MinIO-загрузки при ошибке коммита БД |
-| `test_analysis_job_lifecycle.py` | Жизненный цикл job: pending → processing → success/failed |
-| `test_analysis_job_queue_failure.py` | Поведение при недоступности Celery result store |
-| `test_atomic_review_concurrent.py` | Параллельные запросы review не ломают `review_version` |
-| `test_atomic_review_pg.py` | Оптимистичный лок review на реальном Postgres (SELECT FOR UPDATE) |
-| `test_integration_documents.py` | CRUD документов и привязка источников через HTTP |
-
-### Guard-тесты и системные (`tests/`)
-
-- `test_sources_guard.py` — guard-тест: источники корректно изолируются по владельцу
-- `test_system_capabilities.py` — smoke: импорт всех ключевых модулей проходит без ошибок
-
-CI (`.github/workflows/ci.yml`) запускает оба набора автоматически: `lint-and-test` (ruff + unit) и отдельный job `integration-tests` с Postgres/Redis как service containers и MinIO через `docker run`.
-
-> **Тестирование воркер-слоя**: зависимости `_get_storage`, `_get_connector`, `_get_llm_client` в `analysis_tasks.py` оформлены как `@functools.cache` provider-функции — в тестах достаточно переопределить функцию (`t._get_storage = lambda: FakeStorage()`), SQLAlchemy-сессия и Celery-воркер не нужны.
-
-## Переменные окружения (`.env`)
+## Переменные окружения
 
 | Группа | Переменные | Назначение |
 |---|---|---|
-| БД | `DATABASE_URL`, `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT_SECONDS`, `DB_POOL_RECYCLE_SECONDS` | Строка подключения PostgreSQL (async, `postgresql+asyncpg://`) и пул соединений API-процесса |
-| Redis | `REDIS_URL` | Брокер и result backend Celery, счётчики блокировки входа, refresh-токены |
-| Rate limit | `RATE_LIMIT_STORAGE_URI` | Хранилище счётчиков slowapi: `memory://` для одного процесса, Redis при нескольких воркерах |
-| Прокси | `TRUSTED_PROXY_HOSTS` | Адреса reverse proxy, чьим `X-Forwarded-For` можно верить; пусто — заголовок игнорируется, `*` запрещено |
-| Redis SSE | `REDIS_SSE_CHANNEL` | Канал Redis Pub/Sub для SSE (опционально; при отсутствии — in-memory fallback) |
-| Minio | `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET`, `MINIO_SECURE`, `MINIO_PRESIGNED_URL_EXPIRE_SECONDS` | Файловое хранилище. Приложение ходит под сервисным пользователем с правами на один бакет; `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` нужны только контейнерам MinIO и minio-init |
-| JWT | `JWT_SECRET`, `JWT_ALGORITHM`, `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | Подпись и срок жизни токенов доступа. **`JWT_SECRET` должен быть ≥ 32 байт** для HS256 |
-| Логин | `LOGIN_MAX_ATTEMPTS`, `LOGIN_LOCKOUT_SECONDS` | Защита от брутфорса (счётчик в Redis) |
-| Загрузка | `MAX_UPLOAD_SIZE_MB` | Лимит размера файла (документ/источник) |
-| LLM | `LLM_PROVIDER` (`stub`\|`remote_http`\|`onprem`), `LLM_ENDPOINT`, `LLM_API_KEY`, `LLM_TIMEOUT_SECONDS`, `LLM_MAX_RETRIES` | Выбор и настройка провайдера инференса |
-| Логи | `LOG_LEVEL`, `LOG_FORMAT` (`json`\|`text`) | Структурированное логирование |
+| Окружение | `ENV`, `DEBUG` | Профиль запуска; `DEBUG` в продакшене не включать |
+| БД | `DATABASE_URL`, `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT_SECONDS`, `DB_POOL_RECYCLE_SECONDS` | `postgresql+asyncpg://…` и пул API-процесса. Суммарно `workers × (size + overflow)` должно укладываться в `max_connections` |
+| Redis | `REDIS_URL`, `REDIS_SSE_CHANNEL` | Celery, блокировка входа, refresh-токены, кэш текста документа, канал SSE |
+| Rate limit | `RATE_LIMIT_STORAGE_URI` | `memory://` для одного процесса; при нескольких — Redis (отдельная база) |
+| Прокси | `TRUSTED_PROXY_HOSTS` | Чьим `X-Forwarded-For` верить; пусто — заголовок игнорируется, `*` запрещено |
+| CORS | `CORS_ALLOWED_ORIGINS` | Список origin через запятую; `*` не используется (credentials включены) |
+| MinIO | `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET`, `MINIO_SECURE`, `MINIO_PRESIGNED_URL_EXPIRE_SECONDS` | Приложение ходит под сервисным пользователем с правами на один бакет; `MINIO_ROOT_*` нужны только контейнерам MinIO |
+| JWT | `JWT_SECRET` (≥ 32 байт), `JWT_ALGORITHM`, `JWT_ACCESS_TOKEN_EXPIRE_MINUTES`, `JWT_REFRESH_TOKEN_EXPIRE_DAYS` | Подпись и срок жизни токенов |
+| Вход | `LOGIN_MAX_ATTEMPTS`, `LOGIN_LOCKOUT_SECONDS` | Блокировка по паре (email, IP) |
+| Загрузка | `MAX_UPLOAD_SIZE_MB` | Лимит файла документа или источника (по умолчанию 50) |
+| LLM | `LLM_PROVIDER` (`stub` \| `remote_http` \| `onprem`), `LLM_ENDPOINT`, `LLM_API_KEY`, `LLM_TIMEOUT_SECONDS`, `LLM_MAX_RETRIES`, `LLM_MAX_INPUT_CHARS` | Провайдер, таймаут запроса, число повторов временных сбоев, лимит документа + источника в символах |
+| Логи | `LOG_LEVEL`, `LOG_FORMAT` (`json` \| `text`) | Структурированные логи |
 
-## Схема базы данных
+## API
 
-| Таблица | Назначение | Ключевые связи |
-|---|---|---|
-| `users` | Пользователи, глобальная роль `admin`/`user` | 1:N `projects` (через `owner_id`) |
-| `projects` | Проекты — единица группировки | владелец через `owner_id`, опциональное `description` |
-| `documents` | Целевые документы (doc/docx/txt/markdown) | M:N с `sources`, ссылка на последний `analysis_job`; поля `review_version`, `opens_count`, `original_storage_key` |
-| `sources` | Источники истины (file/note/link), переиспользуемые; поле `scope` — UI-метка (не ограничение) | M:N с `documents` через `document_sources` |
-| `document_sources` | Связка документ↔источник | — |
-| `document_blocks` | Структурные блоки документа (абзацы/заголовки) | 1:N `suggestions` через `block_id` (anchor) |
-| `document_opens` | Трекинг последнего открытия документа пользователем; PK составной `(user_id, document_id)` | FK → `users`, `documents`; upsert `ON CONFLICT DO UPDATE SET last_opened_at` |
-| `analysis_jobs` | Запуски анализа (pending/processing/success/partial_success/failed/cancelled) | 1:N `suggestions`; `idempotency_key` |
-| `suggestions` | Точечные правки (add/modify/delete) | `block_id` (anchor), `source_reference`, `confidence_score`, `explanation` |
-| `audit_logs` | Журнал действий (accept/reject/reset/download/finalize) | `suggestion_id` или `document_id` (CHECK-constraint `ck_audit_logs_target`) |
-| `dashboard_snapshots` | Ежедневный снэпшот метрик пользователя; PK составной `(owner_id, snapshot_date)` | FK → `users`; поля `total_count`, `awaiting_count`, `relevance_percent`; `ON CONFLICT DO UPDATE` |
-
-### Поле `sources.scope`
-
-`scope` (`project` / `document`) — **UI-метка**, не инвариант. Она подсказывает, в каком контексте создан источник, но не ограничивает привязку: любой источник может быть подключён к произвольному числу документов одного проекта через `document_sources`. Реальный набор источников документа определяется исключительно записями в `document_sources`.
-
-Роли: `admin` (видит всё) и `user` (только свои проекты). Точка расширения — `project_members`.
-
-## API — сводка эндпоинтов (префикс `/api/v1`)
+Все эндпоинты, кроме `/health` и `/api/v1/system/capabilities`, под префиксом `/api/v1` и требуют `Authorization: Bearer <access_token>`. Доступ к проекту проверяется одной зависимостью `get_allowed_project`: `admin` видит всё, `user` — только свои проекты; чужой проект отвечает `404`, а не `403`.
 
 ```
-POST   /auth/register
-POST   /auth/login
-POST   /auth/refresh
-POST   /auth/logout                                                (отзыв refresh-токена, 204)
+POST   /auth/register                     5/мин на IP
+POST   /auth/login                        20/мин на IP; блокировка после LOGIN_MAX_ATTEMPTS → 429
+POST   /auth/refresh                      ротация refresh-токена; повторное использование → 401
+POST   /auth/logout                       отзыв refresh-токена, 204
 GET    /auth/me
 
 POST   /projects
-GET    /projects                                                   (пагинация: ?limit=&offset=)
-GET    /projects/{project_id}
-DELETE /projects/{project_id}
+GET    /projects                          ?limit=&offset=
+GET    /projects/{p}                      ?include=documents&include=sources (до 200 элементов)
+PATCH  /projects/{p}
+DELETE /projects/{p}                      204, каскадно удаляет документы и источники
 
-POST   /projects/{project_id}/documents                           (multipart, upload)
-GET    /projects/{project_id}/documents                           (пагинация: ?limit=&offset=)
-GET    /projects/{project_id}/documents/{document_id}
-DELETE /projects/{project_id}/documents/{document_id}
-GET    /projects/{project_id}/documents/{document_id}/download    (presigned URL)
-GET    /projects/{project_id}/documents/{document_id}/export      (финальный файл с правками)
-POST   /projects/{project_id}/documents/{document_id}/sources     (привязка источников)
+POST   /documents                         multipart: file + project_id («Мои документы»)
+GET    /documents                         все документы пользователя: ?status=&outdated=&search=&sort_by=&sort_dir=&limit=&offset=
 
-POST   /documents                                                  (multipart; project_id в form-data — загрузка из «Мои документы»)
-GET    /documents                                                   (пагинация; фильтры: ?status=&outdated=&search=&sort_by=&sort_dir=)
+POST   /projects/{p}/documents            multipart: file
+GET    /projects/{p}/documents            ?status=&limit=&offset=
+GET    /projects/{p}/documents/{d}
+DELETE /projects/{p}/documents/{d}        204; нельзя во время анализа
+GET    /projects/{p}/documents/{d}/content    разобранный текст и секции
+GET    /projects/{p}/documents/{d}/download   presigned URL на исходник
+GET    /projects/{p}/documents/{d}/export     итоговый файл; только ready, только исходный формат
+POST   /projects/{p}/documents/{d}/sources    привязка источников к документу
+POST   /projects/{p}/documents/{d}/open       отметка открытия для «Недавних», 204
 
-POST   /projects/{project_id}/sources                             (note/link)
-POST   /projects/{project_id}/sources/file                        (multipart, upload)
-GET    /projects/{project_id}/sources                             (пагинация: ?limit=&offset=)
-DELETE /projects/{project_id}/sources/{source_id}
+POST   /projects/{p}/sources              ссылка (url)
+POST   /projects/{p}/sources/note         текстовая заметка
+POST   /projects/{p}/sources/file         multipart: file + name + scope [+ document_id]
+GET    /projects/{p}/sources              ?scope=&limit=&offset=
+DELETE /projects/{p}/sources/{s}          204
 
-POST   /projects/{project_id}/documents/{document_id}/analysis-jobs
-GET    /projects/{project_id}/documents/{document_id}/analysis-jobs/{job_id}
-DELETE /projects/{project_id}/documents/{document_id}/analysis-jobs/{job_id}   (отмена; 200 + AnalysisJobResponse)
-POST   /projects/{project_id}/documents/analysis-jobs/bulk        (групповой запуск; опционально ?document_ids=[])
+POST   /projects/{p}/documents/{d}/analysis-jobs          Idempotency-Key; тело {"force": true} для ready
+GET    /projects/{p}/documents/{d}/analysis-jobs/{j}
+DELETE /projects/{p}/documents/{d}/analysis-jobs/{j}      отмена → 200 + задача в cancelled
+POST   /projects/{p}/documents/analysis-jobs/bulk         {"document_ids": [...]} или все подходящие
 
-GET    /projects/{project_id}/documents/{document_id}/suggestions              (пагинация; ?status= фильтр)
-GET    /projects/{project_id}/documents/{document_id}/suggestions/{suggestion_id}
-PATCH  /projects/{project_id}/documents/{document_id}/suggestions              (единый endpoint: single/bulk accept/reject/reset)
-PUT    /projects/{project_id}/documents/{document_id}/suggestions/review       (batch: If-Match / optimistic lock)
-POST   /projects/{project_id}/documents/{document_id}/suggestions/{suggestion_id}/reset
+GET    /projects/{p}/documents/{d}/suggestions            ?status=&limit=&offset=
+GET    /projects/{p}/documents/{d}/suggestions/{s}
+PATCH  /projects/{p}/documents/{d}/suggestions            accept/reject/reset: {ids} или {filter: pending|decided|all}
+PUT    /projects/{p}/documents/{d}/suggestions/review     пакетное сохранение ревью; If-Match: <review_version>; finalize
+POST   /projects/{p}/documents/{d}/suggestions/{s}/reset
 
-GET    /projects/{project_id}/documents/{document_id}/editor                   (агрегат редактора; ?suggestions_limit=&suggestions_offset=)
-POST   /projects/{project_id}/documents/{document_id}/editor/reset             (сброс анализа → AWAITING_APPROVAL; 200 + ResetResponse)
+GET    /projects/{p}/documents/{d}/editor                 агрегат экрана; ?suggestions_limit=&suggestions_offset=
+POST   /projects/{p}/documents/{d}/editor/reset           решения по правкам → pending, документ → awaiting_approval
 
-GET    /events/documents                                           (SSE: real-time статусы; ?document_ids=uuid1,uuid2,..., макс 50)
+GET    /dashboard                         статистика и тренды пользователя
+GET    /documents/attention               до 4 документов awaiting_approval с наибольшим числом pending
+GET    /documents/recent                  5 последних открытых
+GET    /events/documents                  SSE; ?document_ids= (до 50 UUID)
 
-GET    /dashboard                                                  (статистика рабочего пространства + метрики виджетов)
-GET    /documents/attention                                        (топ-4 документа awaiting_approval по кол-ву pending-правок)
-GET    /documents/recent                                           (5 последних открытых документов текущего пользователя)
-POST   /projects/{project_id}/documents/{document_id}/open        (трекинг открытия документа; 204 No Content)
-
-GET    /system/llm-health                                          (диагностика провайдера, только admin)
-GET    /health                                                      (без префикса /api/v1)
+GET    /system/llm-health                 только admin
+GET    /system/capabilities               без авторизации: форматы и лимиты загрузки для UI
+GET    /health                            без префикса
 ```
 
-**Пагинация**: все list-эндпоинты принимают `limit` (по умолчанию 50, максимум 200) и `offset` (по умолчанию 0), возвращают `{"items": [...], "total": N, "limit": L, "offset": O}` (схема `Page[T]`). Срезка выполняется на уровне SQL.
+### Соглашения
 
-**PATCH /suggestions** — единственный endpoint изменения статуса правок. Принимает ровно одно из полей-селекторов:
-- `ids` — список UUID для точечного обновления;
-- `filter` — предустановленный фильтр: `pending` / `decided` / `all`.
+- **Пагинация**: `limit` / `offset`, ответ `{"items": [...], "total", "limit", "offset"}`; срез выполняется в SQL.
+- **Ошибки** отдаются как `{"detail": "..."}`. Основные коды: `404` — ресурс не найден или чужой; `409` — недопустимо в текущем статусе, анализ уже идёт, правка уже обработана, ревью не завершено; `412` — устаревший `If-Match`; `413` — файл или тело больше лимита; `415` — неподдерживаемый формат; `422` — валидация, невалидный пароль, документ не разбирается; `423` — источники заблокированы на время анализа и ревью; `429` — rate limit или блокировка входа. Необработанное `DomainError` → `400`.
+- **Загрузка файлов**: тело ограничено `BodySizeLimitMiddleware` — по `Content-Length` сразу и по фактически прочитанным байтам для chunked-запросов (лимит файла + 1 МБ на служебные поля multipart). Файл не читается в память целиком: Starlette держит его во временном файле, MinIO получает поток. Точный лимит файла проверяется до записи в хранилище; ключ объекта — `projects/{p}/documents/{id}.ext` или `projects/{p}/sources/{id}.ext`, исходное имя хранится в БД и отдаётся через `Content-Disposition`.
+- **Ревью**: `PUT /suggestions/review` атомарно сохраняет решения и инкрементирует `review_version` (CAS). При расхождении версии — `412`, если передан `If-Match`, иначе `409`. С `finalize=true` и без оставшихся `pending` документ переходит в `ready`; итоговый файл собирается при запросе `/export`. `PATCH /suggestions` статус документа не меняет.
+- **Запуск анализа**: из `draft` и `awaiting_approval` — сразу; из `ready` — только с `force=true` (иначе `409`, прежнее ревью будет сброшено). Повторный запрос с тем же `Idempotency-Key` возвращает ту же задачу. На документ допускается одна активная задача.
+- **Экспорт**: только для `ready` (иначе `409`) и только в исходном формате документа; другой `export_format` → `400`.
+- **Редактор** (`GET /editor`): метаданные документа с `view_mode` (`original` / `suggested` / `clean`), содержимое, `original_content`, страница правок текущего анализа, `suggestions_total`, счётчики по статусам (агрегатным запросом) и `permissions` (`can_analyze`, `can_review`, `can_export`, `can_delete`, `sources_is_editable`) из `DocumentLifecycle`. Сбой чтения содержимого из хранилища отдаёт ошибку, а не пустой контент.
+- **SSE** (`GET /events/documents`): событие `document_status_changed` `{document_id, project_id, status, current_analysis_job_id}` получает только владелец проекта; `ping` каждые 25 с. События публикуются после commit каждой смены статуса документа — из API и из воркера (через канал Redis). Невалидный или лишний `document_ids` → `422`. Без Redis брокер работает in-memory и события воркера не доходят.
 
-Допустимые переходы: `pending → accepted`, `pending → rejected`, `decided → pending` (сброс).
+## Жизненный цикл
 
-**Оптимистичный лок review**: `PUT /suggestions/review` поддерживает заголовок `If-Match: <review_version>` — при конфликте версий возвращает `412 Precondition Failed`; без заголовка (legacy) — `409 Conflict`.
+**Документ** — 4 статуса:
 
-**Отмена задачи анализа**: `DELETE /analysis-jobs/{job_id}` — REST-правильный способ отмены (C-1). Возвращает `200 OK` + `AnalysisJobResponse` со статусом `cancelled`. Устаревший `POST .../cancel` удалён.
-
-**SSE (`GET /events/documents`)**: клиент подключается как `EventSource` и получает события только по документам своих проектов:
-- `document_status_changed` — `{document_id, project_id, status, current_analysis_job_id}`; публикуется после каждой зафиксированной смены статуса документа (запуск, отмена и завершение анализа, сброс и завершение ревью) как из API, так и из воркера
-- `ping` — keepalive каждые 25 с
-
-Смена статуса порождает доменное событие `DocumentStatusChanged`, которое `DocumentEventOutbox` публикует через порт `IEventPublisher` только после commit. В API события идут через брокер процесса (`SSEEventPublisher`), в воркере — напрямую в канал Redis (`RedisEventPublisher`). По умолчанию используется `RedisPubSubBroker` — события от воркера доставляются всем подключённым клиентам независимо от инстанса. При недоступности Redis — fallback на `InMemorySSEBroker` (single-instance; события воркера в этом режиме не доходят). Передача `?document_ids=` свыше 50 ID или с невалидным UUID возвращает `422`.
-
-**Bulk analysis jobs** (`POST /projects/{project_id}/documents/analysis-jobs/bulk`):
-- Тело (опционально): `{"document_ids": ["uuid1", "uuid2"]}`. Без тела или при `document_ids=null` — запускает анализ для всех analyzable документов проекта.
-- `201 Created` если `started > 0`; `200 OK` если все пропущены.
-
-**Editor aggregate** (`GET /editor`): возвращает мета-данные документа, контент, `original_content` (для статусов `awaiting_approval` / `ready`), пагинированные правки, счётчики и объект `permissions`.
-
-Query-параметры пагинации правок:
-- `suggestions_limit` (default=50, max=200) — размер страницы;
-- `suggestions_offset` (default=0) — смещение.
-
-Поле `suggestions_total` в ответе — полный счётчик правок документа (для пагинатора фронта). Счётчики `pending`/`accepted`/`rejected` вычисляются O(1) агрегатным SQL-запросом, не O(n) проходом по текущей странице.
-
-Поля `permissions`:
-- `can_analyze` — доступно только из `draft` и `ready`. Из `awaiting_approval` фронт не показывает кнопку запуска анализа — документ уже содержит актуальные правки; для повторного запуска сначала используйте `POST /editor/reset`.
-
-  > **NOTE (продуктовый вопрос)**: сервисный слой (`_ANALYSIS_ALLOWED_STATUSES` в `analysis_job_service.py`) по-прежнему принимает `awaiting_approval` напрямую через `POST /analysis-jobs`, обходя проверку `can_analyze`. Стоит решить: закрыть это на уровне сервиса (убрать `AWAITING_APPROVAL` из `_ANALYSIS_ALLOWED_STATUSES`), чтобы прямой вызов API также возвращал `409`. Это вопрос требований безопасности API, а не текущий баг.
-
-- `can_review` — только `awaiting_approval`.
-- `can_export` — только `ready`.
-- `can_delete` — всё кроме `in_progress`.
-- `sources_is_editable` — недоступно только при `in_progress` и `awaiting_approval`. Статусы `error` и `cancelled` трактуются как редактируемые (анализ не запущен, источники менять разрешено — аналогично `draft`).
-- `view_mode` — режим отображения контента: `original` (draft/in_progress/error/cancelled), `suggested` (awaiting_approval), `clean` (ready).
-
-**POST /editor/reset** — сброс анализа документа обратно в `awaiting_approval`. Возвращает `200 OK` с телом `ResetResponse`:
-```json
-{
-  "document_status": "awaiting_approval",
-  "review_version": 3,
-  "suggestions_reset_count": 12
-}
 ```
-Фронт обновляет стор без дополнительного `GET /editor`.
-
-**Dashboard** (`GET /dashboard`): возвращает агрегаты рабочего пространства + статистику виджетов в одном ответе (ранее был разделён на `/dashboard` и `/dashboard/stats` — объединён в OPT-D1). Дополнительные эндпоинты:
-- `GET /documents/attention` — топ-4 документа со статусом `awaiting_approval`, отсортированные по кол-ву `pending`-правок.
-- `GET /documents/recent` — 5 последних открытых текущим пользователем документов (по `last_opened_at` из таблицы `document_opens`).
-- `POST /projects/{project_id}/documents/{document_id}/open` — трекинг открытия; upsert в `document_opens`; возвращает `204 No Content`.
-
-**OpenAPI-схема**: `response_model` для list-эндпоинтов указывает на конкретный алиас `PageSuggestionResponse = Page[SuggestionResponse]`, разрешённый при определении класса — FastAPI корректно строит схему без runtime-introspection generic alias.
-
-## Жизненный цикл документа
-
-Документ имеет шесть статусов: `draft` → `in_progress` → `awaiting_approval` / `ready` / `error` / `cancelled`.
-
-- После загрузки — `draft`.
-- После успешной постановки задачи в Celery — `in_progress`.
-- Успешный анализ с правками — `awaiting_approval`; без правок — `ready`.
-- Ошибка — `error`; отмена — `cancelled`. Оба статуса **не разрешают прямой повторный запуск анализа** (`can_analyze=false`). Воркер автоматически переводит документ в `draft` при финализации с ошибкой/отменой — после чего кнопка анализа снова доступна.
-- Из `awaiting_approval` в `ready` — только через `PUT /suggestions/review` с `finalize=true` или `PATCH /suggestions` при отсутствии `pending`-правок.
-- Из `awaiting_approval` / `ready` — откат через `POST /editor/reset` (возвращает в `awaiting_approval`, сбрасывает правки, инкрементирует `review_version`).
-- Из `awaiting_approval` — повторный запуск анализа **недоступен через UI** (`can_analyze=false`). Для пересчёта правок используйте `POST /editor/reset`, после чего документ переходит в `awaiting_approval`, а затем можно запустить новый анализ из этого статуса через прямой вызов `POST /analysis-jobs` (если `AWAITING_APPROVAL` не будет убран из `_ANALYSIS_ALLOWED_STATUSES` — см. NOTE выше).
-
-Для одного документа разрешена только одна активная задача (`pending` или `processing`). Ограничение обеспечено сервисом и частичным уникальным индексом PostgreSQL.
-
-## Пайплайн анализа (Celery)
-
-1. `POST /analysis-jobs` создаёт `AnalysisJob` (status=`pending`) и ставит `run_analysis_job` в очередь.
-2. `run_analysis_job` (`_start_job`) переводит job/документ в `processing`, скачивает и парсит документ **один раз** (parse-once), кэширует `plain_text` в Redis с TTL `max(llm_timeout × sources_count × 2, 300)` сек., затем запускает `chord` из `process_source_for_analysis_job` по одному на каждый источник.
-3. Каждая под-задача читает `plain_text` из Redis-кэша (при cache miss — деградирует до прямого скачивания из MinIO), получает текст источника через `SourceConnector`, вызывает `LLMClient.generate_suggestions()` и сохраняет правки.
-4. **Retry / dead-letter — по каждому источнику отдельно**: при сбое LLM/парсинга под-задача ретраится с экспоненциальной задержкой (`LLM_TIMEOUT_SECONDS × 2^retries`) до `LLM_MAX_RETRIES` раз; после исчерпания — запись уходит в Redis-список `syncscribe:analysis:dead_letter`.
-5. `finalize_analysis_job` агрегирует результат: `SUCCESS` если все источники дали правки; `PARTIAL_SUCCESS` если часть; `FAILED` с кодом `ALL_SOURCES_FAILED` или `NO_SOURCES_ATTACHED` иначе. Кэш `plain_text` очищается в `finally`.
-6. **chord on_error**: при падении Celery backend (недоступен result store) `_chord_error_handler` форсирует финализацию с пустым списком результатов — документ переходит в `FAILED/error` вместо вечного `in_progress`.
-7. **Recovery при ошибке коммита финализации**: компенсирующая транзакция переводит job → `FAILED`, документ → `error`. Если recovery-коммит тоже падает — вторичное исключение пробрасывается с `__cause__`, чтобы Celery применил retry/dead-letter (не поглощает ошибку).
-8. **None-guard'ы**: все три этапа проверяют job/document/source на `None`. Различаются `JOB_NOT_FOUND` («не существует в БД» — `logger.error`) от «job уже в финальном статусе» («race» — `logger.info`).
-
-### Зависимости воркера
-
-`_get_storage()`, `_get_connector()`, `_get_llm_client()`, `_get_parser_registry()` — `@functools.cache` provider-функции вместо module-level синглтонов. Runtime-семантика не изменилась (один объект на процесс). В тестах:
-
-```python
-import app.workers.tasks.analysis_tasks as t
-
-t._get_storage = lambda: FakeStorage()
-t._get_connector = lambda: FakeConnector()
-t._get_llm_client = lambda: FakeLLMClient()
+draft ──анализ──▶ in_progress ──правки есть──▶ awaiting_approval ──ревью завершено──▶ ready
+  ▲                    │ └────правок нет──────────────────────────────────────────────▶ │
+  └──сбой / отмена─────┘                                                               │
+awaiting_approval, ready ──повторный анализ──▶ draft → in_progress                      │
+ready ──POST /editor/reset──▶ awaiting_approval ◀───────────────────────────────────────┘
 ```
 
-## Доменные исключения
+Источники заблокированы в `in_progress` и `awaiting_approval`; удалить документ нельзя в `in_progress`.
 
-Каждое исключение соответствует одной бизнес-ситуации и конвертируется в HTTP-ответ в роутере:
+**Задача анализа**: `pending` (создана) → `dispatched` (в очереди) → `processing` (воркер начал) → `success` / `partial_success` / `failed` / `cancelled`. Статус документа следует за его текущей задачей (`current_analysis_job_id`); завершение старой задачи документ не трогает. Если очередь недоступна, задача сразу становится `failed` (`QUEUE_UNAVAILABLE`), документ возвращается в `draft`.
 
-| Исключение | HTTP | Когда |
+## Пайплайн анализа
+
+1. API создаёт задачу, переводит её в `dispatched` до отправки и ставит Celery chord: `process_source_for_analysis_job` на каждый источник документа и проекта → `finalize_analysis_job`.
+2. Первая подзадача переводит задачу в `processing` (если её не успели отменить). Текст документа разбирается один раз и кэшируется в Redis на час (`parsed_doc:{job_id}`).
+3. Подзадача получает текст источника (файл из MinIO или URL с защитой от SSRF), вызывает LLM и сохраняет правки, если задача всё ещё активна.
+4. Промпт (`infrastructure/llm/prompt.py`) отделяет инструкцию от данных: документ и источник обёрнуты в `<document>` / `<source>`, совпадающие теги внутри текста экранируются. Если документ + источник длиннее `LLM_MAX_INPUT_CHARS`, источник завершается ошибкой `LLM_INPUT_TOO_LARGE` без обрезки.
+5. HTTP-клиент LLM повторяет обрыв соединения, таймаут, `429` и `5xx` до `LLM_MAX_RETRIES` раз с задержкой 1, 2, 4… с (до 30 с, `Retry-After` важнее); прочие `4xx` не повторяются.
+6. Ошибки подзадач: `LLM_INPUT_TOO_LARGE`, `LLM_UNAVAILABLE`, `LLM_INVALID_RESPONSE`, `DOCUMENT_PARSE_ERROR`, `GENERATION_ERROR`.
+7. Финализация: все источники успешны — `success`, часть — `partial_success`, ни одного — `failed`; уже завершённая (например, отменённая) задача не перезаписывается. Документ: `awaiting_approval` при наличии `pending`-правок, иначе `ready`; при `failed` / `cancelled` — `draft`. После commit публикуется SSE-событие.
+
+## База данных
+
+PostgreSQL, миграции Alembic (`alembic/versions`, одна голова — `0025`). CI применяет миграции на чистой БД и сверяет схему с моделями (`alembic check`).
+
+| Таблица | Назначение | Ключевое |
 |---|---|---|
-| `DocumentNotFoundError` | 404 | Документ не существует или не в проекте |
-| `SuggestionNotFoundError` | 404 | Правка не найдена в БД |
-| `StaleSuggestionJobError` | 404 | Правка существует, но принадлежит устаревшему job (документ переанализирован) |
-| `JobNotFoundError` | — | job_id в воркере не найден в БД (не «завершён», а «отсутствует») |
-| `SuggestionAlreadyDecidedError` | 409 | Race condition: правка уже обработана другим запросом |
-| `SuggestionResetNotAllowedError` | 409 | Сброс правки невозможен в текущем состоянии |
-| `InvalidDocumentStatusError` | 409 | Операция недопустима для текущего статуса документа |
-| `OptimisticLockError` / `ReviewVersionConflictError` | 409 / 412 | Optimistic lock: `review_version` изменился параллельным запросом |
-| `AnalysisAlreadyRunningError` | 409 | Для документа уже есть активный analysis job |
-| `ReviewNotCompleteError` | 422 | Финализация невозможна: остались `pending`-правки или экспорт не удался |
+| `users` | Пользователи, роль `admin` / `user` | уникальный `email` |
+| `projects` | Проекты пользователя | `owner_id` → users (CASCADE) |
+| `documents` | Документы проекта (`docx`, `txt`, `markdown`; `doc` в enum, но не разбирается) | `status`, `current_analysis_job_id` → analysis_jobs (SET NULL), `review_version`, `storage_key`, `original_storage_key`, `exported_storage_key`; trigram-индекс по `name` для поиска |
+| `sources` | Источники: `file` (файл или заметка) и `url` | `scope` (`project` / `document`), CHECK согласованности `type` и `storage_key` / `url` |
+| `document_sources` | M:N документ ↔ источник | составной PK |
+| `analysis_jobs` | Запуски анализа | частичный уникальный индекс «одна активная задача на документ» (`pending`, `dispatched`, `processing`); уникальность `(document_id, idempotency_key)`; `error_code`, `error_message`, `partial_success` |
+| `suggestions` | Правки анализа | `analysis_job_id`, `document_id`, `change_type`, `status`, `original_text`, `suggested_text`, `decided_by` / `decided_at`; индексы по (job, status) и (document, status) |
+| `audit_logs` | Журнал действий: accept/reject/bulk/reset/finalize/download | ссылка на `suggestion_id` или `document_id` (CHECK) |
+| `document_opens` | Последнее открытие документа пользователем | PK `(user_id, document_id)`, upsert |
+| `dashboard_snapshots` | Ежедневные метрики пользователя для трендов | уникальность `(owner_id, snapshot_date)`, upsert |
+| `document_blocks` | Структурные блоки документа | таблица есть в схеме, приложением пока не заполняется |
 
-## Абстракции и точки расширения
+Нюансы:
 
-| Порт (`domain/interfaces`) | MVP-реализации | Назначение расширения |
-|---|---|---|
-| `LLMClientProtocol` | `StubLLMClient`, `HttpLLMClient`, `OnPremLLMClient` | Смена провайдера инференса без правок пайплайна (`LLM_PROVIDER` в `.env`) |
-| `SourceConnectorProtocol` | `ManualUploadConnector` | Будущие `ConfluenceConnector`, `JiraConnector` и т.д. |
-| `DocumentParserProtocol` | `TxtParser`, `MarkdownParser`, `DocxParser` | Новые форматы документов |
-| `DocumentExporterProtocol` | `TextExporter`, `DocxExporter` | Новые форматы на экспорт |
-| `FileStorageProtocol` | `MinioStorage` | Смена хранилища файлов |
-| `IEventPublisher` | `SSEEventPublisher`, `RedisEventPublisher` | Публикация доменных событий из сервисов и воркера |
-| `SSEBroker` | `RedisPubSubBroker`, `InMemorySSEBroker` | Доставка событий подключённым SSE-клиентам |
-| `DocumentProtocol` / `SuggestionProtocol` | ORM-модели (через `Protocol`) | Сервисный слой не зависит от SQLAlchemy напрямую |
-
-`HttpLLMClient` — generic-клиент для любого внешнего HTTP-провайдера, настраиваемый только через `.env`. `OnPremLLMClient` реализован независимо (у on-prem может быть иной контракт запроса/ответа), общая между ними только retry-логика (`HttpConnectionRetryMixin`). Контракт в `infrastructure/llm/schemas.py` — **условный плейсхолдер** до выбора реального провайдера.
+- Связь `documents` ↔ `analysis_jobs` взаимная (`analysis_jobs.document_id` и `documents.current_analysis_job_id`), поэтому SQLAlchemy предупреждает о цикле при сортировке таблиц — это ожидаемо.
+- Счётчики правок в списках и редакторе считаются только по текущему анализу документа; правки прежних запусков остаются в БД, но не показываются.
+- `sources.scope` — метка контекста создания; реальный набор источников документа задаётся `document_sources` плюс источники проекта со `scope=project`.
+- API использует пул соединений (`AsyncAdaptedQueuePool` с `pre_ping`), Celery-воркер — отдельный движок с `NullPool` на каждый вызов, потому что каждая задача запускает свой event loop.
+- `analysis_jobs.retry_count` пока не заполняется: повторы выполняются внутри HTTP-клиента LLM, Celery-ретраев нет.
 
 ## Безопасность
 
-- Пароли — только bcrypt-хэш, plain-text не хранится и не логируется.
-- JWT с обязательным сроком жизни (`JWT_ACCESS_TOKEN_EXPIRE_MINUTES`).
-- Rate limiting логина: счётчик неудачных попыток по email в Redis, блокировка после `LOGIN_MAX_ATTEMPTS`.
-- Валидация всех входящих запросов через Pydantic-схемы.
-- Авторизация на основе роли и владения проектом — единая точка `get_allowed_project`.
-- Приватный Minio-бакет; скачивание — через presigned URL с TTL; экспорт финального файла — потоково через backend.
-- Структурированные логи без секретов — редактирование рекурсивно обходит вложенные dict/list.
-- `X-Request-ID` санитизируется по безопасному шаблону — произвольное значение не попадает в ответ напрямую.
-- Общий exception handler для доменных ошибок — исключает утечку стектрейсов в API.
-- `user_id` в `audit_log` — всегда реальный UUID из DI, заглушка `00000000-…` устранена.
-- Все поля `extra={"job_id": ...}` в structured logging явно приводятся к `str()` — JSON-сериализатор не падает на `uuid.UUID`.
+- Пароли — bcrypt (в отдельном потоке, не блокирует event loop); политика сложности пароля при регистрации.
+- Access-JWT с обязательным сроком жизни; refresh-токены с `jti` хранятся в Redis и ротируются, logout отзывает токен.
+- Блокировка входа по (email, IP) и rate limit `/auth/*`; адрес клиента берётся из `X-Forwarded-For` только от `TRUSTED_PROXY_HOSTS`.
+- Источники по URL: только http/https, запрет приватных, loopback и link-local адресов с проверкой после DNS-резолва и на каждом редиректе, лимиты размера и таймаута.
+- Приватный бакет MinIO, скачивание — presigned URL с TTL; приложение работает под сервисным пользователем MinIO с доступом к одному бакету.
+- CORS без `*`; `X-Request-ID` санитизируется; логи структурированы, секреты вырезаются рекурсивно.
 
-## Осознанные упрощения MVP (зафиксированные ограничения)
+## Ограничения и известные нюансы
 
-- **Версионирование не хранится**: только текущее состояние документа + результат последнего анализа.
-- **Роли внутри проекта не введены**: `project_members`/shared-доступ — точка расширения.
-- **Применение правок — без посимвольного diff**: замена `old_text → new_text` для txt/markdown; для docx — замена текста абзаца. При пересекающихся правках в одном абзаце вторая может не найти `old_text` — известное ограничение, не блокирует MVP.
-- **Источники типа «ссылка»**: контент по URL не парсится — передаётся в LLM как текстовый адрес.
-- **LLM-контракт** — плейсхолдер до выбора провайдера; сейчас `StubLLMClient` (фиктивная правка).
-- **`DocumentRepository.attach_sources`** — чтение-мёрж-запись без атомарности; при параллельных вызовах возможен lost update. Низкий риск, зафиксирован как тех.долг.
-- **Движок СУБД в Celery-воркере**: `isolated_uow()` создаёт новый `AsyncEngine` на каждый вызов под-задачи — корректно для event loop, но TCP/TLS handshake на каждый источник; при росте нагрузки стоит рассмотреть пул на уровне воркер-процесса.
-- **`audit_logs` хранятся в основной PostgreSQL**: таблица растёт только вширь (записи не удаляются) и имеет иной профиль доступа, чем бизнес-данные (редкое чтение диапазонами vs. частое точечное чтение). На текущем масштабе это приемлемо. При росте нагрузки или появлении требований к retention-политике стоит рассмотреть вынос в отдельную схему, TimescaleDB или ClickHouse. До тех пор рекомендуется добавить партиционирование таблицы по `created_at`.
-- **SSE in-memory fallback**: `InMemorySSEBroker` работает только с single-instance деплоем; в multi-instance без Redis события между инстансами не доставляются.
+- Хранится только текущее состояние документа и результат последнего анализа; версий нет.
+- Ролей внутри проекта нет — только владелец и глобальный `admin`.
+- Правки применяются заменой `old_text → new_text` (txt/markdown) или текста абзаца (docx); пересекающиеся правки в одном абзаце могут не примениться.
+- Контракт LLM в `infrastructure/llm/schemas.py` — плейсхолдер до выбора провайдера; по умолчанию `StubLLMClient`.
+- Промпт с разделителями снижает риск prompt injection, но не исключает его; ответ модели проходит валидацию схемы и ручное ревью.
+- `audit_logs` растёт без retention-политики; при росте стоит партиционировать по `created_at`.
 
 ## Структура репозитория
 
 ```
 SyncBack/
-├── docker/{backend,worker}.Dockerfile
-├── docker-compose.yml
-├── .env.example
-├── pyproject.toml
-├── alembic.ini
-├── alembic/
-│   ├── env.py
-│   ├── script.py.mako
-│   └── versions/
-│       ├── 0001_initial_schema.py
-│       ├── 0002a_audit_logs_download.py
-│       ├── 0002b_p0_3_document_blocks.py
-│       ├── 0003_audit_logs_columns.py
-│       ├── 0004a_audit_logs_suggestion_id_nullable.py
-│       ├── 0004b_p0_review_version_block_id.py
-│       ├── 0005_project_description.py
-│       ├── 0006_document_status_lifecycle.py
-│       ├── 0007_idempotency_key_partial_success.py
-│       ├── 0008_source_scope.py
-│       ├── 0009_document_review_version.py
-│       ├── 0010_document_opens.py
-│       ├── 0011_document_original_storage_key.py
-│       ├── 0012_analysis_job_status_partial_success.py
-│       ├── 0013_document_blocks_and_suggestion_anchors.py
-│       ├── 0014_keyset_indexes.py
-│       ├── 0015_suggestion_job_status_index.py
-│       ├── 0016_schema_review_fixes.py
-│       ├── 0017_r1_r2_r3_r4_r5_r6_schema_cleanup.py
-│       ├── 0018_drop_text_content_from_sources.py
-│       ├── 0018_n1_n2_n4_n5_n6_n7_n8_fixes.py
-│       ├── 0019_add_indexes_opt4_opt5.py
-│       └── 0020_drop_error_cancelled_analysis_allowed.py
-└── app/
-    ├── main.py
-    ├── core/{config,logging_setup,correlation_middleware,body_size_limit_middleware,dependencies}.py
-    ├── api/
-    │   ├── deps.py
-    │   ├── upload_utils.py
-    │   ├── schemas/{auth,project,document,source,analysis_job,suggestion,review,editor,pagination}.py
-    │   └── v1/routers/
-    │       ├── auth.py
-    │       ├── projects.py
-    │       ├── documents.py
-    │       ├── documents_global.py      ← POST /documents (загрузка из «Мои документы»)
-    │       ├── my_documents.py          ← GET /documents (список всех документов пользователя)
-    │       ├── sources.py
-    │       ├── analysis_jobs.py
-    │       ├── analysis_jobs_bulk.py    ← POST /documents/analysis-jobs/bulk
-    │       ├── suggestions.py
-    │       ├── editor.py                ← GET+POST /editor (агрегат + сброс)
-    │       ├── sse.py                   ← GET /events/documents (SSE)
-    │       ├── dashboard.py             ← GET /dashboard, /documents/attention, /documents/recent, POST .../open
-    │       └── system.py
-    ├── domain/
-    │   ├── exceptions.py
-    │   ├── value_objects.py
-    │   ├── interfaces/{entities,file_storage,llm_client,source_connector,
-    │   │              document_parser,document_exporter,unit_of_work}.py
-    │   └── services/{auth,project,document,source,audit_log,analysis_job,
-    │                 suggestion,document_export,dashboard}_service.py
-    ├── infrastructure/
-    │   ├── db/{base,session,models/*,repositories/*}.py
-    │   ├── security/{password_hasher,jwt_handler,login_rate_limiter}.py
-    │   ├── cache/{redis_client,sync_redis_client}.py
-    │   ├── events/{sse_broker,publishers}.py   ← SSE-брокер и адаптеры IEventPublisher
-    │   ├── storage/minio_storage.py
-    │   ├── parsers/{txt,markdown,docx}_parser.py + parser_registry.py
-    │   ├── exporters/{text,docx}_exporter.py + exporter_registry.py
-    │   ├── source_connectors/manual_upload_connector.py
-    │   ├── llm/{schemas,http_retry_mixin,http_llm_client,on_prem_client,stub_client,factory}.py
-    │   └── queue/dead_letter_store.py
-    └── workers/
-        ├── celery_app.py
-        ├── pipeline/{llm_prompt_builder,suggestion_mapper}.py
-        └── tasks/analysis_tasks.py
-
-tests/
-├── conftest.py
-├── test_sources_guard.py
-├── test_system_capabilities.py
-├── unit/
-│   ├── test_app_startup.py
-│   ├── test_atomic_review.py
-│   ├── test_body_size_limit_middleware.py
-│   ├── test_contract_auth.py
-│   ├── test_contract_projects_documents.py
-│   ├── test_contract_suggestions_editor.py
-│   ├── test_document_list_service.py
-│   ├── test_document_status_lifecycle.py
-│   ├── test_editor_aggregate.py
-│   ├── test_iter_accepted_changes_pages.py
-│   ├── test_jwt_handler.py
-│   ├── test_login_rate_limiter.py
-│   ├── test_minio_presigned_url_ttl.py
-│   ├── test_my_documents_sources.py
-│   ├── test_password_hasher.py
-│   ├── test_analysis_tasks_missing_records.py
-│   ├── test_source_document_m2m.py
-│   ├── test_source_repository_scope.py
-│   ├── test_source_service_batch.py
-│   ├── test_list_with_total_window_count.py
-│   ├── test_status_transitions.py
-│   └── test_unit_of_work_abc.py
-└── integration/
-    ├── conftest.py
-    ├── test_analysis_job_lifecycle.py
-    ├── test_analysis_job_queue_failure.py
-    ├── test_atomic_review_concurrent.py
-    ├── test_atomic_review_pg.py
-    ├── test_integration_documents.py
-    └── test_upload_rollback.py
+├── docker/                  Dockerfile backend и worker, minio-init.sh
+├── docker-compose.yml       + docker-compose.dev.yml (порты на 127.0.0.1)
+├── alembic/versions/        миграции 0001…0025
+├── scripts/                 проверки границ слоёв
+├── app/
+│   ├── main.py              приложение, middleware, обработчики ошибок, lifespan
+│   ├── core/                config, dependencies, limiter, middleware, logging
+│   ├── api/                 deps, upload_utils, schemas/, v1/routers/
+│   ├── domain/              lifecycle, value_objects, policies, events, exceptions,
+│   │                        storage_keys, source_url, interfaces/, services/
+│   ├── infrastructure/      db/, storage/, cache/, events/, queue/, llm/, parsers/,
+│   │                        exporters/, source_connectors/, security/
+│   └── workers/             celery_app, tasks/analysis_tasks, pipeline/suggestion_mapper
+└── tests/                   unit/, contract/, integration/
 ```

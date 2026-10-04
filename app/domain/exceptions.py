@@ -210,3 +210,7 @@ class LLMTimeoutError(DomainError):
 
 class LLMInvalidResponseError(DomainError):
     pass
+
+
+class LLMInputTooLargeError(DomainError):
+    """Документ и источник не помещаются в контекст модели."""

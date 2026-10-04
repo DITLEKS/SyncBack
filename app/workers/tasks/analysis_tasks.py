@@ -19,7 +19,12 @@ from typing import Any
 from redis.asyncio import Redis
 
 from app.core.config import get_settings
-from app.domain.exceptions import DocumentParseError
+from app.domain.exceptions import (
+    DocumentParseError,
+    LLMInputTooLargeError,
+    LLMInvalidResponseError,
+    LLMTimeoutError,
+)
 from app.domain.interfaces.event_publisher import IEventPublisher
 from app.domain.interfaces.source_connector import SourceKind, SourceRef
 from app.domain.lifecycle import AnalysisJobLifecycle, DocumentLifecycle
@@ -161,6 +166,21 @@ async def _load_document_text(job_id: uuid.UUID, storage_key: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+_GENERATION_ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
+    (LLMInputTooLargeError, "LLM_INPUT_TOO_LARGE"),
+    (LLMTimeoutError, "LLM_UNAVAILABLE"),
+    (LLMInvalidResponseError, "LLM_INVALID_RESPONSE"),
+    (DocumentParseError, "DOCUMENT_PARSE_ERROR"),
+)
+
+
+def _generation_error_code(exc: Exception) -> str:
+    for error_type, code in _GENERATION_ERROR_CODES:
+        if isinstance(exc, error_type):
+            return code
+    return "GENERATION_ERROR"
+
+
 def _failed(source_id: str, error_code: str, error_message: str) -> dict[str, Any]:
     return {
         "source_id": source_id,
@@ -206,7 +226,7 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
             "Ошибка генерации правок для источника",
             extra={"job_id": job_id, "source_id": source_id},
         )
-        return _failed(source_id, "GENERATION_ERROR", str(exc))
+        return _failed(source_id, _generation_error_code(exc), str(exc))
 
     suggestions = map_to_suggestions(batch, job_uuid, document_id)
 

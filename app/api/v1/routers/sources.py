@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from app.api.deps import get_allowed_project
 from app.api.schemas.pagination import Page
 from app.api.schemas.source import NoteCreateRequest, SourceCreateRequest, SourceResponse
-from app.api.upload_utils import read_upload_within_limit
+from app.api.upload_utils import upload_content
 from app.core.config import Settings, get_settings
 from app.core.dependencies import get_source_service
 from app.domain.exceptions import (
@@ -121,13 +121,11 @@ async def upload_file_source(
 ) -> SourceResponse:
     """Загрузить файловый источник."""
     try:
-        content = await read_upload_within_limit(file, settings.max_upload_size_bytes)
         source = await source_service.create_file_source(
             project,
             name=name,
             filename=file.filename or "upload",
-            content=content,
-            content_type=file.content_type or "application/octet-stream",
+            content=upload_content(file, settings.max_upload_size_bytes),
             scope=scope,
             document_id=document_id,
         )

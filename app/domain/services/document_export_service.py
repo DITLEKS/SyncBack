@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from app.domain.exceptions import InvalidDocumentStatusError, UnsupportedExportFormatError
 from app.domain.interfaces.document_exporter import AppliedChange, DocumentExporterRegistry
-from app.domain.interfaces.file_storage import FileStorage
+from app.domain.interfaces.file_storage import FileStorage, UploadContent
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.lifecycle import DocumentLifecycle
 from app.domain.value_objects import DocumentFormatVO, SuggestionStatusVO
@@ -83,7 +83,7 @@ class DocumentExportService:
         media_type = _MEDIA_TYPES.get(DocumentFormatVO(document.format), "application/octet-stream")
 
         export_key = f"{document.storage_key}.exported"
-        await self._storage.upload(export_key, exported_bytes, media_type)
+        await self._storage.upload(export_key, UploadContent.from_bytes(exported_bytes, media_type))
 
         async with self._uow:
             await self._uow.documents.update_exported_key(document, export_key)

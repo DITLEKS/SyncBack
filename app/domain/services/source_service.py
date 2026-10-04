@@ -19,7 +19,7 @@ from app.domain.exceptions import (
     SourceLockError,
     SourceNotFoundError,
 )
-from app.domain.interfaces.file_storage import FileStorage
+from app.domain.interfaces.file_storage import FileStorage, UploadContent
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.lifecycle import DocumentLifecycle
 from app.domain.policies import UploadLimits
@@ -120,8 +120,9 @@ class SourceService:
             project,
             name=name,
             filename="note.txt",
-            content=text_content.encode("utf-8"),
-            content_type="text/plain; charset=utf-8",
+            content=UploadContent.from_bytes(
+                text_content.encode("utf-8"), "text/plain; charset=utf-8"
+            ),
             scope=scope,
             document_id=document_id,
             too_large_message=f"Текст превышает лимит {self._upload_limits.max_size_mb} МБ",
@@ -132,8 +133,7 @@ class SourceService:
         project: Project,
         name: str,
         filename: str,
-        content: bytes,
-        content_type: str,
+        content: UploadContent,
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
         document_id: uuid.UUID | None = None,
     ) -> Source:
@@ -142,7 +142,6 @@ class SourceService:
             name=name,
             filename=filename,
             content=content,
-            content_type=content_type,
             scope=scope,
             document_id=document_id,
             too_large_message=f"Файл превышает лимит {self._upload_limits.max_size_mb} МБ",
@@ -154,8 +153,7 @@ class SourceService:
         *,
         name: str,
         filename: str,
-        content: bytes,
-        content_type: str,
+        content: UploadContent,
         scope: SourceScopeVO,
         document_id: uuid.UUID | None,
         too_large_message: str,
@@ -165,7 +163,7 @@ class SourceService:
         Если запись в БД не удалась, загруженный объект удаляется, чтобы в хранилище
         не оставалось файлов без владельца.
         """
-        if self._upload_limits.exceeded_by(len(content)):
+        if self._upload_limits.exceeded_by(content.size):
             raise FileTooLargeError(too_large_message)
 
         source_id = uuid.uuid4()
@@ -174,7 +172,7 @@ class SourceService:
         try:
             async with self._uow:
                 document = await self._target_document(project.id, scope, document_id)
-                await self._storage.upload(storage_key, content, content_type)
+                await self._storage.upload(storage_key, content)
                 uploaded = True
                 source = await self._uow.sources.create_with_id(
                     source_id=source_id,

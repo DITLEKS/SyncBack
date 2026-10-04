@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import app.workers.tasks.analysis_tasks as tasks
 from app.domain.events import DomainEvent
+from app.domain.exceptions import LLMInputTooLargeError, LLMInvalidResponseError, LLMTimeoutError
 from app.domain.interfaces.llm_client import LLMSuggestionBatch, LLMSuggestionItem
 from app.domain.interfaces.source_connector import SourceRef
 from app.infrastructure.db.models.analysis_job import AnalysisJob
@@ -35,13 +36,14 @@ class FakeLLM:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, str]] = []
         self.fail_for_source_text: str | None = None
+        self.failure: Exception = RuntimeError("LLM недоступна")
 
     async def generate_suggestions(
         self, document_text: str, source_text: str, document_format: str
     ) -> LLMSuggestionBatch:
         self.calls.append((document_text, source_text, document_format))
         if source_text == self.fail_for_source_text:
-            raise RuntimeError("LLM недоступна")
+            raise self.failure
         return LLMSuggestionBatch(
             items=[
                 LLMSuggestionItem("p1", "modify", "Hello", f"Hi ({source_text})"),
@@ -273,3 +275,28 @@ async def test_source_not_found_is_reported(
     assert (await tasks._process_source(str(uuid.uuid4()), str(uuid.uuid4())))["error_code"] == (
         "JOB_NOT_FOUND"
     )
+
+
+@pytest.mark.parametrize(
+    ("failure", "error_code"),
+    [
+        (LLMInputTooLargeError("слишком длинно"), "LLM_INPUT_TOO_LARGE"),
+        (LLMTimeoutError("нет ответа"), "LLM_UNAVAILABLE"),
+        (LLMInvalidResponseError("HTTP 400"), "LLM_INVALID_RESPONSE"),
+    ],
+)
+async def test_llm_failures_are_reported_with_specific_codes(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,  # noqa: F811
+    worker: FakeLLM,
+    failure: Exception,
+    error_code: str,
+) -> None:
+    worker.fail_for_source_text = "A"
+    worker.failure = failure
+    _, _, job_id, source_ids = await _start(client, queue, ["A"])
+
+    result = await tasks._process_source(job_id, source_ids[0])
+
+    assert result["status"] == "failed"
+    assert result["error_code"] == error_code
