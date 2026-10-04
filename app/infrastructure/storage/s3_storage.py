@@ -9,31 +9,16 @@
 """
 
 import asyncio
-import re
-import unicodedata
 from datetime import timedelta
-from urllib.parse import quote
 
 from minio import Minio
 from minio.error import S3Error
 
 from app.core.config import Settings, get_settings
+from app.core.content_disposition import content_disposition
 from app.domain.interfaces.file_storage import UploadContent
 
-_UNSAFE_ASCII_RE = re.compile(r"[^A-Za-z0-9._ -]")
 _PART_SIZE_BYTES = 10 * 1024 * 1024
-
-
-def content_disposition(filename: str) -> str:
-    """Заголовок Content-Disposition с именем файла по RFC 6266.
-
-    Объект в хранилище называется по id, поэтому имя для браузера передаётся
-    отдельно: ASCII-вариант для старых клиентов и UTF-8 в filename*.
-    """
-    ascii_name = unicodedata.normalize("NFKD", filename).encode("ascii", "ignore").decode()
-    ascii_name = _UNSAFE_ASCII_RE.sub("_", ascii_name).strip() or "download"
-    utf8_name = quote(filename, safe="")
-    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{utf8_name}"
 
 
 class S3FileStorage:

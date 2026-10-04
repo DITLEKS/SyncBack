@@ -96,7 +96,9 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["X-Request-ID"],
+        # Без этого браузерный JS не видит имя файла при экспорте и паузу
+        # после 429 на входе: CORS по умолчанию отдаёт только простые заголовки.
+        expose_headers=["X-Request-ID", "Content-Disposition", "Retry-After"],
     )
     # Самый внешний слой: подставляет адрес клиента из X-Forwarded-For, но только
     # если запрос пришёл от доверенного прокси. Иначе rate limit и блокировка
