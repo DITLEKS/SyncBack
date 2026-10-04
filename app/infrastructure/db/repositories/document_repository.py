@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import and_, delete, func, select, tuple_, update
+from sqlalchemy import CursorResult, and_, delete, func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.repositories import IDocumentRepository
@@ -318,7 +318,7 @@ class DocumentRepository(IDocumentRepository):
             Source.scope == SourceScopeVO.DOCUMENT,
             Source.id.in_(subq),
         )
-        result = await self._session.execute(stmt)
+        result = cast(CursorResult[Any], await self._session.execute(stmt))
         await self._session.flush()
         return result.rowcount
 

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import TYPE_CHECKING
 
@@ -20,6 +21,9 @@ from app.domain.value_objects import UserRoleVO
 if TYPE_CHECKING:
     from app.infrastructure.db.models.project import Project
     from app.infrastructure.db.models.user import User
+
+
+logger = logging.getLogger("syncscribe.projects")
 
 
 class ProjectService:
@@ -87,7 +91,12 @@ class ProjectService:
             try:
                 await self._storage.delete(key)
             except Exception:  # noqa: BLE001
-                pass
+                logger.warning(
+                    "Не удалось удалить файл %s при удалении проекта %s",
+                    key,
+                    project.id,
+                    exc_info=True,
+                )
 
         async with self._uow:
             await self._uow.projects.delete(project)
