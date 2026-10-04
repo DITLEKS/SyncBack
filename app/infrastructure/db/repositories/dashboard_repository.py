@@ -168,6 +168,7 @@ class DashboardRepository(IDashboardQueryService):
                 Document.project_id,
                 Project.name.label("project_name"),
                 Document.status,
+                Document.uploaded_at,
                 DocumentOpen.last_opened_at,
                 func.count(Suggestion.id).label("suggestions_total"),
                 func.count(Suggestion.id)
@@ -191,6 +192,7 @@ class DashboardRepository(IDashboardQueryService):
                 Document.project_id,
                 Project.name,
                 Document.status,
+                Document.uploaded_at,
                 DocumentOpen.last_opened_at,
             )
             .order_by(DocumentOpen.last_opened_at.desc())
@@ -204,6 +206,7 @@ class DashboardRepository(IDashboardQueryService):
                 "project_id": r.project_id,
                 "project_name": r.project_name,
                 "status": r.status.value if hasattr(r.status, "value") else r.status,
+                "uploaded_at": r.uploaded_at,
                 "last_opened_at": r.last_opened_at,
                 "suggestions_total": r.suggestions_total or 0,
                 "suggestions_resolved": r.suggestions_resolved or 0,
