@@ -17,8 +17,8 @@ from app.infrastructure.storage.minio_storage import MinioStorage
 def _fake_settings(expire_seconds: int = 300):
     return SimpleNamespace(
         minio_endpoint="minio:9000",
-        minio_root_user="user",
-        minio_root_password="password",
+        minio_access_key="user",
+        minio_secret_key="password",
         minio_bucket="bucket",
         minio_secure=False,
         minio_presigned_url_expire_seconds=expire_seconds,
@@ -40,3 +40,30 @@ async def test_presigned_url_uses_configured_ttl(monkeypatch, expire_seconds):
     assert kwargs["expires"] == timedelta(seconds=expire_seconds)
     # Явно фиксируем инвариант: TTL никогда не может быть "бессрочным" (None/0)
     assert kwargs["expires"] > timedelta(seconds=0)
+
+
+async def test_presigned_url_sets_download_name():
+    storage = MinioStorage(_fake_settings())
+    fake_client = MagicMock()
+    fake_client.presigned_get_object.return_value = "https://example.invalid/signed"
+    storage._client = fake_client
+
+    await storage.get_presigned_url("some/key", 60, download_name='Отчёт "v2".docx')
+
+    _, kwargs = fake_client.presigned_get_object.call_args
+    disposition = kwargs["response_headers"]["response-content-disposition"]
+    assert disposition.startswith('attachment; filename="')
+    assert '"v2"' not in disposition.split(";")[1]
+    assert "filename*=UTF-8''%D0%9E%D1%82%D1%87%D1%91%D1%82" in disposition
+
+
+async def test_presigned_url_without_name_has_no_response_headers():
+    storage = MinioStorage(_fake_settings())
+    fake_client = MagicMock()
+    fake_client.presigned_get_object.return_value = "https://example.invalid/signed"
+    storage._client = fake_client
+
+    await storage.get_presigned_url("some/key", 60)
+
+    _, kwargs = fake_client.presigned_get_object.call_args
+    assert kwargs["response_headers"] is None

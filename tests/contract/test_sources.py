@@ -60,10 +60,7 @@ async def test_create_sources_of_all_kinds_and_list(
     assert response.status_code == 201, response.text
     note = response.json()
     assert note["type"] == "file"
-    assert (
-        file_storage.files[f"projects/{project_id}/sources/{note['id']}/note.txt"]
-        == "важно".encode()
-    )
+    assert file_storage.files[f"projects/{project_id}/sources/{note['id']}.txt"] == "важно".encode()
 
     response = await client.post(
         f"{base}/file",
@@ -73,9 +70,7 @@ async def test_create_sources_of_all_kinds_and_list(
     )
     assert response.status_code == 201, response.text
     file_source = response.json()
-    assert (
-        file_storage.files[f"projects/{project_id}/sources/{file_source['id']}/passwd"] == b"root"
-    )
+    assert file_storage.files[f"projects/{project_id}/sources/{file_source['id']}"] == b"root"
 
     response = await client.get(base, headers=headers)
     assert response.status_code == 200, response.text
@@ -217,9 +212,7 @@ async def test_sources_are_locked_while_document_is_analysed(
     )
     assert response.status_code == 423, response.text
     # Заметка для заблокированного документа не попала в хранилище: там только сам документ
-    assert list(file_storage.files) == [
-        f"projects/{project_id}/documents/{document['id']}/spec.txt"
-    ]
+    assert list(file_storage.files) == [f"projects/{project_id}/documents/{document['id']}.txt"]
 
     assert (await client.delete(f"{base}/{attached['id']}", headers=headers)).status_code == 423
     # Базовый источник проекта к документу не привязан — удаляется
@@ -244,7 +237,7 @@ async def test_delete_source_removes_file_and_is_scoped_to_project(
         f"{base}/note", json={"name": "Заметка", "text_content": "t"}, headers=headers
     )
     note = response.json()
-    key = f"projects/{project_id}/sources/{note['id']}/note.txt"
+    key = f"projects/{project_id}/sources/{note['id']}.txt"
     assert key in file_storage.files
 
     other_project = await create_project(client, headers, name="Другой")

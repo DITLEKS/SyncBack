@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.api.v1.routers.analysis_jobs import router as analysis_jobs_router
 from app.api.v1.routers.analysis_jobs_bulk import router as analysis_jobs_bulk_router
@@ -100,6 +101,11 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
         expose_headers=["X-Request-ID"],
     )
+    # Самый внешний слой: подставляет адрес клиента из X-Forwarded-For, но только
+    # если запрос пришёл от доверенного прокси. Иначе rate limit и блокировка
+    # входа обходились бы подменой заголовка.
+    if settings.trusted_proxy_hosts:
+        app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxy_hosts)
 
     # M-2: NotFound-подклассы DomainError → 404 (должны быть ПЕРЕД общим DomainError handler).
     @app.exception_handler(_NOT_FOUND_EXCEPTIONS[0])

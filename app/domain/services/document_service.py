@@ -22,6 +22,7 @@ from app.domain.interfaces.file_storage import FileStorage
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.lifecycle import DocumentLifecycle
 from app.domain.policies import UploadLimits
+from app.domain.storage_keys import document_storage_key
 from app.domain.value_objects import (
     DocumentFormatVO,
     DocumentStatusVO,
@@ -87,7 +88,7 @@ class DocumentService:
             raise FileTooLargeError(f"Файл превышает лимит {self._upload_limits.max_size_mb} МБ")
         document_format = self._resolve_format(filename)
         document_id = uuid.uuid4()
-        storage_key = f"projects/{project_id}/documents/{document_id}/{filename}"
+        storage_key = document_storage_key(project_id, document_id, filename)
         await self._storage.upload(storage_key, content, content_type)
 
         try:
@@ -262,7 +263,9 @@ class DocumentService:
 
     async def get_download_url(self, document: Document) -> tuple[str, int]:
         expires_in = self._download_url_ttl_seconds
-        url = await self._storage.get_presigned_url(document.storage_key, expires_in)
+        url = await self._storage.get_presigned_url(
+            document.storage_key, expires_in, download_name=document.name
+        )
         return url, expires_in
 
     async def get_document_content(self, document: Document) -> ParsedDocument:

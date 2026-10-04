@@ -8,12 +8,29 @@
 
 import asyncio
 import io
+import re
+import unicodedata
 from datetime import timedelta
+from urllib.parse import quote
 
 from minio import Minio
 from minio.error import S3Error
 
 from app.core.config import Settings, get_settings
+
+_UNSAFE_ASCII_RE = re.compile(r"[^A-Za-z0-9._ -]")
+
+
+def content_disposition(filename: str) -> str:
+    """Заголовок Content-Disposition с именем файла по RFC 6266.
+
+    Объект в хранилище называется по id, поэтому имя для браузера передаётся
+    отдельно: ASCII-вариант для старых клиентов и UTF-8 в filename*.
+    """
+    ascii_name = unicodedata.normalize("NFKD", filename).encode("ascii", "ignore").decode()
+    ascii_name = _UNSAFE_ASCII_RE.sub("_", ascii_name).strip() or "download"
+    utf8_name = quote(filename, safe="")
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{utf8_name}"
 
 
 class MinioStorage:
@@ -21,8 +38,8 @@ class MinioStorage:
         self._settings = settings or get_settings()
         self._client = Minio(
             self._settings.minio_endpoint,
-            access_key=self._settings.minio_root_user,
-            secret_key=self._settings.minio_root_password,
+            access_key=self._settings.minio_access_key,
+            secret_key=self._settings.minio_secret_key,
             secure=self._settings.minio_secure,
         )
         self._bucket = self._settings.minio_bucket
@@ -48,12 +65,20 @@ class MinioStorage:
 
         return await asyncio.to_thread(_download)
 
-    async def get_presigned_url(self, key: str, expires_in: int) -> str:
+    async def get_presigned_url(
+        self, key: str, expires_in: int, download_name: str | None = None
+    ) -> str:
+        response_headers: dict[str, str | list[str] | tuple[str]] | None = (
+            {"response-content-disposition": content_disposition(download_name)}
+            if download_name
+            else None
+        )
         return await asyncio.to_thread(
             self._client.presigned_get_object,
             self._bucket,
             key,
             expires=timedelta(seconds=expires_in),
+            response_headers=response_headers,
         )
 
     async def delete(self, key: str) -> None:

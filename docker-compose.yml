@@ -1,4 +1,7 @@
-version: "3.9"
+# Базовая конфигурация: инфраструктура (Postgres, Redis, MinIO) доступна
+# только внутри сети compose, пароли берутся из .env без значений по умолчанию.
+# Для локальной разработки с доступом к портам с хоста:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 
 networks:
   syncscribe-net:
@@ -14,10 +17,8 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-syncscribe}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-syncscribe}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Задайте POSTGRES_PASSWORD в .env}
       POSTGRES_DB: ${POSTGRES_DB:-syncscribe}
-    ports:
-      - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -31,8 +32,6 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    ports:
-      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -45,12 +44,9 @@ services:
     image: minio/minio:latest
     restart: unless-stopped
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-syncscribe}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-syncscribe123}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-syncscribe-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Задайте MINIO_ROOT_PASSWORD в .env}
     command: server /data --console-address ":9001"
-    ports:
-      - "9000:9000"
-      - "9001:9001"
     volumes:
       - minio-data:/data
     healthcheck:
@@ -61,18 +57,22 @@ services:
     networks:
       - syncscribe-net
 
+  # Создаёт бакет и сервисного пользователя с правами только на этот бакет:
+  # приложение не должно ходить в хранилище под root-учёткой.
   minio-init:
     image: minio/mc:latest
     depends_on:
       minio:
         condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-syncscribe} ${MINIO_ROOT_PASSWORD:-syncscribe123} &&
-      mc mb -p local/${MINIO_BUCKET:-syncscribe-documents} &&
-      mc anonymous set none local/${MINIO_BUCKET:-syncscribe-documents} &&
-      exit 0
-      "
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-syncscribe-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Задайте MINIO_ROOT_PASSWORD в .env}
+      MINIO_BUCKET: ${MINIO_BUCKET:-syncscribe-documents}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Задайте MINIO_ACCESS_KEY в .env}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Задайте MINIO_SECRET_KEY в .env}
+    volumes:
+      - ./docker/minio-init.sh:/usr/local/bin/minio-init.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/minio-init.sh"]
     networks:
       - syncscribe-net
 
@@ -87,8 +87,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio:
-        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     ports:
       - "8000:8000"
     networks:
@@ -105,7 +105,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio:
-        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     networks:
       - syncscribe-net
