@@ -10,6 +10,8 @@ class StubLLMClient:
             change_type="add",
             old_text=None,
             new_text="Пример правки от stub-LLM (LLM_PROVIDER=stub) — замените на реальный вызов внешнего провайдера.",
+            rationale="Заглушка: настоящая модель объясняет здесь причину правки.",
+            confidence_score=0.5,
         )
         return LLMSuggestionBatch(items=[item], raw_response="stub")
 

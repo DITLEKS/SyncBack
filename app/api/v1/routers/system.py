@@ -3,17 +3,20 @@
 from fastapi import APIRouter, Depends
 
 from app.api.deps import require_admin
+from app.api.schemas.system import (
+    AnalysisCapabilities,
+    CapabilitiesResponse,
+    ExportCapabilities,
+    ReviewCapabilities,
+    UploadCapabilities,
+)
 from app.core.config import Settings, get_settings
 from app.core.dependencies import get_llm_client_instance
-from app.infrastructure.db.models.enums import DocumentFormat
+from app.domain.services.document_service import FORMAT_BY_EXTENSION
+from app.domain.value_objects import DocumentStatusVO
 from app.infrastructure.db.models.user import User
 
 router = APIRouter(prefix="/system", tags=["system"])
-
-# Форматы, которые парсер принимает без ошибки
-_SUPPORTED_FORMATS = ["pdf", "docx", "txt", "md"]
-# Форматы, которые известны, но вернут 400 UnsupportedFormatError
-_UNSUPPORTED_FORMATS = ["doc"]
 
 
 @router.get("/llm-health")
@@ -27,41 +30,35 @@ async def llm_health(
     return {"provider": settings.llm_provider, "healthy": is_healthy}
 
 
-@router.get("/capabilities")
-async def get_capabilities(
-    settings: Settings = Depends(get_settings),
-) -> dict:
-    """Возможности системы для фронтенда — форматы, лимиты, ограничения.
+@router.get("/capabilities", response_model=CapabilitiesResponse)
+async def get_capabilities(settings: Settings = Depends(get_settings)) -> CapabilitiesResponse:
+    """Форматы, лимиты и правила API для фронтенда.
 
-    Фронтенд не должен хардкодить эти параметры — они читаются при старте.
-    Endpoint публичный (без авторизации): нужен до логина для инициализации UI.
+    Публичный: нужен до входа, чтобы настроить загрузку. Значения берутся из тех же
+    настроек и таблиц, что проверяют запросы, поэтому не расходятся с поведением.
     """
-    supported_formats = [
-        f.value
-        for f in DocumentFormat
-        if f != DocumentFormat.DOC  # .doc не поддерживается парсером
-    ]
-    return {
-        "upload": {
-            "max_size_mb": settings.max_upload_size_mb,
-            "max_size_bytes": settings.max_upload_size_bytes,
-            "supported_formats": supported_formats,
-            "supported_mime_types": [
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
-                "text/plain",  # .txt
-                "text/markdown",  # .md
-                "text/x-markdown",
-            ],
-        },
-        "analysis": {
-            "idempotency_key_required": False,
-            "parallel_jobs_per_document": 1,
-        },
-        "review": {
-            "atomic_save_endpoint": "PUT /projects/{project_id}/documents/{document_id}/review",
-            "optimistic_locking": True,
-        },
-        "export": {
-            "supported_formats": ["docx", "txt", "markdown"],
-        },
-    }
+    document_base = "/api/v1/projects/{project_id}/documents/{document_id}"
+    return CapabilitiesResponse(
+        upload=UploadCapabilities(
+            max_size_mb=settings.max_upload_size_mb,
+            max_size_bytes=settings.max_upload_size_bytes,
+            document_formats=sorted({f.value for f in FORMAT_BY_EXTENSION.values()}),
+            document_extensions=sorted(FORMAT_BY_EXTENSION),
+            unsupported_extensions=[".doc"],
+        ),
+        analysis=AnalysisCapabilities(
+            idempotency_header="Idempotency-Key",
+            parallel_jobs_per_document=1,
+            force_required_for_ready=True,
+        ),
+        review=ReviewCapabilities(
+            atomic_save_endpoint=f"PUT {document_base}/suggestions/review",
+            optimistic_locking=True,
+            version_header="If-Match",
+        ),
+        export=ExportCapabilities(
+            endpoint=f"GET {document_base}/export",
+            same_format_only=True,
+            requires_status=DocumentStatusVO.READY.value,
+        ),
+    )

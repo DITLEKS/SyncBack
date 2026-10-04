@@ -20,6 +20,7 @@ from app.api.schemas.pagination import Page
 from app.api.schemas.source import SourceResponse
 from app.api.upload_utils import upload_content
 from app.core.config import Settings, get_settings
+from app.core.content_disposition import content_disposition
 from app.core.dependencies import (
     get_audit_log_service,
     get_document_export_service,
@@ -270,7 +271,7 @@ async def export_document(
     return Response(
         content=content,
         media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": content_disposition(filename)},
     )
 
 

@@ -141,7 +141,7 @@ GET    /documents/recent                  5 последних открытых
 GET    /events/documents                  SSE; ?document_ids= (до 50 UUID)
 
 GET    /system/llm-health                 только admin
-GET    /system/capabilities               без авторизации: форматы и лимиты загрузки для UI
+GET    /system/capabilities               без авторизации: форматы, лимиты, пути ревью и экспорта для UI
 GET    /health                            без префикса
 ```
 

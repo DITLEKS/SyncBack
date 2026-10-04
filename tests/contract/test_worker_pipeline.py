@@ -46,7 +46,14 @@ class FakeLLM:
             raise self.failure
         return LLMSuggestionBatch(
             items=[
-                LLMSuggestionItem("p1", "modify", "Hello", f"Hi ({source_text})"),
+                LLMSuggestionItem(
+                    "p1",
+                    "modify",
+                    "Hello",
+                    f"Hi ({source_text})",
+                    rationale=f"Так в источнике {source_text}",
+                    confidence_score=0.75,
+                ),
                 LLMSuggestionItem("p2", "unknown", None, None),
             ]
         )
@@ -181,7 +188,12 @@ async def test_pipeline_success_moves_document_to_awaiting_approval(
         headers=headers,
     )
     assert response.status_code == 200, response.text
-    assert response.json()["total"] == 2
+    body = response.json()
+    assert body["total"] == 2
+    assert {(i["change_type"], i["rationale"], i["confidence_score"]) for i in body["items"]} == {
+        ("modify", "Так в источнике A", 0.75),
+        ("modify", "Так в источнике B", 0.75),
+    }
 
 
 async def test_pipeline_partial_failure(

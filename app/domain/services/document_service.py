@@ -36,7 +36,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger("syncscribe.services.document")
 
 
-_FORMAT_BY_EXTENSION: dict[str, DocumentFormatVO] = {
+# Единственный источник правды о принимаемых расширениях: его же отдаёт /system/capabilities.
+FORMAT_BY_EXTENSION: dict[str, DocumentFormatVO] = {
     ".docx": DocumentFormatVO.DOCX,
     ".txt": DocumentFormatVO.TXT,
     ".md": DocumentFormatVO.MARKDOWN,
@@ -45,7 +46,7 @@ _FORMAT_BY_EXTENSION: dict[str, DocumentFormatVO] = {
 
 
 def _extension_to_format(suffix: str) -> DocumentFormatVO:
-    fmt = _FORMAT_BY_EXTENSION.get(suffix)
+    fmt = FORMAT_BY_EXTENSION.get(suffix)
     if fmt is None:
         raise UnsupportedFileFormatError(
             f"Формат '{suffix or 'без расширения'}' не поддерживается. "

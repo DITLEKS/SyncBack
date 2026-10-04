@@ -30,6 +30,8 @@ def map_to_suggestions(
                 status=SuggestionStatus.PENDING,
                 original_text=item.old_text,
                 suggested_text=item.new_text,
+                rationale=item.rationale,
+                confidence_score=item.confidence_score,
             )
         )
     return suggestions

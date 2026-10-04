@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from urllib.parse import quote
 import uuid
 
 import pytest
@@ -114,7 +115,9 @@ async def test_export_in_source_format_only(
     await set_document_status(sessionmaker, document["id"], DocumentStatusVO.READY)
     response = await client.get(base, headers=headers)
     assert response.status_code == 200, response.text
-    assert response.headers["content-disposition"] == 'attachment; filename="report.docx"'
+    assert response.headers["content-disposition"] == (
+        "attachment; filename=\"report.docx\"; filename*=UTF-8''report.docx"
+    )
     assert DocxDocument(io.BytesIO(response.content)).paragraphs[0].text == "Первый абзац"
 
     # Конвертация между форматами не поддерживается — только исходный формат
@@ -140,9 +143,33 @@ async def test_export_text_document_applies_no_changes_when_none_accepted(
         headers=headers,
     )
     assert response.status_code == 200, response.text
-    assert response.headers["content-disposition"] == 'attachment; filename="notes.md"'
+    assert response.headers["content-disposition"] == (
+        "attachment; filename=\"notes.md\"; filename*=UTF-8''notes.md"
+    )
     assert response.headers["content-type"].startswith("text/markdown")
     assert response.text == "# Заголовок\n\nТекст\n"
+
+
+async def test_export_keeps_cyrillic_file_name(
+    client: AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    headers = await register_and_login(client)
+    project_id = await create_project(client, headers)
+    document = await upload_document(
+        client, headers, project_id, filename="Договор «поставки».txt", content=b"text"
+    )
+    await set_document_status(sessionmaker, document["id"], DocumentStatusVO.READY)
+    response = await client.get(
+        f"/api/v1/projects/{project_id}/documents/{document['id']}/export",
+        headers={**headers, "Origin": "http://localhost:5173"},
+    )
+    assert response.status_code == 200, response.text
+    disposition = response.headers["content-disposition"]
+    assert disposition.startswith('attachment; filename="')
+    assert "filename*=UTF-8''" + quote("Договор «поставки».txt", safe="") in disposition
+    # Браузерный JS видит заголовок только если CORS его явно отдаёт.
+    exposed = response.headers["access-control-expose-headers"].lower()
+    assert "content-disposition" in exposed
 
 
 async def test_attach_sources_to_document(client: AsyncClient) -> None:
