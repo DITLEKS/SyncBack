@@ -31,7 +31,7 @@ app/
 - **Очереди**: Celery + Redis (брокер и result backend)
 - **Real-time**: SSE (Server-Sent Events) через Redis Pub/Sub (fallback: in-memory)
 - **Файловое хранилище**: Minio (S3-совместимое, приватный бакет)
-- **Аутентификация**: JWT (PyJWT) + bcrypt (passlib)
+- **Аутентификация**: JWT (PyJWT) + bcrypt
 - **Парсинг документов**: python-docx (docx), нативная обработка (txt/markdown)
 - **LLM-интеграция**: httpx, конфигурируемый провайдер через `.env`
 
@@ -156,6 +156,8 @@ CI (`.github/workflows/ci.yml`) запускает оба набора авто�
 ```
 POST   /auth/register
 POST   /auth/login
+POST   /auth/refresh
+POST   /auth/logout                                                (отзыв refresh-токена, 204)
 GET    /auth/me
 
 POST   /projects
@@ -334,7 +336,7 @@ t._get_llm_client = lambda: FakeLLMClient()
 
 ## Безопасность
 
-- Пароли — только bcrypt-хэш (passlib), plain-text не хранится и не логируется.
+- Пароли — только bcrypt-хэш, plain-text не хранится и не логируется.
 - JWT с обязательным сроком жизни (`JWT_ACCESS_TOKEN_EXPIRE_MINUTES`).
 - Rate limiting логина: счётчик неудачных попыток по email в Redis, блокировка после `LOGIN_MAX_ATTEMPTS`.
 - Валидация всех входящих запросов через Pydantic-схемы.

@@ -7,6 +7,7 @@ import uuid
 import pytest
 from httpx import AsyncClient
 
+from app.core.config import get_settings
 from tests.contract.conftest import register_and_login
 
 pytestmark = pytest.mark.asyncio
@@ -138,3 +139,75 @@ async def test_refresh_token_rotates_and_old_one_is_revoked(client: AsyncClient)
 
     response = await client.post("/api/v1/auth/refresh", json={"refresh_token": "not-a-jwt"})
     assert response.status_code == 401
+
+
+async def test_logout_revokes_refresh_token(client: AsyncClient) -> None:
+    await client.post(
+        "/api/v1/auth/register",
+        json={"email": "logout@example.com", "password": "Correct-Horse-Battery-9"},
+    )
+    login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "logout@example.com", "password": "Correct-Horse-Battery-9"},
+    )
+    refresh_token = login.json()["refresh_token"]
+
+    response = await client.post("/api/v1/auth/logout", json={"refresh_token": refresh_token})
+    assert response.status_code == 204, response.text
+    assert response.content == b""
+
+    response = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})
+    assert response.status_code == 401
+
+    # Повторный logout и logout с мусором — тоже 204: отзывать нечего
+    assert (
+        await client.post("/api/v1/auth/logout", json={"refresh_token": refresh_token})
+    ).status_code == 204
+    assert (
+        await client.post("/api/v1/auth/logout", json={"refresh_token": "garbage"})
+    ).status_code == 204
+
+
+async def test_register_rejects_password_over_72_bytes(client: AsyncClient) -> None:
+    response = await client.post(
+        "/api/v1/auth/register",
+        json={"email": "long@example.com", "password": "я" * 40},
+    )
+    assert response.status_code == 422, response.text
+    assert "байт" in response.json()["detail"]
+
+
+async def test_login_is_locked_after_too_many_failures(client: AsyncClient) -> None:
+    await register_and_login(client, "lock@example.com")
+    max_attempts = get_settings().login_max_attempts
+
+    for _ in range(max_attempts):
+        response = await client.post(
+            "/api/v1/auth/login",
+            json={"email": "lock@example.com", "password": "wrong-password-1"},
+        )
+        assert response.status_code == 401
+
+    response = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "lock@example.com", "password": "Correct-Horse-Battery-9"},
+    )
+    assert response.status_code == 429, response.text
+    assert int(response.headers["retry-after"]) > 0
+
+
+async def test_unknown_email_fails_the_same_way_as_wrong_password(client: AsyncClient) -> None:
+    response = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "nobody@example.com", "password": "whatever-password-1"},
+    )
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Неверный email или пароль"
+
+
+async def test_login_with_overlong_password_is_401_not_500(client: AsyncClient) -> None:
+    for email in ("nobody@example.com", "user@example.com"):
+        response = await client.post(
+            "/api/v1/auth/login", json={"email": email, "password": "я" * 60}
+        )
+        assert response.status_code == 401, response.text

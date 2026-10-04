@@ -1,15 +1,12 @@
-"""
-Роутер регистрации/логина/текущего пользователя.
+"""Роутер регистрации, входа, обновления и отзыва токенов.
 
-M-block: добавлен rate limit 5/minute на POST /register (защита от
-массовых регистраций) и 20/minute на POST /login (H-3: защита от
-перебора паролей до достижения lockout на уровне сервиса).
-Лимит применяется по IP клиента; при превышении возвращается HTTP 429
-с заголовком Retry-After.
+Лимиты slowapi считаются по IP клиента и защищают от массовых регистраций
+и перебора паролей до срабатывания блокировки на уровне сервиса;
+при превышении возвращается 429 с заголовком Retry-After.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from slowapi.errors import RateLimitExceeded  # noqa: F401  — re-exported для тестов
+from slowapi.util import get_remote_address
 
 from app.api.deps import get_current_user
 from app.api.schemas.auth import (
@@ -25,6 +22,7 @@ from app.domain.exceptions import (
     AccountTemporarilyLockedError,
     EmailAlreadyRegisteredError,
     InvalidCredentialsError,
+    InvalidPasswordError,
     InvalidTokenError,
 )
 from app.domain.services.auth_service import AuthService
@@ -48,6 +46,10 @@ async def register(
     """
     try:
         user = await auth_service.register(payload.email, payload.password)
+    except InvalidPasswordError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
     except EmailAlreadyRegisteredError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return UserResponse.model_validate(user)
@@ -61,20 +63,22 @@ async def login(
     payload: UserLoginRequest,
     auth_service: AuthService = Depends(get_auth_service),
 ) -> TokenResponse:
-    """Аутентификация пользователя.
-
-    H-3: Rate limit 20/minute по IP — защищает от перебора паролей
-    до достижения lockout на уровне сервиса (login_max_attempts).
-    """
+    """Аутентификация пользователя."""
     try:
         (
             access_token,
             refresh_token,
             expires_in,
             refresh_expires_in,
-        ) = await auth_service.authenticate(payload.email, payload.password)
+        ) = await auth_service.authenticate(
+            payload.email, payload.password, client_ip=get_remote_address(request)
+        )
     except AccountTemporarilyLockedError as exc:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
     except InvalidCredentialsError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
     return TokenResponse(
@@ -86,7 +90,10 @@ async def login(
 
 
 @router.post("/refresh", response_model=TokenResponse)
+@limiter.limit("30/minute")
 async def refresh_tokens(
+    request: Request,
+    response: Response,
     payload: RefreshTokenRequest,
     auth_service: AuthService = Depends(get_auth_service),
 ) -> TokenResponse:
@@ -105,6 +112,24 @@ async def refresh_tokens(
         expires_in=expires_in,
         refresh_expires_in=refresh_expires_in,
     )
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit("30/minute")
+async def logout(
+    request: Request,
+    response: Response,
+    payload: RefreshTokenRequest,
+    auth_service: AuthService = Depends(get_auth_service),
+) -> Response:
+    """Отозвать refresh-токен.
+
+    Ответ одинаковый для действующего, уже отозванного и невалидного токена:
+    клиенту достаточно знать, что продолжить сессию этим токеном нельзя.
+    Access-токен действует до истечения срока.
+    """
+    await auth_service.logout(payload.refresh_token)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/me", response_model=UserResponse)
