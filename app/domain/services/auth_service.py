@@ -49,7 +49,8 @@ class AuthService:
             existing = await self._uow.users.get_by_email(email)
             if existing is not None:
                 raise EmailAlreadyRegisteredError(f"Email {email} уже зарегистрирован")
-            user = await self._uow.users.create_from_credentials(email, self._hasher.hash(password))
+            password_hash = await self._hasher.hash(password)
+            user = await self._uow.users.create_from_credentials(email, password_hash)
             await self._uow.commit()
         return user
 
@@ -71,10 +72,10 @@ class AuthService:
         if user is None:
             # Хэшируем и для несуществующего email, чтобы по времени ответа
             # нельзя было понять, зарегистрирован ли адрес.
-            self._hasher.hash(password)
+            await self._hasher.hash(password)
             await self._rate_limiter.register_failure(email, client_ip)
             raise InvalidCredentialsError("Неверный email или пароль")
-        if not self._hasher.verify(password, user.password_hash):
+        if not await self._hasher.verify(password, user.password_hash):
             await self._rate_limiter.register_failure(email, client_ip)
             raise InvalidCredentialsError("Неверный email или пароль")
 
