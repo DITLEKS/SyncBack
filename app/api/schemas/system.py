@@ -1,25 +1,46 @@
-"""Схемы для /system/* эндпоинтов."""
+"""Схема /system/capabilities: всё, что фронт читает при старте вместо хардкода."""
 
 from pydantic import BaseModel, Field
 
 
+class UploadCapabilities(BaseModel):
+    max_size_mb: int = Field(description="Максимальный размер файла, МБ (документы и источники)")
+    max_size_bytes: int
+    document_formats: list[str] = Field(
+        description="Значения поля document.format, которые может получить загруженный документ"
+    )
+    document_extensions: list[str] = Field(
+        description="Расширения файлов документа, которые принимает загрузка (с точкой, строчные)"
+    )
+    unsupported_extensions: list[str] = Field(
+        description="Известные расширения, на которые загрузка ответит 415"
+    )
+
+
+class AnalysisCapabilities(BaseModel):
+    idempotency_header: str = Field(description="Необязательный заголовок для повтора запуска")
+    parallel_jobs_per_document: int
+    force_required_for_ready: bool = Field(
+        description="Повторный анализ готового документа требует force=true, иначе 409"
+    )
+
+
+class ReviewCapabilities(BaseModel):
+    atomic_save_endpoint: str
+    optimistic_locking: bool
+    version_header: str = Field(description="Заголовок с review_version; при расхождении 412")
+
+
+class ExportCapabilities(BaseModel):
+    endpoint: str
+    same_format_only: bool = Field(description="Экспорт только в исходном формате документа")
+    requires_status: str
+
+
 class CapabilitiesResponse(BaseModel):
-    """Статические возможности бэкенда, которые фронт читает один раз при старте."""
+    """Возможности бэкенда, которые фронт читает один раз при старте."""
 
-    supported_formats: list[str] = Field(
-        description="Расширения файлов, которые принимает парсер (без точки, строчные)"
-    )
-    unsupported_formats: list[str] = Field(
-        description="Расширения, которые известны API, но вернут 400 при загрузке"
-    )
-    max_file_size_mb: int = Field(description="Максимальный размер загружаемого файла, МБ")
-
-    model_config = {
-        "json_schema_extra": {
-            "example": {
-                "supported_formats": ["pdf", "docx", "txt", "md"],
-                "unsupported_formats": ["doc"],
-                "max_file_size_mb": 50,
-            }
-        }
-    }
+    upload: UploadCapabilities
+    analysis: AnalysisCapabilities
+    review: ReviewCapabilities
+    export: ExportCapabilities
