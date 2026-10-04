@@ -11,12 +11,18 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from app.domain.exceptions import ProjectNotFoundError
 from app.domain.interfaces.file_storage import FileStorage
 from app.domain.interfaces.unit_of_work import IUnitOfWork
-from app.domain.value_objects import UserRoleVO
+from app.domain.project_appearance import (
+    default_project_color,
+    normalize_project_color,
+    normalize_project_icon,
+)
+from app.domain.value_objects import ProjectContentCounts, UserRoleVO
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models.project import Project
@@ -32,11 +38,28 @@ class ProjectService:
         self._storage = file_storage
 
     async def create_project(
-        self, owner: User, name: str, description: str | None = None
+        self,
+        owner: User,
+        name: str,
+        description: str | None = None,
+        color: str | None = None,
+        icon: str | None = None,
     ) -> Project:
+        """Создать проект. Без цвета берётся следующий цвет палитры для этого владельца.
+
+        Бросает InvalidProjectColorError, если цвет не из палитры.
+        """
+        normalized_color = normalize_project_color(color) if color is not None else None
         async with self._uow:
+            if normalized_color is None:
+                existing = await self._uow.projects.count_by_owner(owner.id)
+                normalized_color = default_project_color(existing)
             project = await self._uow.projects.create(
-                owner_id=owner.id, name=name, description=description
+                owner_id=owner.id,
+                name=name,
+                description=description,
+                color=normalized_color,
+                icon=normalize_project_icon(icon) if icon is not None else None,
             )
             await self._uow.commit()
         return project
@@ -70,12 +93,30 @@ class ProjectService:
         project: Project,
         name: str | None = None,
         description: str | None = None,
+        color: str | None = None,
+        icon: str | None = None,
     ) -> Project:
-        """Частичное обновление полей проекта."""
+        """Частичное обновление полей проекта; None означает «не менять», пустая иконка — сброс.
+
+        Бросает InvalidProjectColorError, если цвет не из палитры.
+        """
         async with self._uow:
-            updated = await self._uow.projects.update(project, name=name, description=description)
+            updated = await self._uow.projects.update(
+                project,
+                name=name,
+                description=description,
+                color=normalize_project_color(color) if color is not None else None,
+                icon=icon.strip() if icon is not None else None,
+            )
             await self._uow.commit()
         return updated
+
+    async def content_counts(
+        self, project_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, ProjectContentCounts]:
+        """Счётчики для карточек одним запросом на всю страницу проектов."""
+        async with self._uow:
+            return await self._uow.projects.count_contents(project_ids)
 
     async def delete_project(self, project: Project) -> None:
         """

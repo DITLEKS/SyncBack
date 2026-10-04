@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -31,6 +32,7 @@ from app.domain.value_objects import (
 )
 
 if TYPE_CHECKING:
+    from app.infrastructure.db.models.analysis_job import AnalysisJob
     from app.infrastructure.db.models.document import Document
 
 logger = logging.getLogger("syncscribe.services.document")
@@ -140,6 +142,23 @@ class DocumentService:
         if document is None or document.project_id != project_id:
             raise DocumentNotFoundError(f"Документ {document_id} не найден в проекте {project_id}")
         return document
+
+    async def current_analysis_jobs(
+        self, documents: Sequence[Document]
+    ) -> dict[uuid.UUID, AnalysisJob]:
+        """Текущая задача анализа каждого документа, ключ — id документа.
+
+        Нужна, чтобы показать состояние анализа (ошибка, отмена, ход) рядом с документом;
+        все задачи читаются одним запросом.
+        """
+        job_to_document = {
+            d.current_analysis_job_id: d.id for d in documents if d.current_analysis_job_id
+        }
+        if not job_to_document:
+            return {}
+        async with self._uow:
+            jobs = await self._uow.jobs.list_by_ids(list(job_to_document))
+        return {job_to_document[job.id]: job for job in jobs}
 
     async def list_all_for_user(
         self,

@@ -1,12 +1,14 @@
 """Репозиторий проектов."""
 
 import uuid
+from collections.abc import Sequence
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import ProjectNotFoundError
 from app.domain.interfaces.repositories import IProjectRepository
+from app.domain.value_objects import ProjectContentCounts, SourceScopeVO
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.source import Source
@@ -34,9 +36,16 @@ class ProjectRepository(IProjectRepository):
         return project
 
     async def create(
-        self, owner_id: uuid.UUID, name: str, description: str | None = None
+        self,
+        owner_id: uuid.UUID,
+        name: str,
+        description: str | None = None,
+        color: str | None = None,
+        icon: str | None = None,
     ) -> Project:
-        project = Project(owner_id=owner_id, name=name, description=description)
+        project = Project(
+            owner_id=owner_id, name=name, description=description, color=color, icon=icon
+        )
         self._session.add(project)
         await self._session.flush()
         await self._session.refresh(project)
@@ -73,15 +82,50 @@ class ProjectRepository(IProjectRepository):
         project: Project,
         name: str | None = None,
         description: str | None = None,
+        color: str | None = None,
+        icon: str | None = None,
     ) -> Project:
         """Обновляем только переданные (не-None) поля."""
         if name is not None:
             project.name = name
         if description is not None:
             project.description = description
+        if color is not None:
+            project.color = color
+        if icon is not None:
+            # Пустая строка сбрасывает иконку к значению по умолчанию.
+            project.icon = icon or None
         await self._session.flush()
         await self._session.refresh(project)
         return project
+
+    async def count_contents(
+        self, project_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, ProjectContentCounts]:
+        if not project_ids:
+            return {}
+        documents = (
+            select(Document.project_id, func.count())
+            .where(Document.project_id.in_(project_ids))
+            .group_by(Document.project_id)
+        )
+        sources = (
+            select(Source.project_id, func.count())
+            .where(Source.project_id.in_(project_ids), Source.scope == SourceScopeVO.PROJECT)
+            .group_by(Source.project_id)
+        )
+        document_counts: dict[uuid.UUID, int] = {
+            row[0]: row[1] for row in (await self._session.execute(documents)).all()
+        }
+        source_counts: dict[uuid.UUID, int] = {
+            row[0]: row[1] for row in (await self._session.execute(sources)).all()
+        }
+        return {
+            pid: ProjectContentCounts(
+                documents=document_counts.get(pid, 0), sources=source_counts.get(pid, 0)
+            )
+            for pid in document_counts.keys() | source_counts.keys()
+        }
 
     async def collect_storage_keys(self, project_id: uuid.UUID) -> list[str]:
         """Собирает ключи хранилища для документов и файл-источников проекта."""
