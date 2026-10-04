@@ -27,8 +27,10 @@ from app.domain.exceptions import (
 )
 from app.domain.interfaces.document_exporter import AppliedChange
 from app.domain.interfaces.entities import DocumentProtocol, SuggestionProtocol
+from app.domain.interfaces.event_publisher import IEventPublisher
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.lifecycle import DocumentLifecycle
+from app.domain.services.document_events import DocumentEventOutbox
 from app.domain.value_objects import (
     DocumentStatusVO,
     PaginationParams,
@@ -70,8 +72,24 @@ PatchFilter = Literal["pending", "decided", "all"]
 
 
 class SuggestionService:
-    def __init__(self, uow: IUnitOfWork) -> None:
+    def __init__(self, uow: IUnitOfWork, *, events: IEventPublisher | None = None) -> None:
         self._uow = uow
+        self._outbox = DocumentEventOutbox(events)
+
+    async def _commit(self) -> None:
+        try:
+            await self._uow.commit()
+        except BaseException:
+            self._outbox.discard()
+            raise
+        await self._outbox.flush(self._uow)
+
+    async def _finish_review(self, document: DocumentProtocol) -> DocumentProtocol:
+        document = await self._uow.documents.update_status(
+            document, DocumentLifecycle.transition(document.status, DocumentStatusVO.READY)
+        )
+        self._outbox.record(document)
+        return document
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -235,7 +253,7 @@ class SuggestionService:
                     f"Правка {suggestion_id} была сброшена параллельным запросом. "
                     "Обновите список правок и повторите."
                 )
-            await self._uow.commit()
+            await self._commit()
         return updated
 
     # ------------------------------------------------------------------
@@ -276,7 +294,7 @@ class SuggestionService:
                 )
 
             refreshed = await self._uow.documents.get_by_id(document_id)
-            await self._uow.commit()
+            await self._commit()
         return PatchSuggestionsResult(document=refreshed or document, updated_ids=updated_ids)
 
     async def _decide_pending(
@@ -357,10 +375,8 @@ class SuggestionService:
                 )
             if export_service is not None:
                 await self._run_export(document, export_service)
-            document = await self._uow.documents.update_status(
-                document, DocumentLifecycle.transition(document.status, DocumentStatusVO.READY)
-            )
-            await self._uow.commit()
+            document = await self._finish_review(document)
+            await self._commit()
         return document
 
     async def atomic_review_save(
@@ -440,12 +456,10 @@ class SuggestionService:
                     )
                 if export_service is not None:
                     await self._run_export(document, export_service)
-                document = await self._uow.documents.update_status(
-                    document, DocumentLifecycle.transition(document.status, DocumentStatusVO.READY)
-                )
+                document = await self._finish_review(document)
                 finalized = True
 
-            await self._uow.commit()
+            await self._commit()
 
         return ReviewSaveResult(
             document=document,

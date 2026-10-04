@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import app.workers.tasks.analysis_tasks as tasks
+from app.domain.events import DomainEvent
 from app.domain.interfaces.llm_client import LLMSuggestionBatch, LLMSuggestionItem
 from app.domain.interfaces.source_connector import SourceRef
 from app.infrastructure.db.models.analysis_job import AnalysisJob
@@ -55,10 +56,24 @@ class FakeConnector:
 
 
 @pytest.fixture
+def published_events(monkeypatch: pytest.MonkeyPatch) -> list[DomainEvent]:
+    """Вместо публикации в Redis события воркера собираются в список."""
+    events: list[DomainEvent] = []
+
+    class Recorder:
+        async def publish(self, event: DomainEvent) -> None:
+            events.append(event)
+
+    monkeypatch.setattr(tasks, "_event_publisher", Recorder)
+    return events
+
+
+@pytest.fixture
 def worker(
     monkeypatch: pytest.MonkeyPatch,
     sessionmaker: async_sessionmaker[AsyncSession],
     file_storage: InMemoryFileStorage,
+    published_events: list[DomainEvent],
 ) -> FakeLLM:
     """Воркер работает с той же SQLite-БД, что и API, без Celery, MinIO и Redis."""
 
@@ -122,6 +137,7 @@ async def test_pipeline_success_moves_document_to_awaiting_approval(
     queue: FakeAnalysisQueue,  # noqa: F811
     worker: FakeLLM,
     sessionmaker: async_sessionmaker[AsyncSession],
+    published_events: list[DomainEvent],
 ) -> None:
     headers, document_id, job_id, source_ids = await _start(client, queue, ["A", "B"])
     assert len(source_ids) == 2
@@ -145,6 +161,9 @@ async def test_pipeline_success_moves_document_to_awaiting_approval(
     assert job.finished_at is not None
     assert job.partial_success is False
     assert (await _document(sessionmaker, document_id)).status.value == "awaiting_approval"
+    assert [(str(e.document_id), e.status.value) for e in published_events] == [
+        (document_id, "awaiting_approval")
+    ]
 
     async with sessionmaker() as session:
         suggestions = (await session.execute(select(Suggestion))).scalars().all()
