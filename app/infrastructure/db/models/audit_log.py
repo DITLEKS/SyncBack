@@ -21,6 +21,14 @@ class AuditLog(Base):
             "suggestion_id IS NOT NULL OR document_id IS NOT NULL",
             name="ck_audit_logs_ref_not_null",
         ),
+        # Действия над документом не ссылаются на правку, остальные — ссылаются.
+        sa.CheckConstraint(
+            "(action IN ('download', 'finalize', 'finalize_review') "
+            "AND document_id IS NOT NULL AND suggestion_id IS NULL) OR "
+            "(action NOT IN ('download', 'finalize', 'finalize_review') "
+            "AND suggestion_id IS NOT NULL)",
+            name="ck_audit_logs_target",
+        ),
         # R-5: составной индекс (document_id, created_at) уже покрывает все
         # запросы по document_id, поэтому одиночный index=True на document_id
         # удалён — индекс был лишним и только увеличивал write-overhead.

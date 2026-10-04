@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, case, delete, func, select, update
+from sqlalchemy import CursorResult, case, delete, func, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import SuggestionAlreadyDecidedError
@@ -234,14 +234,16 @@ class SuggestionRepository(ISuggestionRepository):
         ]
         if decisions.analysis_job_id is not None:
             where_clauses.append(Suggestion.analysis_job_id == decisions.analysis_job_id)
+        # Без явного типа литералы в CASE уходят в PostgreSQL как text, а колонка —
+        # enum suggestion_status, и UPDATE падает. SQLite этого не замечает.
+        status_type = Suggestion.__table__.c.status.type
+        accepted = literal(_status_to_orm(SuggestionStatusVO.ACCEPTED), type_=status_type)
+        rejected = literal(_status_to_orm(SuggestionStatusVO.REJECTED), type_=status_type)
         stmt = (
             update(Suggestion)
             .where(*where_clauses)
             .values(
-                status=case(
-                    (Suggestion.id.in_(accepted_ids), _status_to_orm(SuggestionStatusVO.ACCEPTED)),
-                    else_=_status_to_orm(SuggestionStatusVO.REJECTED),
-                ),
+                status=case((Suggestion.id.in_(accepted_ids), accepted), else_=rejected),
                 decided_by=decisions.user_id,
                 decided_at=func.now(),
             )
