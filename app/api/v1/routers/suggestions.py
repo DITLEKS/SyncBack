@@ -67,6 +67,11 @@ async def _safe_bulk_log(
     document_id: uuid.UUID,
     decisions: list[tuple[uuid.UUID, AuditActionVO]],
 ) -> None:
+    """Записать аудит после того, как решения уже зафиксированы.
+
+    Ошибка аудита откатывает общую сессию запроса и просрочивает загруженные
+    объекты, поэтому ответ нужно собрать до вызова.
+    """
     if not decisions:
         return
     try:
@@ -247,6 +252,11 @@ async def patch_suggestions(
     ) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
+    response = PatchSuggestionsResponse(
+        updated_count=result.updated_count,
+        document_status=result.document.status.value,
+        review_version=result.document.review_version,
+    )
     audit_action = _PATCH_AUDIT_ACTIONS[target_status]
     await _safe_bulk_log(
         audit_log_service,
@@ -254,11 +264,7 @@ async def patch_suggestions(
         document_id,
         [(sid, audit_action) for sid in result.updated_ids],
     )
-    return PatchSuggestionsResponse(
-        updated_count=result.updated_count,
-        document_status=result.document.status.value,
-        review_version=result.document.review_version,
-    )
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -327,10 +333,8 @@ async def review_save(
     except (InvalidDocumentStatusError, ReviewNotCompleteError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    await _safe_bulk_log(audit_log_service, current_user.id, document_id, audit_decisions)
-
     doc = result.document
-    return ReviewSaveResponse(
+    response = ReviewSaveResponse(
         document_id=doc.id,
         document_status=doc.status.value,
         review_version=doc.review_version,
@@ -339,6 +343,8 @@ async def review_save(
         pending_count=result.pending_count,
         finalized=result.finalized,
     )
+    await _safe_bulk_log(audit_log_service, current_user.id, document_id, audit_decisions)
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +374,8 @@ async def reset_suggestion(
     except (InvalidDocumentStatusError, SuggestionResetNotAllowedError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
+    response = SuggestionResponse.model_validate(suggestion)
     await _safe_single_log(
         audit_log_service, current_user.id, document_id, suggestion.id, AuditActionVO.RESET
     )
-    return SuggestionResponse.model_validate(suggestion)
+    return response
