@@ -21,8 +21,10 @@ from app.domain.exceptions import (
 )
 from app.domain.interfaces.analysis_queue import AnalysisQueue
 from app.domain.interfaces.entities import DocumentProtocol
+from app.domain.interfaces.event_publisher import IEventPublisher
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.lifecycle import AnalysisJobLifecycle, DocumentLifecycle
+from app.domain.services.document_events import DocumentEventOutbox
 from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO
 
 if TYPE_CHECKING:
@@ -41,9 +43,16 @@ class ResetResult:
 
 
 class AnalysisJobService:
-    def __init__(self, uow: IUnitOfWork, queue: AnalysisQueue | None = None) -> None:
+    def __init__(
+        self,
+        uow: IUnitOfWork,
+        queue: AnalysisQueue | None = None,
+        *,
+        events: IEventPublisher | None = None,
+    ) -> None:
         self._uow = uow
         self._queue = queue
+        self._outbox = DocumentEventOutbox(events)
 
     def _require_queue(self) -> AnalysisQueue:
         if self._queue is None:
@@ -122,7 +131,7 @@ class AnalysisJobService:
                 idempotency_key=idempotency_key,
             )
             await self._uow.documents.set_current_job(document, job.id)
-            await self._uow.commit()
+            await self._commit()
         return job
 
     async def dispatch_job(self, job: AnalysisJob) -> AnalysisJob:
@@ -146,7 +155,7 @@ class AnalysisJobService:
             sources = await self._uow.sources.list_for_analysis(document.project_id, document.id)
             source_ids = [source.id for source in sources]
             job = await self._set_job_status(job, document, AnalysisJobStatusVO.DISPATCHED)
-            await self._uow.commit()
+            await self._commit()
 
         try:
             task_id = await queue.enqueue(job.id, source_ids)
@@ -160,7 +169,7 @@ class AnalysisJobService:
 
         async with self._uow:
             job = await self._uow.jobs.set_celery_task_id(job, task_id)
-            await self._uow.commit()
+            await self._commit()
         return job
 
     async def _mark_queue_unavailable(self, job: AnalysisJob, error_message: str) -> AnalysisJob:
@@ -175,7 +184,7 @@ class AnalysisJobService:
                 error_code="QUEUE_UNAVAILABLE",
                 error_message=error_message,
             )
-            await self._uow.commit()
+            await self._commit()
         return job
 
     async def cancel_job(
@@ -200,7 +209,7 @@ class AnalysisJobService:
                 error_code="ANALYSIS_CANCELLED",
                 error_message="Анализ отменён",
             )
-            await self._uow.commit()
+            await self._commit()
         return job
 
     async def revoke_celery_task(self, celery_task_id: str) -> None:
@@ -249,7 +258,7 @@ class AnalysisJobService:
                 document.current_analysis_job_id
             )
             document = await self._set_document_status(document, DocumentStatusVO.AWAITING_APPROVAL)
-            await self._uow.commit()
+            await self._commit()
 
         return ResetResult(reset_count=len(reset_ids), document=document)
 
@@ -289,9 +298,19 @@ class AnalysisJobService:
     # ------------------------------------------------------------------
 
     async def _set_document_status(self, document: Document, target: DocumentStatusVO) -> Document:
-        return await self._uow.documents.update_status(
+        document = await self._uow.documents.update_status(
             document, DocumentLifecycle.transition(document.status, target)
         )
+        self._outbox.record(document)
+        return document
+
+    async def _commit(self) -> None:
+        try:
+            await self._uow.commit()
+        except BaseException:
+            self._outbox.discard()
+            raise
+        await self._outbox.flush(self._uow)
 
     async def _set_job_status(
         self,

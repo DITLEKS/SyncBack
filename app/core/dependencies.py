@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.domain.interfaces.dashboard_query_service import IDashboardQueryService
+from app.domain.interfaces.event_publisher import IEventPublisher
 from app.domain.interfaces.llm_client import LLMClient
 from app.domain.policies import UploadLimits
 from app.domain.services.analysis_job_service import AnalysisJobService
@@ -57,6 +58,8 @@ from app.infrastructure.db.repositories.project_repository import ProjectReposit
 from app.infrastructure.db.repositories.user_repository import UserRepository
 from app.infrastructure.db.session import get_db_session
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
+from app.infrastructure.events.publishers import SSEEventPublisher
+from app.infrastructure.events.sse_broker import get_sse_broker
 from app.infrastructure.exporters.exporter_registry import DocumentExporterRegistry
 from app.infrastructure.llm.factory import get_llm_client
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
@@ -118,16 +121,22 @@ def get_uow(
 # ---------------------------------------------------------------------------
 
 
+def get_event_publisher() -> IEventPublisher:
+    return SSEEventPublisher(get_sse_broker())
+
+
 def get_suggestion_service(
     uow: SqlAlchemyUnitOfWork = Depends(get_uow),
+    events: IEventPublisher = Depends(get_event_publisher),
 ) -> SuggestionService:
-    return SuggestionService(uow)
+    return SuggestionService(uow, events=events)
 
 
 def get_analysis_job_service(
     uow: SqlAlchemyUnitOfWork = Depends(get_uow),
+    events: IEventPublisher = Depends(get_event_publisher),
 ) -> AnalysisJobService:
-    return AnalysisJobService(uow, queue=_get_analysis_queue())
+    return AnalysisJobService(uow, queue=_get_analysis_queue(), events=events)
 
 
 def get_audit_log_service(

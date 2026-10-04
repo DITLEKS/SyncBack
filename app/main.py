@@ -20,7 +20,6 @@ from app.api.v1.routers.editor import router as editor_router
 from app.api.v1.routers.my_documents import router as my_documents_router
 from app.api.v1.routers.projects import router as projects_router
 from app.api.v1.routers.sources import router as sources_router
-from app.api.v1.routers.sse import init_sse_broker, shutdown_sse_broker
 from app.api.v1.routers.sse import router as sse_router
 from app.api.v1.routers.suggestions import router as suggestions_router
 from app.api.v1.routers.system import router as system_router
@@ -38,6 +37,7 @@ from app.domain.exceptions import (
     SuggestionNotFoundError,
 )
 from app.infrastructure.db.session import dispose_engine
+from app.infrastructure.events.sse_broker import init_sse_broker, shutdown_sse_broker
 
 logger = logging.getLogger("syncscribe.main")
 
@@ -60,17 +60,12 @@ async def lifespan(app: FastAPI):
         extra={"env": settings.env, "llm_provider": settings.llm_provider},
     )
 
-    await init_sse_broker(
-        redis_url=settings.redis_url,
-        channel=settings.redis_sse_channel,
-    )
-    logger.info("SSE broker инициализирован", extra={"channel": settings.redis_sse_channel})
+    await init_sse_broker(redis_url=settings.redis_url, channel=settings.redis_sse_channel)
 
     try:
         yield
     finally:
         await shutdown_sse_broker()
-        logger.info("SSE broker остановлен")
         await dispose_engine()
         logger.info("Остановка SyncScribe backend")
 

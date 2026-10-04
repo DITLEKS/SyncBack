@@ -20,10 +20,13 @@ from redis.asyncio import Redis
 
 from app.core.config import get_settings
 from app.domain.exceptions import DocumentParseError
+from app.domain.interfaces.event_publisher import IEventPublisher
 from app.domain.interfaces.source_connector import SourceKind, SourceRef
 from app.domain.lifecycle import AnalysisJobLifecycle, DocumentLifecycle
+from app.domain.services.document_events import DocumentEventOutbox
 from app.domain.value_objects import AnalysisJobStatusVO, SuggestionStatusVO
 from app.infrastructure.db.session import isolated_uow
+from app.infrastructure.events.publishers import RedisEventPublisher
 from app.infrastructure.llm.factory import get_llm_client
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 from app.infrastructure.source_connectors.manual_upload_connector import ManualUploadConnector
@@ -81,6 +84,11 @@ def _get_connector_for(source_kind: SourceKind):
 @functools.cache
 def _get_llm_client():
     return get_llm_client()
+
+
+def _event_publisher() -> IEventPublisher:
+    settings = get_settings()
+    return RedisEventPublisher(settings.redis_url, settings.redis_sse_channel)
 
 
 @asynccontextmanager
@@ -263,14 +271,17 @@ async def _finalize(results: list[dict[str, Any]], job_id: str) -> None:
             job, AnalysisJobLifecycle.transition(job.status, job_status), error_code, error_message
         )
         job.partial_success = job_status is AnalysisJobStatusVO.PARTIAL_SUCCESS
+        outbox = DocumentEventOutbox(_event_publisher())
         if document.current_analysis_job_id == job.id:
             doc_status = AnalysisJobLifecycle.document_status_for(
                 job_status, has_pending_suggestions=pending > 0
             )
-            await uow.documents.update_status(
+            document = await uow.documents.update_status(
                 document, DocumentLifecycle.transition(document.status, doc_status)
             )
+            outbox.record(document)
         await uow.commit()
+        await outbox.flush(uow)
 
 
 def _join_errors(failed: list[dict[str, Any]]) -> str:

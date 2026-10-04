@@ -222,13 +222,11 @@ GET    /health                                                      (без пр
 
 **Отмена задачи анализа**: `DELETE /analysis-jobs/{job_id}` — REST-правильный способ отмены (C-1). Возвращает `200 OK` + `AnalysisJobResponse` со статусом `cancelled`. Устаревший `POST .../cancel` удалён.
 
-**SSE (`GET /events/documents`)**: клиент подключается как `EventSource` и получает события:
-- `document_status_changed` — `{document_id, status, pending_suggestions}`
-- `attention_count_changed` — `{count}` (кол-во AWAITING_APPROVAL)
-- `dashboard_stats_changed` — `{total, awaiting, ready, relevance_percent}`
+**SSE (`GET /events/documents`)**: клиент подключается как `EventSource` и получает события только по документам своих проектов:
+- `document_status_changed` — `{document_id, project_id, status, current_analysis_job_id}`; публикуется после каждой зафиксированной смены статуса документа (запуск, отмена и завершение анализа, сброс и завершение ревью) как из API, так и из воркера
 - `ping` — keepalive каждые 25 с
 
-По умолчанию используется `RedisPubSubBroker` — события от воркеров доставляются всем подключённым клиентам независимо от инстанса. При недоступности Redis — автоматический fallback на `InMemorySSEBroker` (single-instance). Передача `?document_ids=` свыше 50 ID возвращает `422`.
+Смена статуса порождает доменное событие `DocumentStatusChanged`, которое `DocumentEventOutbox` публикует через порт `IEventPublisher` только после commit. В API события идут через брокер процесса (`SSEEventPublisher`), в воркере — напрямую в канал Redis (`RedisEventPublisher`). По умолчанию используется `RedisPubSubBroker` — события от воркера доставляются всем подключённым клиентам независимо от инстанса. При недоступности Redis — fallback на `InMemorySSEBroker` (single-instance; события воркера в этом режиме не доходят). Передача `?document_ids=` свыше 50 ID или с невалидным UUID возвращает `422`.
 
 **Bulk analysis jobs** (`POST /projects/{project_id}/documents/analysis-jobs/bulk`):
 - Тело (опционально): `{"document_ids": ["uuid1", "uuid2"]}`. Без тела или при `document_ids=null` — запускает анализ для всех analyzable документов проекта.
@@ -333,7 +331,8 @@ t._get_llm_client = lambda: FakeLLMClient()
 | `DocumentParserProtocol` | `TxtParser`, `MarkdownParser`, `DocxParser` | Новые форматы документов |
 | `DocumentExporterProtocol` | `TextExporter`, `DocxExporter` | Новые форматы на экспорт |
 | `FileStorageProtocol` | `MinioStorage` | Смена хранилища файлов |
-| `ISSEBroker` | `RedisPubSubBroker`, `InMemorySSEBroker` | Смена транспорта real-time уведомлений |
+| `IEventPublisher` | `SSEEventPublisher`, `RedisEventPublisher` | Публикация доменных событий из сервисов и воркера |
+| `SSEBroker` | `RedisPubSubBroker`, `InMemorySSEBroker` | Доставка событий подключённым SSE-клиентам |
 | `DocumentProtocol` / `SuggestionProtocol` | ORM-модели (через `Protocol`) | Сервисный слой не зависит от SQLAlchemy напрямую |
 
 `HttpLLMClient` — generic-клиент для любого внешнего HTTP-провайдера, настраиваемый только через `.env`. `OnPremLLMClient` реализован независимо (у on-prem может быть иной контракт запроса/ответа), общая между ними только retry-логика (`HttpConnectionRetryMixin`). Контракт в `infrastructure/llm/schemas.py` — **условный плейсхолдер** до выбора реального провайдера.
@@ -432,6 +431,7 @@ SyncBack/
     │   ├── db/{base,session,models/*,repositories/*}.py
     │   ├── security/{password_hasher,jwt_handler,login_rate_limiter}.py
     │   ├── cache/{redis_client,sync_redis_client}.py
+    │   ├── events/{sse_broker,publishers}.py   ← SSE-брокер и адаптеры IEventPublisher
     │   ├── storage/minio_storage.py
     │   ├── parsers/{txt,markdown,docx}_parser.py + parser_registry.py
     │   ├── exporters/{text,docx}_exporter.py + exporter_registry.py
