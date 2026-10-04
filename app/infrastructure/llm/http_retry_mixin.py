@@ -1,45 +1,77 @@
-"""
-Провайдер-агностичная логика повторных попыток при обрыве соединения. Не содержит
-бизнес-логики формата запроса/ответа — только быстрый повтор POST при обрыве соединения.
+"""Повторы HTTP-запросов к LLM с экспоненциальной задержкой.
+
+Повторяются только временные сбои: обрыв соединения, таймаут, 429 и 5xx.
+Остальные ответы 4xx — ошибка запроса, повтор её не исправит.
 """
 
+from __future__ import annotations
+
 import asyncio
+from typing import Any
 
 import httpx
 
 from app.domain.exceptions import LLMInvalidResponseError, LLMTimeoutError
 
-CONNECTION_RETRY_ATTEMPTS = 2
-CONNECTION_RETRY_DELAY_SECONDS = 1.0
+BACKOFF_BASE_SECONDS = 1.0
+BACKOFF_MAX_SECONDS = 30.0
+
+_sleep = asyncio.sleep
+
+
+def backoff_delay(attempt: int, retry_after: str | None = None) -> float:
+    """Задержка перед повтором номер attempt (с нуля); Retry-After в секундах важнее."""
+    if retry_after is not None:
+        try:
+            return min(max(float(retry_after), 0.0), BACKOFF_MAX_SECONDS)
+        except ValueError:
+            pass
+    return min(BACKOFF_BASE_SECONDS * (1 << attempt), BACKOFF_MAX_SECONDS)
+
+
+def _is_retryable_status(status_code: int) -> bool:
+    return status_code == 429 or status_code >= 500
 
 
 class HttpConnectionRetryMixin:
-    async def _post_with_connection_retry(
-        self, url: str, headers: dict, json_payload: dict, timeout_seconds: int
+    async def _post_with_retries(
+        self,
+        url: str,
+        headers: dict[str, str],
+        json_payload: dict[str, Any],
+        timeout_seconds: int,
+        max_retries: int,
     ) -> httpx.Response:
-        last_error: Exception | None = None
-        for attempt in range(CONNECTION_RETRY_ATTEMPTS + 1):
-            try:
-                async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        """POST с max_retries повторами временных сбоев.
+
+        LLMTimeoutError — LLM недоступна или перегружена после всех попыток;
+        LLMInvalidResponseError — LLM отклонила запрос (4xx, кроме 429).
+        """
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            for attempt in range(max_retries + 1):
+                retry_after: str | None = None
+                try:
                     response = await client.post(url, headers=headers, json=json_payload)
-                    response.raise_for_status()
-                    return response
-            except httpx.ConnectError as exc:
-                last_error = exc
-                if attempt < CONNECTION_RETRY_ATTEMPTS:
-                    await asyncio.sleep(CONNECTION_RETRY_DELAY_SECONDS)
-                    continue
-                raise LLMTimeoutError(
-                    f"Не удалось подключиться к LLM-эндпоинту после {attempt + 1} попыток: {exc}"
-                ) from exc
-            except httpx.TimeoutException as exc:
-                raise LLMTimeoutError(f"LLM не ответила за {timeout_seconds} сек.") from exc
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 429:
-                    raise LLMTimeoutError("LLM вернула 429 Too Many Requests") from exc
-                raise LLMInvalidResponseError(
-                    f"LLM вернула HTTP {exc.response.status_code}: {exc.response.text[:200]}"
-                ) from exc
-            except httpx.HTTPError as exc:
-                raise LLMInvalidResponseError(f"LLM вернула ошибку: {exc}") from exc
-        raise LLMTimeoutError(f"Не удалось получить ответ от LLM: {last_error}")
+                except httpx.TimeoutException as exc:
+                    failure = f"LLM не ответила за {timeout_seconds} сек."
+                    cause: Exception = exc
+                except httpx.TransportError as exc:
+                    failure = f"Не удалось подключиться к LLM-эндпоинту: {exc}"
+                    cause = exc
+                else:
+                    if response.is_success:
+                        return response
+                    if not _is_retryable_status(response.status_code):
+                        raise LLMInvalidResponseError(
+                            f"LLM вернула HTTP {response.status_code}: {response.text[:200]}"
+                        )
+                    failure = f"LLM вернула HTTP {response.status_code}"
+                    cause = httpx.HTTPStatusError(
+                        failure, request=response.request, response=response
+                    )
+                    retry_after = response.headers.get("retry-after")
+
+                if attempt == max_retries:
+                    raise LLMTimeoutError(f"{failure} (попыток: {attempt + 1})") from cause
+                await _sleep(backoff_delay(attempt, retry_after))
+        raise AssertionError("unreachable")
