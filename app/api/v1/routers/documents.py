@@ -18,7 +18,7 @@ from app.api.schemas.document import (
 )
 from app.api.schemas.pagination import Page
 from app.api.schemas.source import SourceResponse
-from app.api.upload_utils import read_upload_within_limit
+from app.api.upload_utils import upload_content
 from app.core.config import Settings, get_settings
 from app.core.dependencies import (
     get_audit_log_service,
@@ -83,15 +83,13 @@ async def upload_document(
     if not file.filename:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Имя файла обязательно")
     try:
-        content = await read_upload_within_limit(file, settings.max_upload_size_bytes)
+        content = upload_content(file, settings.max_upload_size_bytes)
     except FileTooLargeError as exc:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)
         ) from exc
     try:
-        document = await document_service.upload_document(
-            project.id, file.filename, content, file.content_type or "application/octet-stream"
-        )
+        document = await document_service.upload_document(project.id, file.filename, content)
     except UnsupportedFileFormatError as exc:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc)

@@ -18,7 +18,7 @@ from app.domain.exceptions import (
     UnsupportedFileFormatError,
 )
 from app.domain.interfaces.document_parser import IDocumentParserRegistry, ParsedDocument
-from app.domain.interfaces.file_storage import FileStorage
+from app.domain.interfaces.file_storage import FileStorage, UploadContent
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.lifecycle import DocumentLifecycle
 from app.domain.policies import UploadLimits
@@ -80,16 +80,15 @@ class DocumentService:
         self,
         project_id: uuid.UUID,
         filename: str,
-        content: bytes,
-        content_type: str,
+        content: UploadContent,
     ) -> Document:
         """Загрузить документ в хранилище и создать запись в БД."""
-        if self._upload_limits.exceeded_by(len(content)):
+        if self._upload_limits.exceeded_by(content.size):
             raise FileTooLargeError(f"Файл превышает лимит {self._upload_limits.max_size_mb} МБ")
         document_format = self._resolve_format(filename)
         document_id = uuid.uuid4()
         storage_key = document_storage_key(project_id, document_id, filename)
-        await self._storage.upload(storage_key, content, content_type)
+        await self._storage.upload(storage_key, content)
 
         try:
             async with self._uow:
@@ -99,7 +98,7 @@ class DocumentService:
                     name=filename,
                     format=document_format,
                     storage_key=storage_key,
-                    size_bytes=len(content),
+                    size_bytes=content.size,
                 )
                 await self._uow.commit()
         except Exception:

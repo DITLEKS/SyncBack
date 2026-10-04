@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 
 from app.api.deps import get_current_user
 from app.api.schemas.document import DocumentResponse
-from app.api.upload_utils import read_upload_within_limit
+from app.api.upload_utils import upload_content
 from app.core.config import Settings, get_settings
 from app.core.dependencies import get_document_service, get_project_service
 from app.domain.exceptions import (
@@ -62,7 +62,7 @@ async def upload_document_global(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     try:
-        content = await read_upload_within_limit(file, settings.max_upload_size_bytes)
+        content = upload_content(file, settings.max_upload_size_bytes)
     except FileTooLargeError as exc:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -70,12 +70,7 @@ async def upload_document_global(
         ) from exc
 
     try:
-        document = await document_service.upload_document(
-            project.id,
-            file.filename,
-            content,
-            file.content_type or "application/octet-stream",
-        )
+        document = await document_service.upload_document(project.id, file.filename, content)
     except UnsupportedFileFormatError as exc:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,

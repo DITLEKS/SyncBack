@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.domain.interfaces.file_storage import UploadContent
 from app.domain.policies import UploadLimits
 from app.domain.services.document_service import DocumentService
 from app.domain.services.source_service import SourceService
@@ -40,7 +41,9 @@ async def test_document_upload_deletes_orphan_file_on_db_failure(
     uow.documents.create = AsyncMock(side_effect=Exception("DB create failed"))
 
     with pytest.raises(Exception, match="DB create failed"):
-        await service.upload_document(project.id, "document.txt", b"hello world", "text/plain")
+        await service.upload_document(
+            project.id, "document.txt", UploadContent.from_bytes(b"hello world", "text/plain")
+        )
 
     storage_key = f"projects/{project.id}/documents/{expected_document_id}/document.txt"
     assert not await minio_storage.exists(storage_key)
@@ -63,7 +66,10 @@ async def test_source_upload_deletes_orphan_file_on_db_failure(
 
     with pytest.raises(Exception, match="DB create failed"):
         await service.create_file_source(
-            project, "Test source", "upload.txt", b"hello world", "text/plain"
+            project,
+            "Test source",
+            "upload.txt",
+            UploadContent.from_bytes(b"hello world", "text/plain"),
         )
 
     storage_key = f"projects/{project.id}/sources/{expected_source_id}/upload.txt"

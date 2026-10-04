@@ -19,6 +19,7 @@ from sqlalchemy.pool import StaticPool
 
 import app.core.dependencies as dependencies
 import app.infrastructure.db.models  # noqa: F401
+from app.domain.interfaces.file_storage import UploadContent
 from app.domain.value_objects import DocumentStatusVO
 from app.core.dependencies import get_login_rate_limiter, get_refresh_token_store, get_settings
 from app.core.limiter import limiter
@@ -37,8 +38,10 @@ class InMemoryFileStorage:
     def __init__(self) -> None:
         self.files: dict[str, bytes] = {}
 
-    async def upload(self, key: str, content: bytes, content_type: str) -> None:
-        self.files[key] = content
+    async def upload(self, key: str, content: UploadContent) -> None:
+        data = content.stream.read()
+        assert len(data) == content.size
+        self.files[key] = data
 
     async def download(self, key: str) -> bytes:
         return self.files[key]

@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from app.domain.interfaces.file_storage import UploadContent
 from app.infrastructure.storage.minio_storage import MinioStorage
 
 
@@ -67,3 +68,18 @@ async def test_presigned_url_without_name_has_no_response_headers():
 
     _, kwargs = fake_client.presigned_get_object.call_args
     assert kwargs["response_headers"] is None
+
+
+async def test_upload_passes_stream_with_exact_length():
+    storage = MinioStorage(_fake_settings())
+    fake_client = MagicMock()
+    storage._client = fake_client
+    content = UploadContent.from_bytes(b"payload", "text/plain")
+
+    await storage.upload("some/key", content)
+
+    args, kwargs = fake_client.put_object.call_args
+    assert args == ("bucket", "some/key", content.stream)
+    assert kwargs["length"] == 7
+    assert kwargs["content_type"] == "text/plain"
+    assert kwargs["part_size"] >= 5 * 1024 * 1024  # минимальная часть multipart в S3
