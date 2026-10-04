@@ -126,6 +126,64 @@ async def test_list_suggestions_with_status_filter(
     assert response.status_code == 400
 
 
+async def test_suggestion_fields_for_editor(
+    client: AsyncClient, review: ReviewFixture, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Редактору нужны тип правки, обоснование и позиция; у add нет исходного текста."""
+    async with sessionmaker() as session:
+        added = Suggestion(
+            analysis_job_id=review.job_id,
+            document_id=uuid.UUID(review.document_id),
+            section_ref="p9",
+            change_type=ChangeType.ADD,
+            status=SuggestionStatus.PENDING,
+            original_text=None,
+            suggested_text="Новый абзац",
+            rationale="В источнике появился раздел",
+            confidence_score=0.9,
+            block_id="b9",
+            start_offset=12,
+            end_offset=12,
+        )
+        session.add(added)
+        await session.commit()
+
+    response = await client.get(f"{review.base_url}/{added.id}", headers=review.headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert {
+        k: body[k]
+        for k in (
+            "analysis_job_id",
+            "change_type",
+            "original_text",
+            "suggested_text",
+            "rationale",
+            "confidence_score",
+            "block_id",
+            "start_offset",
+            "end_offset",
+            "status",
+        )
+    } == {
+        "analysis_job_id": str(review.job_id),
+        "change_type": "add",
+        "original_text": None,
+        "suggested_text": "Новый абзац",
+        "rationale": "В источнике появился раздел",
+        "confidence_score": 0.9,
+        "block_id": "b9",
+        "start_offset": 12,
+        "end_offset": 12,
+        "status": "pending",
+    }
+    assert "comment" not in body
+
+    response = await client.get(review.base_url, headers=review.headers)
+    assert response.status_code == 200, response.text
+    assert {i["change_type"] for i in response.json()["items"]} == {"add", "modify"}
+
+
 async def test_get_single_suggestion_and_stale(client: AsyncClient, review: ReviewFixture) -> None:
     response = await client.get(
         f"{review.base_url}/{review.suggestion_ids[0]}", headers=review.headers

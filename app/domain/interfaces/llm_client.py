@@ -8,6 +8,8 @@ class LLMSuggestionItem:
     change_type: str
     old_text: str | None
     new_text: str | None
+    rationale: str | None = None
+    confidence_score: float | None = None
 
 
 @dataclass

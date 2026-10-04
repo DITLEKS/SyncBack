@@ -46,6 +46,8 @@ class HttpLLMClient(HttpConnectionRetryMixin):
                 change_type=item.change_type,
                 old_text=item.old_text,
                 new_text=item.new_text,
+                rationale=item.rationale,
+                confidence_score=item.confidence_score,
             )
             for item in parsed.suggestions
         ]

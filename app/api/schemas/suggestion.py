@@ -1,28 +1,32 @@
-"""
-Схемы правок (suggestions).
-
-RESET:  SuggestionResponse расширен nullable-полями decided_by / decided_at —
-        после reset оба поля равны null, что сигнализирует фронту о сбросе.
-PATCH:  PatchSuggestionsRequest/Response — единый bulk/single update статуса правок.
-        Заменяет удалённые BulkAcceptResponse / BulkRejectResponse и RPC-суффиксы.
-"""
+"""Схемы правок (suggestions): ответ редактору и единый PATCH статусов."""
 
 import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 class SuggestionResponse(BaseModel):
+    """Правка анализа в том виде, в каком её показывает редактор."""
+
     id: uuid.UUID
     document_id: uuid.UUID
+    analysis_job_id: uuid.UUID
     section_ref: str | None = None
-    original_text: str
-    suggested_text: str
-    comment: str | None = None
-    status: str
-    # Nullable: None означает что решение ещё не принято (PENDING) или было сброшено.
+    change_type: Literal["add", "modify", "delete"]
+    # У add нет исходного текста, у delete — предлагаемого.
+    original_text: str | None = None
+    suggested_text: str | None = None
+    rationale: str | None = Field(default=None, description="Обоснование правки от модели")
+    confidence_score: float | None = Field(default=None, description="Уверенность модели, 0–1")
+    block_id: str | None = None
+    start_offset: int | None = Field(
+        default=None, description="Начало фрагмента в тексте документа, если известно"
+    )
+    end_offset: int | None = None
+    status: Literal["pending", "accepted", "rejected"]
+    # None — решение ещё не принято или сброшено.
     decided_by: uuid.UUID | None = None
     decided_at: datetime | None = None
     created_at: datetime
