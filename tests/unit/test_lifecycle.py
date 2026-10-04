@@ -74,10 +74,9 @@ def test_document_permissions_by_status() -> None:
         assert actual == expected, status
 
 
-def test_analysis_confirmation_and_bulk_set() -> None:
+def test_analysis_confirmation_and_reset_sets() -> None:
     assert DocumentLifecycle.analysis_needs_confirmation(Doc.READY)
     assert not DocumentLifecycle.analysis_needs_confirmation(Doc.AWAITING_APPROVAL)
-    assert DocumentLifecycle.auto_analyzable_statuses() == {Doc.DRAFT, Doc.AWAITING_APPROVAL}
     assert DocumentLifecycle.can_reset_review(Doc.READY)
     assert not DocumentLifecycle.can_reset_review(Doc.DRAFT)
     assert DocumentLifecycle.has_review_results(Doc.READY)

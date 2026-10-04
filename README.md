@@ -64,7 +64,7 @@ pytest -m integration tests/integration         # нужны PostgreSQL, Redis, 
 mypy app
 ```
 
-Тестов 326: 314 unit и контрактных (SQLite in-memory, fakeredis, in-memory хранилище) и 12 интеграционных (PostgreSQL, Redis, SeaweedFS): сквозные HTTP-сценарии, гонки ревью на PostgreSQL, хранилище. Порог покрытия в CI — 70%.
+Тестов 339: 324 unit и контрактных (SQLite in-memory, fakeredis, in-memory хранилище) и 15 интеграционных (PostgreSQL, Redis, SeaweedFS): сквозные HTTP-сценарии, гонки ревью на PostgreSQL, хранилище. Порог покрытия в CI — 70%.
 
 CI (`.github/workflows/ci.yml`): `lint-and-test` (ruff, проверки слоёв, mypy в режиме `continue-on-error`, pytest с покрытием), `check-migrations` (`alembic upgrade head` на чистой БД и `alembic check`), `build-images`, `integration-tests` (PostgreSQL и Redis как services, SeaweedFS — `docker run chrislusf/seaweedfs:4.48` с тем же стартовым скриптом, что и в compose).
 
@@ -124,7 +124,7 @@ DELETE /projects/{p}/sources/{s}          204
 POST   /projects/{p}/documents/{d}/analysis-jobs          Idempotency-Key; тело {"force": true} для ready
 GET    /projects/{p}/documents/{d}/analysis-jobs/{j}
 DELETE /projects/{p}/documents/{d}/analysis-jobs/{j}      отмена → 200 + задача в cancelled
-POST   /projects/{p}/documents/analysis-jobs/bulk         {"document_ids": [...]} или все подходящие
+POST   /projects/{p}/documents/analysis-jobs/bulk         {"document_ids": [...], "force": bool}; по каждому — job или skip_reason
 
 GET    /projects/{p}/documents/{d}/suggestions            ?status=&limit=&offset=
 GET    /projects/{p}/documents/{d}/suggestions/{s}
@@ -150,8 +150,8 @@ GET    /health                            без префикса
 - **Пагинация**: `limit` / `offset`, ответ `{"items": [...], "total", "limit", "offset"}`; срез выполняется в SQL.
 - **Ошибки** отдаются как `{"detail": "..."}`. Основные коды: `404` — ресурс не найден или чужой; `409` — недопустимо в текущем статусе, анализ уже идёт, правка уже обработана, ревью не завершено; `412` — устаревший `If-Match`; `413` — файл или тело больше лимита; `415` — неподдерживаемый формат; `422` — валидация, невалидный пароль, документ не разбирается; `423` — источники заблокированы на время анализа и ревью; `429` — rate limit или блокировка входа. Необработанное `DomainError` → `400`.
 - **Загрузка файлов**: тело ограничено `BodySizeLimitMiddleware` — по `Content-Length` сразу и по фактически прочитанным байтам для chunked-запросов (лимит файла + 1 МБ на служебные поля multipart). Файл не читается в память целиком: Starlette держит его во временном файле, хранилище получает поток. Точный лимит файла проверяется до записи в хранилище; ключ объекта — `projects/{p}/documents/{id}.ext` или `projects/{p}/sources/{id}.ext`, исходное имя хранится в БД и отдаётся через `Content-Disposition`.
-- **Ревью**: `PUT /suggestions/review` атомарно сохраняет решения и инкрементирует `review_version` (CAS). При расхождении версии — `412`, если передан `If-Match`, иначе `409`. С `finalize=true` и без оставшихся `pending` документ переходит в `ready`; итоговый файл собирается при запросе `/export`. `PATCH /suggestions` статус документа не меняет.
-- **Запуск анализа**: из `draft` и `awaiting_approval` — сразу; из `ready` — только с `force=true` (иначе `409`, прежнее ревью будет сброшено). Повторный запрос с тем же `Idempotency-Key` возвращает ту же задачу. На документ допускается одна активная задача.
+- **Ревью**: `PUT /suggestions/review` атомарно сохраняет решения и инкрементирует `review_version` (CAS). При расхождении версии — `412`, если передан `If-Match`, иначе `409`. С `finalize=true` и без оставшихся `pending` документ переходит в `ready`; итоговый файл собирается при запросе `/export`. `PATCH /suggestions` с accepted/rejected статус документа не меняет. Отмена решения (`status: pending` или `POST /suggestions/{s}/reset`) доступна и в `ready`: документ возвращается в `awaiting_approval`. Статус меняется условным UPDATE, поэтому если документ параллельно ушёл на повторный анализ, ответ — `409`.
+- **Запуск анализа**: из `draft` и `awaiting_approval` — сразу; из `ready` — только с `force=true` (иначе `409`, прежнее ревью будет сброшено). Повторный запрос с тем же `Idempotency-Key` возвращает ту же задачу. На документ допускается одна активная задача. Массовый запуск без `force` пропускает `ready` с `skip_reason: confirmation_required` (счётчик `confirmation_required` в ответе); с `force=true` они тоже запускаются.
 - **Экспорт**: только для `ready` (иначе `409`) и только в исходном формате документа; другой `export_format` → `400`.
 - **Редактор** (`GET /editor`): метаданные документа с `view_mode` (`original` / `suggested` / `clean`), содержимое, `original_content`, страница правок текущего анализа, `suggestions_total`, счётчики по статусам (агрегатным запросом) и `permissions` (`can_analyze`, `can_review`, `can_export`, `can_delete`, `sources_is_editable`) из `DocumentLifecycle`. Сбой чтения содержимого из хранилища отдаёт ошибку, а не пустой контент.
 - **SSE** (`GET /events/documents`): событие `document_status_changed` `{document_id, project_id, status, current_analysis_job_id}` получает только владелец проекта; `ping` каждые 25 с. События публикуются после commit каждой смены статуса документа — из API и из воркера (через канал Redis). Невалидный или лишний `document_ids` → `422`. Без Redis брокер работает in-memory и события воркера не доходят.
@@ -165,7 +165,7 @@ draft ──анализ──▶ in_progress ──правки есть──�
   ▲                    │ └────правок нет──────────────────────────────────────────────▶ │
   └──сбой / отмена─────┘                                                               │
 awaiting_approval, ready ──повторный анализ──▶ draft → in_progress                      │
-ready ──POST /editor/reset──▶ awaiting_approval ◀───────────────────────────────────────┘
+ready ──отмена решения / POST /editor/reset──▶ awaiting_approval ◀───────────────────────┘
 ```
 
 Источники заблокированы в `in_progress` и `awaiting_approval`; удалить документ нельзя в `in_progress`.

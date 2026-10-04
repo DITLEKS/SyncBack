@@ -88,11 +88,6 @@ class DocumentLifecycle:
         return _as_document_status(status) in cls.ANALYSIS_NEEDS_CONFIRMATION
 
     @classmethod
-    def auto_analyzable_statuses(cls) -> frozenset[DocumentStatusVO]:
-        """Статусы, из которых анализ запускается без подтверждения (массовый запуск)."""
-        return cls.ANALYZABLE - cls.ANALYSIS_NEEDS_CONFIRMATION
-
-    @classmethod
     def can_edit_sources(cls, status: object) -> bool:
         return _as_document_status(status) not in cls.SOURCES_LOCKED
 

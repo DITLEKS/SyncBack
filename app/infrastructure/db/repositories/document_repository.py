@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, and_, delete, func, select, tuple_, update
+from sqlalchemy import CursorResult, Result, and_, delete, func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.repositories import IDocumentRepository
@@ -106,13 +106,13 @@ class DocumentRepository(IDocumentRepository):
         result = await self._session.execute(q)
         return result.scalar_one()
 
-    async def list_by_statuses(
+    async def list_ids_by_statuses(
         self, project_id: uuid.UUID, statuses: frozenset[DocumentStatusVO]
-    ) -> list[Document]:
+    ) -> list[uuid.UUID]:
         if not statuses:
             return []
-        result = await self._session.execute(
-            select(Document)
+        result: Result[tuple[uuid.UUID]] = await self._session.execute(
+            select(Document.id)
             .where(
                 Document.project_id == project_id,
                 Document.status.in_(tuple(_status_to_orm(s) for s in statuses)),
@@ -251,6 +251,27 @@ class DocumentRepository(IDocumentRepository):
         document.status = _status_to_orm(status)
         await self._session.flush()
         return document
+
+    async def compare_and_set_status(
+        self,
+        document_id: uuid.UUID,
+        analysis_job_id: uuid.UUID | None,
+        expected: DocumentStatusVO,
+        target: DocumentStatusVO,
+    ) -> bool:
+        stmt = (
+            update(Document)
+            .where(
+                Document.id == document_id,
+                Document.status == _status_to_orm(expected),
+                Document.current_analysis_job_id == analysis_job_id,
+            )
+            .values(status=_status_to_orm(target))
+            .returning(Document)
+        )
+        # ORM-UPDATE с RETURNING обновляет и объект документа в сессии.
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none() is not None
 
     async def set_current_job(self, document: Document, job_id: uuid.UUID | None) -> Document:
         document.current_analysis_job_id = job_id

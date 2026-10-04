@@ -11,6 +11,7 @@ import pytest
 
 from app.domain.exceptions import (
     AnalysisAlreadyRunningError,
+    AnalysisConfirmationRequiredError,
     InvalidDocumentStatusError,
     ReviewNotCompleteError,
 )
@@ -99,7 +100,11 @@ async def test_create_job_from_ready_resets_document_to_draft():
     job_repo.create_for_document.return_value = created_job
 
     service = AnalysisJobService(FakeUnitOfWork(jobs=job_repo, documents=doc_repo))
-    result = await service.create_job(doc.project_id, doc.id)
+    with pytest.raises(AnalysisConfirmationRequiredError):
+        await service.create_job(doc.project_id, doc.id)
+    job_repo.create_for_document.assert_not_awaited()
+
+    result = await service.create_job(doc.project_id, doc.id, force=True)
     assert result is created_job
     doc_repo.update_status.assert_awaited_once_with(doc, DocumentStatus.DRAFT)
 

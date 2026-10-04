@@ -1,31 +1,16 @@
-"""
-Схемы для analysis-jobs API.
-
-P0-7:  partial_success в ответе.
-P0-9:  AnalysisJobCreateRequest с опциональным флагом force=True —
-       повторный анализ документа в статусе READY требует force=True.
-       Без флага — HTTP 409 с confirmation_required=True, чтобы фронт
-       показал диалог подтверждения.
-FIX-review-3: status: AnalysisJobStatus (инфра-enum) → AnalysisJobStatusVO (domain).
-    API-схемы не должны импортировать из infrastructure.*.
-    AnalysisJobStatusVO и AnalysisJobStatus имеют идентичные строковые значения,
-    поэтому from_attributes=True продолжает работать без изменений.
-"""
+"""Схемы API задач анализа: одиночный и массовый запуск."""
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.domain.value_objects import AnalysisJobStatusVO
 
 
 class AnalysisJobCreateRequest(BaseModel):
-    """Тело POST /analysis-jobs.
-
-    force=True обязателен, если документ в статусе READY.
-    Опущен — флаг просто игнорируется для не-READY документов.
-    """
+    """Тело POST /analysis-jobs. force нужен только для документа в статусе ready."""
 
     force: bool = False
 
@@ -33,8 +18,6 @@ class AnalysisJobCreateRequest(BaseModel):
 class AnalysisJobResponse(BaseModel):
     id: uuid.UUID
     document_id: uuid.UUID
-    # FIX-review-3: AnalysisJobStatus (infra) → AnalysisJobStatusVO (domain).
-    # Строковые значения идентичны → from_attributes продолжает работать.
     status: AnalysisJobStatusVO
     error_code: str | None
     error_message: str | None
@@ -42,16 +25,41 @@ class AnalysisJobResponse(BaseModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
-    partial_success: bool = False  # P0-7
+    partial_success: bool = False
     model_config = {"from_attributes": True}
 
 
 class AnalysisJobConflictResponse(BaseModel):
-    """Ответ 409 для повторного анализа ready-документа без force=True (#9).
-
-    Фронт получает этот ответ и должен показать диалог
-    "Документ уже Готов. Перезапустить анализ?"
-    """
+    """Ответ 409 на повторный анализ готового документа без force: клиент спрашивает подтверждение."""
 
     detail: str
     confirmation_required: bool = True
+
+
+class BulkAnalysisRequest(BaseModel):
+    """Тело массового запуска.
+
+    document_ids не задан — запускаются все документы проекта, из которых анализ
+    возможен. force=true включает в запуск готовые документы.
+    """
+
+    document_ids: list[uuid.UUID] | None = Field(default=None, max_length=500)
+    force: bool = False
+
+
+class BulkJobResult(BaseModel):
+    document_id: uuid.UUID
+    job: AnalysisJobResponse | None = None
+    skip_reason: (
+        Literal["not_found", "confirmation_required", "analysis_running", "invalid_status"] | None
+    ) = None
+    error: str | None = None
+
+
+class BulkAnalysisJobsResponse(BaseModel):
+    started: int
+    skipped: int
+    confirmation_required: int = Field(
+        description="Сколько готовых документов пропущено: повторите запрос с force=true"
+    )
+    results: list[BulkJobResult]

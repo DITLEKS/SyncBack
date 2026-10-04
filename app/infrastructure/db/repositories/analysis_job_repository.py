@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select, update
@@ -37,6 +38,14 @@ class AnalysisJobRepository(IAnalysisJobRepository):
 
     async def get_by_id(self, job_id: uuid.UUID) -> AnalysisJob | None:
         return await self._session.get(AnalysisJob, job_id)
+
+    async def list_by_ids(self, job_ids: Sequence[uuid.UUID]) -> list[AnalysisJob]:
+        if not job_ids:
+            return []
+        result = await self._session.execute(
+            select(AnalysisJob).where(AnalysisJob.id.in_(list(job_ids)))
+        )
+        return list(result.scalars().all())
 
     async def get_by_idempotency_key(
         self, document_id: uuid.UUID, idempotency_key: str

@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from app.domain.exceptions import (
     AnalysisAlreadyRunningError,
+    AnalysisConfirmationRequiredError,
     AnalysisJobNotCancellableError,
     AnalysisJobNotFoundError,
     DocumentNotFoundError,
@@ -32,6 +34,26 @@ if TYPE_CHECKING:
     from app.infrastructure.db.models.document import Document
 
 logger = logging.getLogger("syncscribe.services.analysis_job")
+
+
+class BulkSkipReason(StrEnum):
+    """Почему документ не попал в массовый запуск."""
+
+    NOT_FOUND = "not_found"
+    CONFIRMATION_REQUIRED = "confirmation_required"
+    ANALYSIS_RUNNING = "analysis_running"
+    INVALID_STATUS = "invalid_status"
+
+
+@dataclass(frozen=True)
+class BulkJobOutcome:
+    """Итог массового запуска по одному документу: задача или причина пропуска."""
+
+    document_id: uuid.UUID
+    job: AnalysisJob | None = None
+    job_id: uuid.UUID | None = None
+    skip_reason: BulkSkipReason | None = None
+    message: str | None = None
 
 
 @dataclass
@@ -76,21 +98,6 @@ class AnalysisJobService:
             return await self._uow.jobs.get_by_idempotency_key(document_id, idempotency_key)
 
     # ------------------------------------------------------------------
-    # Document helpers
-    # ------------------------------------------------------------------
-
-    async def check_document_needs_force_confirm(
-        self, project_id: uuid.UUID, document_id: uuid.UUID
-    ) -> bool:
-        async with self._uow:
-            document = await self._uow.documents.get_by_id(document_id)
-            if document is None or document.project_id != project_id:
-                raise DocumentNotFoundError(
-                    f"Документ {document_id} не найден в проекте {project_id}"
-                )
-            return DocumentLifecycle.analysis_needs_confirmation(document.status)
-
-    # ------------------------------------------------------------------
     # Core job lifecycle
     # ------------------------------------------------------------------
 
@@ -99,7 +106,14 @@ class AnalysisJobService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
         idempotency_key: str | None = None,
+        *,
+        force: bool = False,
     ) -> AnalysisJob:
+        """Создать задачу анализа и перевести документ в draft до постановки в очередь.
+
+        Повторный анализ готового документа без force → AnalysisConfirmationRequiredError:
+        проверка идёт в той же транзакции, что и создание задачи.
+        """
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
             if document is None or document.project_id != project_id:
@@ -119,6 +133,12 @@ class AnalysisJobService:
 
             if await self._uow.jobs.get_active_by_document_id(document.id) is not None:
                 raise AnalysisAlreadyRunningError("Для документа уже выполняется анализ")
+
+            if DocumentLifecycle.analysis_needs_confirmation(document.status) and not force:
+                raise AnalysisConfirmationRequiredError(
+                    "Документ уже проходил анализ: повторный анализ заменит результаты ревью. "
+                    "Передайте force=true."
+                )
 
             # Пока задача не поставлена в очередь, документ — черновик: прежние
             # результаты ревью считаются сброшенными.
@@ -266,32 +286,54 @@ class AnalysisJobService:
         self,
         project_id: uuid.UUID,
         document_ids: list[uuid.UUID] | None = None,
-    ) -> list[dict]:
-        """Создать задачи для всех анализируемых документов проекта (или только document_ids)."""
-        async with self._uow:
-            analyzable_docs = await self._uow.documents.list_by_statuses(
-                project_id, DocumentLifecycle.auto_analyzable_statuses()
-            )
-            all_analyzable = [doc.id for doc in analyzable_docs]
+        *,
+        force: bool = False,
+    ) -> list[BulkJobOutcome]:
+        """Создать и поставить в очередь задачи для документов проекта, вернуть итог по каждому.
 
-        if document_ids is not None:
-            requested = frozenset(document_ids)
-            analyzable_ids = [did for did in all_analyzable if did in requested]
+        Без document_ids берутся все документы, из которых анализ в принципе
+        запускается (draft, awaiting_approval, ready). Готовые документы без force
+        пропускаются с причиной confirmation_required, чтобы клиент спросил
+        подтверждение и повторил запрос. Явно переданные документы, которые
+        запустить нельзя, тоже попадают в ответ с причиной, а не теряются.
+        """
+        if document_ids is None:
+            async with self._uow:
+                target_ids = await self._uow.documents.list_ids_by_statuses(
+                    project_id, DocumentLifecycle.ANALYZABLE
+                )
         else:
-            analyzable_ids = all_analyzable
+            target_ids = list(dict.fromkeys(document_ids))
 
-        results: list[dict] = []
-        for document_id in analyzable_ids:
+        outcomes: list[BulkJobOutcome] = []
+        for document_id in target_ids:
             try:
-                job = await self.create_job(project_id, document_id)
-                results.append({"document_id": document_id, "job": job})
-            except (
-                DocumentNotFoundError,
-                InvalidDocumentStatusError,
-                AnalysisAlreadyRunningError,
-            ) as exc:
-                results.append({"document_id": document_id, "error": str(exc)})
-        return results
+                job = await self.create_job(project_id, document_id, force=force)
+            except DocumentNotFoundError as exc:
+                outcomes.append(_skipped(document_id, BulkSkipReason.NOT_FOUND, exc))
+            except AnalysisConfirmationRequiredError as exc:
+                outcomes.append(_skipped(document_id, BulkSkipReason.CONFIRMATION_REQUIRED, exc))
+            except AnalysisAlreadyRunningError as exc:
+                outcomes.append(_skipped(document_id, BulkSkipReason.ANALYSIS_RUNNING, exc))
+            except InvalidDocumentStatusError as exc:
+                outcomes.append(_skipped(document_id, BulkSkipReason.INVALID_STATUS, exc))
+            else:
+                # Ставим в очередь сразу, а не после цикла: задача не должна
+                # висеть в pending, пока создаются задачи для остальных документов.
+                job = await self.dispatch_job(job)
+                outcomes.append(BulkJobOutcome(document_id=document_id, job=job, job_id=job.id))
+        return await self._reload_jobs(outcomes)
+
+    async def _reload_jobs(self, outcomes: list[BulkJobOutcome]) -> list[BulkJobOutcome]:
+        # Откат транзакции на пропущенном документе помечает все объекты сессии
+        # устаревшими, включая уже созданные задачи; даже чтение job.id тогда
+        # полезло бы в БД вне async-контекста. Поэтому id запоминается сразу.
+        job_ids = [o.job_id for o in outcomes if o.job_id is not None]
+        if not job_ids:
+            return outcomes
+        async with self._uow:
+            jobs = {job.id: job for job in await self._uow.jobs.list_by_ids(job_ids)}
+        return [replace(o, job=jobs[o.job_id]) if o.job_id in jobs else o for o in outcomes]
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -349,3 +391,7 @@ class AnalysisJobService:
                 f"Задача {job_id} не найдена для документа {document_id}"
             )
         return job
+
+
+def _skipped(document_id: uuid.UUID, reason: BulkSkipReason, exc: Exception) -> BulkJobOutcome:
+    return BulkJobOutcome(document_id=document_id, skip_reason=reason, message=str(exc))

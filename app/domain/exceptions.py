@@ -98,6 +98,10 @@ class AnalysisAlreadyRunningError(DomainError):
     """
 
 
+class AnalysisConfirmationRequiredError(DomainError):
+    """Повторный анализ готового документа сбросит результаты ревью: нужен force."""
+
+
 class AnalysisJobNotCancellableError(DomainError):
     """Задание анализа нельзя отменить (уже завершено или отменено).
 

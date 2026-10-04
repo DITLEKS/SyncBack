@@ -11,6 +11,7 @@ from httpx import AsyncClient
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.domain.services.suggestion_service import SuggestionService
 from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.models.audit_log import AuditLog
 from app.infrastructure.db.models.document import Document
@@ -96,6 +97,13 @@ async def _statuses(
     async with sessionmaker() as session:
         rows = (await session.execute(select(Suggestion).where(Suggestion.id.in_(ids)))).scalars()
         return {s.id: s.status.value for s in rows}
+
+
+async def _document_status(sessionmaker: async_sessionmaker[AsyncSession], document_id: str) -> str:
+    async with sessionmaker() as session:
+        document = await session.get(Document, uuid.UUID(document_id))
+        assert document is not None
+        return document.status.value
 
 
 async def _audit_actions(
@@ -346,9 +354,113 @@ async def test_review_save_with_if_match_and_finalize(
         (third, "accept"),
     ]
 
-    # После финализации решения менять нельзя
-    response = await client.post(f"{review.base_url}/{first}/reset", headers=review.headers)
+    # В готовом документе принять или отклонить нельзя, только отменить решение
+    response = await client.patch(
+        review.base_url, json={"ids": [str(first)], "status": "rejected"}, headers=review.headers
+    )
     assert response.status_code == 409
+
+
+async def _finalize_all(client: AsyncClient, review: ReviewFixture) -> None:
+    response = await client.patch(
+        review.base_url, json={"filter": "pending", "status": "accepted"}, headers=review.headers
+    )
+    assert response.status_code == 200, response.text
+    response = await client.put(
+        f"{review.base_url}/review",
+        json={"review_version": 0, "decisions": [], "finalize": True},
+        headers=review.headers,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["document_status"] == "ready"
+
+
+async def test_reset_one_decision_reopens_ready_document(
+    client: AsyncClient, review: ReviewFixture, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    await _finalize_all(client, review)
+    first, second, _ = review.suggestion_ids
+
+    response = await client.post(f"{review.base_url}/{first}/reset", headers=review.headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "pending"
+    assert (await _document_status(sessionmaker, review.document_id)) == "awaiting_approval"
+    assert await _statuses(sessionmaker, review.suggestion_ids) == {
+        first: "pending",
+        second: "accepted",
+        review.suggestion_ids[2]: "accepted",
+    }
+
+    # Решение снова можно принять и завершить ревью
+    response = await client.put(
+        f"{review.base_url}/review",
+        json={
+            "review_version": 1,
+            "decisions": [{"suggestion_id": str(first), "decision": "rejected"}],
+            "finalize": True,
+        },
+        headers=review.headers,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["document_status"] == "ready"
+
+
+async def test_patch_reset_in_ready_document(
+    client: AsyncClient, review: ReviewFixture, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    await _finalize_all(client, review)
+    first, second, third = review.suggestion_ids
+
+    # Сбрасывать нечего — документ остаётся готовым
+    response = await client.patch(
+        review.base_url, json={"filter": "pending", "status": "pending"}, headers=review.headers
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["updated_count"] == 0
+    assert response.json()["document_status"] == "ready"
+
+    response = await client.patch(
+        review.base_url,
+        json={"ids": [str(first), str(second)], "status": "pending"},
+        headers=review.headers,
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["updated_count"] == 2
+    assert body["document_status"] == "awaiting_approval"
+    assert await _statuses(sessionmaker, review.suggestion_ids) == {
+        first: "pending",
+        second: "pending",
+        third: "accepted",
+    }
+
+
+async def test_reopen_loses_to_concurrent_reanalysis(
+    client: AsyncClient,
+    review: ReviewFixture,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Документ ушёл на повторный анализ, пока шла отмена решения: 409 и ничего не меняется."""
+    await _finalize_all(client, review)
+    first = review.suggestion_ids[0]
+    original = SuggestionService._reopen_review
+
+    async def reanalysis_wins(self: SuggestionService, document: Document) -> None:
+        async with sessionmaker() as session:
+            await session.execute(
+                update(Document)
+                .where(Document.id == document.id)
+                .values(status=DocumentStatus.DRAFT)
+            )
+            await session.commit()
+        await original(self, document)
+
+    monkeypatch.setattr(SuggestionService, "_reopen_review", reanalysis_wins)
+    response = await client.post(f"{review.base_url}/{first}/reset", headers=review.headers)
+    assert response.status_code == 409, response.text
+    assert (await _document_status(sessionmaker, review.document_id)) == "draft"
+    assert (await _statuses(sessionmaker, [first]))[first] == "accepted"
 
 
 async def test_reset_endpoint(

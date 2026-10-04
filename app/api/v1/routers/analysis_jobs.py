@@ -1,34 +1,8 @@
-"""Запуск, просмотр и отмена задач анализа документа.
+"""Запуск, просмотр и отмена задач анализа одного документа.
 
-P0-7: Идемпотентный Idempotency-Key.
-P0-9: Повторный анализ документа в статусах READY / ERROR / CANCELLED требует
-      force=True в теле запроса. Без force — HTTP 409 с confirmation_required=True.
-      review #2: расширено с «только READY» на READY | ERROR | CANCELLED через
-      service.check_document_needs_force_confirm().
-
-ОПТИМИЗАЦИЯ (код-ревью):
-- #4  detail HTTPException — .model_dump() вместо jsonable_encoder на Pydantic-объекте.
-- #9  _job_response() — хелпер вместо трёх одинаковых JSONResponse-блоков.
-
-N-2 (ревью): убран прямой импорт celery_app из роутера.
-  Отзыв Celery-задачи делегирован в AnalysisJobService.revoke_celery_task().
-  Роутер больше не зависит от инфраструктуры Celery напрямую.
-
-N-4 (ревью): убран импорт DocumentStatus (ORM-enum из инфраструктуры).
-  Сравнение статуса перенесено внутрь сервисного метода get_document_for_job(),
-  где сессия гарантированно открыта (N-5). Роутер получает простой bool.
-
-FIX-1: suppress(Exception) заменён на явный try/except с logger.warning + exc_info.
-FIX-3: идемпотентный запрос проверяет document_id — если ключ совпадает,
-        но document_id другой — возвращаем 409, а не чужой job.
-
-C-1 (аудит): REST-правильный способ отмены — DELETE /{job_id}.
-  Возвращает 200 + AnalysisJobResponse(status=cancelled).
-
-REFACTOR: dispatch run_analysis_job делегирован в service.dispatch_job() —
-  роутер не импортирует Celery-задачи напрямую.
-  Deprecated POST /{job_id}/cancel удалён (фронт не подключён).
-
+Повторный запуск с тем же Idempotency-Key возвращает уже созданную задачу.
+Повторный анализ готового документа требует force=true, иначе 409 с
+confirmation_required=true, чтобы клиент показал диалог подтверждения.
 """
 
 import logging
@@ -47,6 +21,7 @@ from app.api.schemas.analysis_job import (
 from app.core.dependencies import get_analysis_job_service
 from app.domain.exceptions import (
     AnalysisAlreadyRunningError,
+    AnalysisConfirmationRequiredError,
     AnalysisJobNotCancellableError,
     DocumentNotFoundError,
     InvalidDocumentStatusError,
@@ -80,7 +55,7 @@ def _job_response(job, http_status: int = status.HTTP_201_CREATED) -> JSONRespon
         },
         409: {
             "model": AnalysisJobConflictResponse,
-            "description": "Анализ уже запущен, или документ READY/ERROR/CANCELLED — нужен force=True (P0-9)",
+            "description": "Анализ уже запущен или документ ready без force=true",
         },
     },
 )
@@ -91,7 +66,6 @@ async def start_analysis_job(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     body: AnalysisJobCreateRequest = AnalysisJobCreateRequest(),
 ) -> JSONResponse:
-    # P0-7: идемпотентный повторный запрос
     if idempotency_key:
         existing = await service.find_job_by_idempotency_key(
             project.id, document_id, idempotency_key
@@ -107,28 +81,21 @@ async def start_analysis_job(
                 )
             return _job_response(existing, status.HTTP_200_OK)
 
-    # Повторный анализ готового документа сбрасывает результаты ревью,
-    # поэтому требует явного подтверждения через force=true.
     try:
-        needs_force = await service.check_document_needs_force_confirm(project.id, document_id)
+        job = await service.create_job(
+            project.id, document_id, idempotency_key=idempotency_key, force=body.force
+        )
     except DocumentNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    if needs_force and not body.force:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except AnalysisConfirmationRequiredError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=AnalysisJobConflictResponse(
-                detail=(
-                    "Документ уже проходил анализ. Перезапустить анализ? Передайте force=true."
-                ),
-                confirmation_required=True,
+                detail=str(exc), confirmation_required=True
             ).model_dump(),
-        )
-
-    try:
-        job = await service.create_job(project.id, document_id, idempotency_key=idempotency_key)
+        ) from exc
     except (AnalysisAlreadyRunningError, InvalidDocumentStatusError) as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     # Сбой очереди не является ошибкой запроса: сервис вернёт задачу в статусе
     # failed с кодом QUEUE_UNAVAILABLE, и клиент увидит причину в ответе.
