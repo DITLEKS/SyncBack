@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, and_, delete, func, select, tuple_, update
+from sqlalchemy import CursorResult, Result, and_, delete, func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.repositories import IDocumentRepository
@@ -106,13 +106,13 @@ class DocumentRepository(IDocumentRepository):
         result = await self._session.execute(q)
         return result.scalar_one()
 
-    async def list_by_statuses(
+    async def list_ids_by_statuses(
         self, project_id: uuid.UUID, statuses: frozenset[DocumentStatusVO]
-    ) -> list[Document]:
+    ) -> list[uuid.UUID]:
         if not statuses:
             return []
-        result = await self._session.execute(
-            select(Document)
+        result: Result[tuple[uuid.UUID]] = await self._session.execute(
+            select(Document.id)
             .where(
                 Document.project_id == project_id,
                 Document.status.in_(tuple(_status_to_orm(s) for s in statuses)),

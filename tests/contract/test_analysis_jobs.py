@@ -203,7 +203,7 @@ async def test_queue_unavailable_marks_job_failed(
     assert (await _document_state(sessionmaker, document["id"]))[0] == "draft"
 
 
-async def test_bulk_start_skips_documents_that_cannot_be_analysed(
+async def test_bulk_start_asks_confirmation_for_ready_documents(
     client: AsyncClient,
     queue: FakeAnalysisQueue,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -224,20 +224,53 @@ async def test_bulk_start_skips_documents_that_cannot_be_analysed(
     response = await client.post(url, headers=headers)
     assert response.status_code == 201, response.text
     body = response.json()
-    assert body["started"] == 1
-    assert body["skipped"] == 0
-    assert [r["document_id"] for r in body["results"]] == [draft["id"]]
-    assert body["results"][0]["job"]["status"] == "dispatched"
+    assert (body["started"], body["skipped"], body["confirmation_required"]) == (1, 1, 1)
+    by_id = {r["document_id"]: r for r in body["results"]}
+    assert set(by_id) == {draft["id"], ready["id"]}
+    assert by_id[draft["id"]]["job"]["status"] == "dispatched"
+    assert by_id[ready["id"]]["job"] is None
+    assert by_id[ready["id"]]["skip_reason"] == "confirmation_required"
     assert len(queue.enqueued) == 1
     assert (await _document_state(sessionmaker, draft["id"]))[0] == "in_progress"
+    assert (await _document_state(sessionmaker, ready["id"]))[0] == "ready"
 
-    # Повторный запуск: анализируемых документов не осталось
+    # Явно переданные документы, которые запустить нельзя, попадают в ответ с причиной.
+    foreign = str(uuid.uuid4())
     response = await client.post(
-        url, json={"document_ids": [ready["id"], busy["id"]]}, headers=headers
+        url,
+        json={"document_ids": [ready["id"], busy["id"], draft["id"], foreign, ready["id"]]},
+        headers=headers,
     )
     assert response.status_code == 200, response.text
-    assert response.json() == {"started": 0, "skipped": 0, "results": []}
-    assert len(queue.enqueued) == 1
+    body = response.json()
+    assert [(r["document_id"], r["skip_reason"]) for r in body["results"]] == [
+        (ready["id"], "confirmation_required"),
+        (busy["id"], "invalid_status"),
+        (draft["id"], "invalid_status"),
+        (foreign, "not_found"),
+    ]
+    assert (body["started"], body["skipped"], body["confirmation_required"]) == (0, 4, 1)
+
+    # После подтверждения готовый документ уходит на повторный анализ.
+    response = await client.post(
+        url, json={"document_ids": [ready["id"]], "force": True}, headers=headers
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert (body["started"], body["skipped"], body["confirmation_required"]) == (1, 0, 0)
+    assert len(queue.enqueued) == 2
+    assert (await _document_state(sessionmaker, ready["id"]))[0] == "in_progress"
+
+
+async def test_bulk_start_limits_document_ids(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    project_id = await create_project(client, headers)
+    response = await client.post(
+        f"/api/v1/projects/{project_id}/documents/analysis-jobs/bulk",
+        json={"document_ids": [str(uuid.uuid4()) for _ in range(501)]},
+        headers=headers,
+    )
+    assert response.status_code == 422
 
 
 async def test_document_in_progress_cannot_be_deleted(
