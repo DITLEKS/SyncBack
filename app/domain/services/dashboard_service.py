@@ -11,7 +11,6 @@ DashboardService — агрегаты рабочего пространства:
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, timedelta
@@ -83,16 +82,13 @@ class DashboardService:
     async def get_dashboard(self, user_id: uuid.UUID) -> DashboardSummary:
         """Сводка рабочего пространства с трендами за 7 дней.
 
-        Последовательность:
-          1. Параллельно читаем stats + trends.
-          2. Записываем снэпшот сегодня с live-значениями (upsert).
-          3. Подмерживаем trends актуальным сегодняшним снэпшотом.
-          4. Строим ответ с интерполяцией.
+        Читает текущую статистику и снэпшоты, записывает снэпшот за сегодня
+        (идемпотентный upsert) и строит тренды с интерполяцией пропусков.
+        Запросы идут последовательно: read-model работает на одной AsyncSession,
+        которую нельзя использовать конкурентно.
         """
-        stats, snapshots = await asyncio.gather(
-            self._qs.get_stats(user_id),
-            self._qs.get_trends(user_id, days=7),
-        )
+        stats = await self._qs.get_stats(user_id)
+        snapshots = await self._qs.get_trends(user_id, days=7)
 
         total: int = stats["total"]
         ready: int = stats["ready"]

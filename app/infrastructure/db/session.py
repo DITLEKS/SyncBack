@@ -6,7 +6,7 @@
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import NullPool
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 
 if TYPE_CHECKING:
     from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -25,27 +25,48 @@ engine: AsyncEngine | None = None
 AsyncSessionLocal: async_sessionmaker[AsyncSession] | None = None
 
 
+def _pool_options(settings: Settings) -> dict[str, Any]:
+    """Параметры пула для API-движка.
+
+    Открывать соединение к PostgreSQL на каждый запрос дорого (TLS, аутентификация,
+    прогрев планировщика), поэтому API держит пул с проверкой соединения перед
+    выдачей. SQLite пул не поддерживает в том же виде — для него опции не задаются.
+    """
+    if settings.database_url.startswith("sqlite"):
+        return {}
+    return {
+        "pool_size": settings.db_pool_size,
+        "max_overflow": settings.db_max_overflow,
+        "pool_timeout": settings.db_pool_timeout_seconds,
+        "pool_recycle": settings.db_pool_recycle_seconds,
+        "pool_pre_ping": True,
+    }
+
+
 def _init_engine() -> None:
     """Лениво создаёт движок и sessionmaker при первом обращении.
 
-    ИСПРАВЛЕНО: раньше `settings = get_settings()` вызывался на уровне модуля, т.e.
-    простой импорт этого файла (например, транзитивно через app.main -> ... ->
-    app.core.dependencies -> app.infrastructure.db.session) требовал наличия всех обязательных полей
-    конфигурации (DATABASE_URL, REDIS_URL, MINIO_*, JWT_SECRET) без какого-либо реального
-    обращения к БД. В CI, где нет .env и явных переменных окружения, это
-    приводило к pydantic.ValidationError уже на этапе сбора тестов — падал даже безобидный
-    health-check тест, которому БД не нужна. Теперь настройки читаются только в момент, когда
-    движок действительно нужен.
+    Настройки читаются только здесь, а не при импорте модуля: импорт приложения
+    не должен требовать полной конфигурации (тесты, проверки в CI).
     """
     global engine, AsyncSessionLocal
     if AsyncSessionLocal is None:
         settings = get_settings()
         engine = create_async_engine(
             settings.database_url,
-            poolclass=NullPool,
             echo=settings.debug,
+            **_pool_options(settings),
         )
         AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+
+async def dispose_engine() -> None:
+    """Закрыть соединения пула при остановке процесса."""
+    global engine, AsyncSessionLocal
+    if engine is not None:
+        await engine.dispose()
+    engine = None
+    AsyncSessionLocal = None
 
 
 def get_sessionmaker() -> async_sessionmaker[AsyncSession]:

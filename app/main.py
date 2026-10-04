@@ -37,6 +37,7 @@ from app.domain.exceptions import (
     SourceNotFoundError,
     SuggestionNotFoundError,
 )
+from app.infrastructure.db.session import dispose_engine
 
 logger = logging.getLogger("syncscribe.main")
 
@@ -70,6 +71,7 @@ async def lifespan(app: FastAPI):
     finally:
         await shutdown_sse_broker()
         logger.info("SSE broker остановлен")
+        await dispose_engine()
         logger.info("Остановка SyncScribe backend")
 
 
