@@ -4,7 +4,7 @@ CRUD проектов. Листинг фильтруется по видимос
 
 ДОБАВЛЕНО:
 - PATCH /{project_id} — частичное обновление (переименование / изменение описания).
-- DELETE /{project_id} — каскадное удаление документов (+ MinIO), источников, jobs.
+- DELETE /{project_id} — каскадное удаление документов (+ файлы), источников, jobs.
 
 I-4: GET /{project_id}?include=documents,sources
   Расширяет ProjectResponse без нового эндпоинта:
@@ -169,5 +169,5 @@ async def delete_project(
     project: Project = Depends(get_allowed_project),
     project_service: ProjectService = Depends(get_project_service),
 ) -> None:
-    """Каскадное удаление: документы (+ MinIO-файлы), источники (+ MinIO-файлы), jobs, suggestions."""
+    """Каскадное удаление: документы и источники вместе с файлами в хранилище, jobs, suggestions."""
     await project_service.delete_project(project)

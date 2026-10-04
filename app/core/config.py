@@ -21,18 +21,25 @@ class Settings(BaseSettings):
 
     redis_sse_channel: str = "syncscribe:sse"
 
-    minio_endpoint: str
-    # Приложению нужен сервисный пользователь с правами только на свой бакет.
-    # Старые имена переменных (MINIO_ROOT_*) принимаются для совместимости.
-    minio_access_key: str = Field(
-        validation_alias=AliasChoices("MINIO_ACCESS_KEY", "MINIO_ROOT_USER")
+    # S3-совместимое хранилище (SeaweedFS). Приложению нужен сервисный пользователь
+    # с правами только на свой бакет. Имена MINIO_* принимаются как устаревшие алиасы.
+    s3_endpoint: str = Field(validation_alias=AliasChoices("S3_ENDPOINT", "MINIO_ENDPOINT"))
+    s3_access_key: str = Field(
+        validation_alias=AliasChoices("S3_ACCESS_KEY", "MINIO_ACCESS_KEY", "MINIO_ROOT_USER")
     )
-    minio_secret_key: str = Field(
-        validation_alias=AliasChoices("MINIO_SECRET_KEY", "MINIO_ROOT_PASSWORD")
+    s3_secret_key: str = Field(
+        validation_alias=AliasChoices("S3_SECRET_KEY", "MINIO_SECRET_KEY", "MINIO_ROOT_PASSWORD")
     )
-    minio_bucket: str
-    minio_secure: bool = False
-    minio_presigned_url_expire_seconds: int = 300
+    s3_bucket: str = Field(validation_alias=AliasChoices("S3_BUCKET", "MINIO_BUCKET"))
+    s3_secure: bool = Field(
+        default=False, validation_alias=AliasChoices("S3_SECURE", "MINIO_SECURE")
+    )
+    s3_presigned_url_expire_seconds: int = Field(
+        default=300,
+        validation_alias=AliasChoices(
+            "S3_PRESIGNED_URL_EXPIRE_SECONDS", "MINIO_PRESIGNED_URL_EXPIRE_SECONDS"
+        ),
+    )
 
     jwt_secret: str
     jwt_algorithm: str = "HS256"

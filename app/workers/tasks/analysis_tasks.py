@@ -36,7 +36,7 @@ from app.infrastructure.llm.factory import get_llm_client
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 from app.infrastructure.source_connectors.manual_upload_connector import ManualUploadConnector
 from app.infrastructure.source_connectors.url_connector import UrlConnector
-from app.infrastructure.storage.minio_storage import MinioStorage
+from app.infrastructure.storage.s3_storage import S3FileStorage
 from app.workers.celery_app import celery_app
 from app.workers.pipeline.suggestion_mapper import map_to_suggestions
 
@@ -59,8 +59,8 @@ def _run_async(coro):
 
 
 @functools.cache
-def _get_storage() -> MinioStorage:
-    return MinioStorage()
+def _get_storage() -> S3FileStorage:
+    return S3FileStorage()
 
 
 @functools.cache

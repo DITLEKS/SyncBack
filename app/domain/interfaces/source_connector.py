@@ -2,7 +2,7 @@
 Порт коннектора источников истины.
 
 После P2: SourceKind содержит только FILE и URL.
-NOTE убран — тексты хранятся в MinIO как .txt и обрабатываются
+NOTE убран — тексты хранятся в файловом хранилище как .txt и обрабатываются
 через ManualUploadConnector (SourceKind.FILE).
 
 Конвертация ORM SourceType → SourceKind выполняется на границе

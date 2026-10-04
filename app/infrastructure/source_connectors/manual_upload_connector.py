@@ -1,18 +1,17 @@
 """
-ManualUploadConnector — скачивает файл из MinIO и парсит его в plain-text.
+ManualUploadConnector — скачивает файл из хранилища и парсит его в plain-text.
 
-После P2: обрабатывает только SourceKind.FILE.
-Текстовые заметки (бывший NOTE) теперь сохраняются в MinIO как .txt
-и попадают сюда как обычные файлы с source_type=FILE.
+Обрабатывает только SourceKind.FILE: текстовые заметки сохраняются как .txt
+и попадают сюда как обычные файлы.
 """
 
+from app.domain.interfaces.file_storage import FileStorage
 from app.domain.interfaces.source_connector import SourceKind, SourceMetadata, SourceRef
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
-from app.infrastructure.storage.minio_storage import MinioStorage
 
 
 class ManualUploadConnector:
-    def __init__(self, file_storage: MinioStorage, parser_registry: DocumentParserRegistry):
+    def __init__(self, file_storage: FileStorage, parser_registry: DocumentParserRegistry):
         self._storage = file_storage
         self._parsers = parser_registry
 

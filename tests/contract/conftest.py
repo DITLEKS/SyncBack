@@ -33,7 +33,7 @@ from app.main import app
 
 
 class InMemoryFileStorage:
-    """Замена MinIO для контрактных тестов: файлы живут в словаре."""
+    """Замена S3-хранилища для контрактных тестов: файлы живут в словаре."""
 
     def __init__(self) -> None:
         self.files: dict[str, bytes] = {}
@@ -61,7 +61,7 @@ class InMemoryFileStorage:
 @pytest.fixture
 def file_storage(monkeypatch: pytest.MonkeyPatch) -> InMemoryFileStorage:
     storage = InMemoryFileStorage()
-    monkeypatch.setattr(dependencies, "_get_minio_storage", lambda: storage)
+    monkeypatch.setattr(dependencies, "_get_file_storage", lambda: storage)
     return storage
 
 

@@ -68,7 +68,7 @@ from app.infrastructure.security.jwt_handler import JWTHandler
 from app.infrastructure.security.login_rate_limiter import LoginRateLimiter
 from app.infrastructure.security.password_hasher import PasswordHasher
 from app.infrastructure.security.refresh_token_store import RefreshTokenStore
-from app.infrastructure.storage.minio_storage import MinioStorage
+from app.infrastructure.storage.s3_storage import S3FileStorage
 
 # ---------------------------------------------------------------------------
 # Singleton-like infrastructure (one instance per process)
@@ -76,8 +76,8 @@ from app.infrastructure.storage.minio_storage import MinioStorage
 
 
 @lru_cache
-def _get_minio_storage() -> MinioStorage:
-    return MinioStorage(get_settings())
+def _get_file_storage() -> S3FileStorage:
+    return S3FileStorage(get_settings())
 
 
 @lru_cache
@@ -150,7 +150,7 @@ def get_project_service(
 ) -> ProjectService:
     return ProjectService(
         uow=uow,
-        file_storage=_get_minio_storage(),
+        file_storage=_get_file_storage(),
     )
 
 
@@ -160,10 +160,10 @@ def get_document_service(
 ) -> DocumentService:
     return DocumentService(
         uow=uow,
-        file_storage=_get_minio_storage(),
+        file_storage=_get_file_storage(),
         parser_registry=_get_parser_registry(),
         upload_limits=UploadLimits.from_megabytes(settings.max_upload_size_mb),
-        download_url_ttl_seconds=settings.minio_presigned_url_expire_seconds,
+        download_url_ttl_seconds=settings.s3_presigned_url_expire_seconds,
     )
 
 
@@ -173,7 +173,7 @@ def get_source_service(
 ) -> SourceService:
     return SourceService(
         uow=uow,
-        file_storage=_get_minio_storage(),
+        file_storage=_get_file_storage(),
         upload_limits=UploadLimits.from_megabytes(settings.max_upload_size_mb),
     )
 
@@ -183,7 +183,7 @@ def get_document_export_service(
 ) -> DocumentExportService:
     return DocumentExportService(
         uow=uow,
-        file_storage=_get_minio_storage(),
+        file_storage=_get_file_storage(),
         exporter_registry=_get_exporter_registry(),
     )
 

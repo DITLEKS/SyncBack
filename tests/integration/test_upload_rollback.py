@@ -12,19 +12,19 @@ from app.domain.services.source_service import SourceService
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
-from app.infrastructure.storage.minio_storage import MinioStorage
+from app.infrastructure.storage.s3_storage import S3FileStorage
 
 _LIMITS = UploadLimits.from_megabytes(50)
 
 
 @pytest.mark.asyncio
 async def test_document_upload_deletes_orphan_file_on_db_failure(
-    db_session, minio_storage: MinioStorage, monkeypatch
+    db_session, s3_storage: S3FileStorage, monkeypatch
 ):
     uow = SqlAlchemyUnitOfWork(db_session)
     service = DocumentService(
         uow,
-        minio_storage,
+        s3_storage,
         parser_registry=DocumentParserRegistry(),
         upload_limits=_LIMITS,
         download_url_ttl_seconds=300,
@@ -46,15 +46,15 @@ async def test_document_upload_deletes_orphan_file_on_db_failure(
         )
 
     storage_key = f"projects/{project.id}/documents/{expected_document_id}/document.txt"
-    assert not await minio_storage.exists(storage_key)
+    assert not await s3_storage.exists(storage_key)
 
 
 @pytest.mark.asyncio
 async def test_source_upload_deletes_orphan_file_on_db_failure(
-    db_session, minio_storage: MinioStorage, monkeypatch
+    db_session, s3_storage: S3FileStorage, monkeypatch
 ):
     uow = SqlAlchemyUnitOfWork(db_session)
-    service = SourceService(uow, minio_storage, upload_limits=_LIMITS)
+    service = SourceService(uow, s3_storage, upload_limits=_LIMITS)
     project = Project(
         id=uuid.UUID("44444444-4444-4444-4444-444444444444"),
         name="rollback-source-project",
@@ -73,4 +73,4 @@ async def test_source_upload_deletes_orphan_file_on_db_failure(
         )
 
     storage_key = f"projects/{project.id}/sources/{expected_source_id}/upload.txt"
-    assert not await minio_storage.exists(storage_key)
+    assert not await s3_storage.exists(storage_key)

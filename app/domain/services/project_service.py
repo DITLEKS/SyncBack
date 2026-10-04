@@ -81,7 +81,7 @@ class ProjectService:
         """
         Каскадное удаление:
         1. Собираем storage_key всех файлов проекта.
-        2. Удаляем их из MinIO (best-effort).
+        2. Удаляем их из хранилища (best-effort).
         3. Удаляем запись — ON DELETE CASCADE убирает дочерние строки.
         """
         async with self._uow:

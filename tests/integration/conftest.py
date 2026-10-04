@@ -6,11 +6,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.infrastructure.cache.redis_client as redis_client_module
 from app.infrastructure.db.session import db_session_context
-from app.infrastructure.storage.minio_storage import MinioStorage
+from app.infrastructure.storage.s3_storage import S3FileStorage
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    """Всё в tests/integration требует реальных Postgres/Redis/MinIO.
+    """Всё в tests/integration требует реальных Postgres/Redis/S3-хранилища.
 
     Маркер ставится централизованно, чтобы забытый pytestmark в отдельном файле
     не затягивал эти тесты в unit-прогон (там они зависают на подключении к БД).
@@ -35,8 +35,8 @@ async def pg_session(db_session: AsyncSession) -> AsyncSession:
 
 
 @pytest.fixture
-def minio_storage() -> MinioStorage:
-    return MinioStorage()
+def s3_storage() -> S3FileStorage:
+    return S3FileStorage()
 
 
 @pytest_asyncio.fixture(autouse=True)
