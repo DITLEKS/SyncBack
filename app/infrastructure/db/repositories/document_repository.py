@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import delete, exists, func, select, tuple_, update
+from sqlalchemy import CursorResult, and_, delete, func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.repositories import IDocumentRepository
@@ -150,99 +150,98 @@ class DocumentRepository(IDocumentRepository):
         sort_by: str = "updated_at",
         sort_dir: str = "desc",
     ) -> tuple[list[dict[str, Any]], int]:
-        """OPT-3: CTE + window COUNT() OVER () — 1 round-trip вместо 2.
+        """Документы всех проектов пользователя со счётчиками правок текущего анализа.
 
-        M-1: маппинг результата выполняется по явному label "doc",
-        а не по хрупкому строковому ключу "Document" (имя ORM-класса
-        может измениться в новых версиях SA).
+        Один запрос: агрегаты правок считаются в подзапросе по (document_id,
+        analysis_job_id) и присоединяются по текущей задаче документа, общее число
+        строк берётся оконным COUNT() OVER ().
         """
         if sort_by not in _SORT_COLUMNS:
             sort_by = "updated_at"
 
-        suggestions_total = func.count(Suggestion.id).label("suggestions_total")
-        suggestions_pending = (
-            func.count(Suggestion.id)
-            .filter(Suggestion.status == SuggestionStatus.PENDING)
-            .label("suggestions_pending")
-        )
-        suggestions_accepted = (
-            func.count(Suggestion.id)
-            .filter(Suggestion.status == SuggestionStatus.ACCEPTED)
-            .label("suggestions_accepted")
-        )
-        suggestions_rejected = (
-            func.count(Suggestion.id)
-            .filter(Suggestion.status == SuggestionStatus.REJECTED)
-            .label("suggestions_rejected")
+        def _count_with_status(status_value: SuggestionStatus):
+            return func.count(Suggestion.id).filter(Suggestion.status == status_value)
+
+        counts = (
+            select(
+                Suggestion.document_id.label("document_id"),
+                Suggestion.analysis_job_id.label("analysis_job_id"),
+                func.count(Suggestion.id).label("total"),
+                _count_with_status(SuggestionStatus.PENDING).label("pending"),
+                _count_with_status(SuggestionStatus.ACCEPTED).label("accepted"),
+                _count_with_status(SuggestionStatus.REJECTED).label("rejected"),
+            )
+            .group_by(Suggestion.document_id, Suggestion.analysis_job_id)
+            .subquery("suggestion_counts")
         )
 
-        base_q = (
+        suggestions_total = func.coalesce(counts.c.total, 0).label("suggestions_total")
+        suggestions_pending = func.coalesce(counts.c.pending, 0).label("suggestions_pending")
+        suggestions_accepted = func.coalesce(counts.c.accepted, 0).label("suggestions_accepted")
+        suggestions_rejected = func.coalesce(counts.c.rejected, 0).label("suggestions_rejected")
+
+        stmt = (
             select(
-                Document.id.label("doc_id"),
-                Document.label("doc"),
+                Document,
                 Project.name.label("project_name"),
                 suggestions_total,
                 suggestions_pending,
                 suggestions_accepted,
                 suggestions_rejected,
+                func.count().over().label("total_count"),
             )
             .join(Project, Document.project_id == Project.id)
-            .outerjoin(Suggestion, Suggestion.document_id == Document.id)
+            .outerjoin(
+                counts,
+                and_(
+                    counts.c.document_id == Document.id,
+                    counts.c.analysis_job_id == Document.current_analysis_job_id,
+                ),
+            )
             .where(Project.owner_id == user_id)
-            .group_by(Document.id, Project.name)
         )
 
         if status is not None:
-            base_q = base_q.where(Document.status == _status_to_orm(status))
+            stmt = stmt.where(Document.status == _status_to_orm(status))
 
         if outdated:
-            pending_exists = exists(
-                select(Suggestion.id).where(
-                    Suggestion.document_id == Document.id,
-                    Suggestion.status == SuggestionStatus.PENDING,
-                )
-            )
-            base_q = base_q.where(pending_exists)
+            stmt = stmt.where(func.coalesce(counts.c.pending, 0) > 0)
 
         if search:
             safe_search = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            base_q = base_q.where(Document.name.ilike(f"%{safe_search}%", escape="\\"))
+            stmt = stmt.where(Document.name.ilike(f"%{safe_search}%", escape="\\"))
 
-        cte = base_q.cte("docs_cte")
-        paged_q = (
-            select(
-                cte,
-                func.count().over().label("_total"),
-            )
-            .order_by(
-                getattr(cte.c, sort_by).asc()
-                if sort_dir == "asc"
-                else getattr(cte.c, sort_by).desc(),
-                cte.c.doc_id.desc(),
+        sort_column = getattr(Document, sort_by)
+        page_stmt = (
+            stmt.order_by(
+                sort_column.asc() if sort_dir == "asc" else sort_column.desc(),
+                Document.id.desc(),
             )
             .limit(limit)
             .offset(offset)
         )
 
-        result = await self._session.execute(paged_q)
-        rows = result.all()
-
+        rows = (await self._session.execute(page_stmt)).all()
         if not rows:
-            return [], 0
+            # Страница за пределами выборки: оконный счётчик недоступен, total
+            # нужен отдельным запросом, иначе клиент решит, что документов нет.
+            total = await self._session.scalar(
+                select(func.count()).select_from(stmt.with_only_columns(Document.id).subquery())
+            )
+            return [], total or 0
 
-        total: int = rows[0]._mapping["_total"]
         items: list[dict[str, Any]] = [
             {
-                "document": row._mapping["doc"],
-                "project_name": row._mapping["project_name"],
-                "suggestions_total": row._mapping["suggestions_total"],
-                "suggestions_pending": row._mapping["suggestions_pending"],
-                "suggestions_accepted": row._mapping["suggestions_accepted"],
-                "suggestions_rejected": row._mapping["suggestions_rejected"],
+                "document": row[0],
+                "project_name": row.project_name,
+                "suggestions_total": row.suggestions_total,
+                "suggestions_pending": row.suggestions_pending,
+                "suggestions_accepted": row.suggestions_accepted,
+                "suggestions_rejected": row.suggestions_rejected,
             }
             for row in rows
         ]
-        return items, total
+        return items, rows[0].total_count
 
     async def update_status(
         self,
@@ -319,7 +318,7 @@ class DocumentRepository(IDocumentRepository):
             Source.scope == SourceScopeVO.DOCUMENT,
             Source.id.in_(subq),
         )
-        result = await self._session.execute(stmt)
+        result = cast(CursorResult[Any], await self._session.execute(stmt))
         await self._session.flush()
         return result.rowcount
 

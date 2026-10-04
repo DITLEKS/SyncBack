@@ -113,10 +113,25 @@ class IDocumentRepository(ABC):
 
     @abstractmethod
     async def delete(self, document: Document) -> None:
-        """CRIT-3: принимает ORM-объект Document, а не UUID.
+        """Удалить уже загруженный документ."""
+        ...
 
-        Реализация использует session.delete(document) — объект уже загружен
-        вызывающим кодом через get_by_id, передавать id избыточно.
+    @abstractmethod
+    async def delete_by_id(
+        self, document_id: uuid.UUID, project_id: uuid.UUID
+    ) -> dict[str, str | None] | None:
+        """Удалить документ проекта одним запросом без предварительной загрузки.
+
+        Возвращает ключи файлов в хранилище ({"storage_key", "original_storage_key"})
+        для последующей очистки или None, если документа в проекте нет.
+        """
+        ...
+
+    @abstractmethod
+    async def delete_document_scoped_sources(self, document_id: uuid.UUID) -> int:
+        """Удалить источники со scope=document, прикреплённые к документу.
+
+        Возвращает число удалённых источников.
         """
         ...
 

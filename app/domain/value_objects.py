@@ -131,6 +131,11 @@ class KeysetPage:
         if has_ts != has_id:
             raise ValueError("KeysetPage: before_created_at и before_id должны быть заданы вместе")
 
+    @property
+    def has_cursor(self) -> bool:
+        """Первая страница запрашивается без курсора."""
+        return self.before_created_at is not None
+
 
 @dataclass(frozen=True)
 class SuggestionDecision:

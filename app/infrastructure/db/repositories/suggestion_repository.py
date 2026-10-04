@@ -11,8 +11,9 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any, cast
 
-from sqlalchemy import case, delete, func, select, update
+from sqlalchemy import CursorResult, case, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import SuggestionAlreadyDecidedError
@@ -245,7 +246,7 @@ class SuggestionRepository(ISuggestionRepository):
                 decided_at=func.now(),
             )
         )
-        result = await self._session.execute(stmt)
+        result = cast(CursorResult[Any], await self._session.execute(stmt))
         await self._session.flush()
         return result.rowcount
 
@@ -355,7 +356,7 @@ class SuggestionRepository(ISuggestionRepository):
         анализа (статус документа ERROR или CANCELLED), до создания новой job.
         """
         stmt = delete(Suggestion).where(Suggestion.analysis_job_id == analysis_job_id)
-        result = await self._session.execute(stmt)
+        result = cast(CursorResult[Any], await self._session.execute(stmt))
         await self._session.flush()
         return result.rowcount
 
