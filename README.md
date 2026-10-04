@@ -64,7 +64,7 @@ pytest -m integration tests/integration         # нужны PostgreSQL, Redis, 
 mypy app
 ```
 
-Тестов 343: 314 unit и контрактных (SQLite in-memory, fakeredis, in-memory хранилище) и 29 интеграционных (PostgreSQL, Redis, SeaweedFS). Порог покрытия в CI — 70%.
+Тестов 326: 314 unit и контрактных (SQLite in-memory, fakeredis, in-memory хранилище) и 12 интеграционных (PostgreSQL, Redis, SeaweedFS): сквозные HTTP-сценарии, гонки ревью на PostgreSQL, хранилище. Порог покрытия в CI — 70%.
 
 CI (`.github/workflows/ci.yml`): `lint-and-test` (ruff, проверки слоёв, mypy в режиме `continue-on-error`, pytest с покрытием), `check-migrations` (`alembic upgrade head` на чистой БД и `alembic check`), `build-images`, `integration-tests` (PostgreSQL и Redis как services, SeaweedFS — `docker run chrislusf/seaweedfs:4.48` с тем же стартовым скриптом, что и в compose).
 
