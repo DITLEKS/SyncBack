@@ -16,7 +16,12 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.domain.exceptions import OptimisticLockError, SuggestionAlreadyDecidedError
+from app.domain.exceptions import (
+    InvalidDocumentStatusError,
+    OptimisticLockError,
+    SuggestionAlreadyDecidedError,
+)
+from app.domain.services.analysis_job_service import AnalysisJobService
 from app.domain.services.suggestion_service import SuggestionService
 from app.domain.value_objects import SuggestionStatusVO
 from app.infrastructure.db.models.document import Document
@@ -168,3 +173,89 @@ async def test_concurrent_accept_and_reject_of_same_suggestion(
 
     statuses = await _statuses(pg_sessionmaker, [target])
     assert statuses[target].value == winners[0].value
+
+
+async def _finalize(sessionmaker: async_sessionmaker[AsyncSession], state: ReviewState) -> None:
+    async with sessionmaker() as session:
+        await SuggestionService(SqlAlchemyUnitOfWork(session)).atomic_review_save(
+            project_id=state.project_id,
+            document_id=state.document_id,
+            user_id=state.user_id,
+            review_version=0,
+            accepted_ids=tuple(state.suggestion_ids),
+            finalize=True,
+        )
+
+
+async def _reset_one(
+    sessionmaker: async_sessionmaker[AsyncSession], state: ReviewState, suggestion_id: uuid.UUID
+) -> str:
+    async with sessionmaker() as session:
+        await SuggestionService(SqlAlchemyUnitOfWork(session)).reset_suggestion(
+            state.project_id, state.document_id, suggestion_id, state.user_id
+        )
+    return "reset"
+
+
+async def _reanalyse(sessionmaker: async_sessionmaker[AsyncSession], state: ReviewState) -> str:
+    async with sessionmaker() as session:
+        await AnalysisJobService(SqlAlchemyUnitOfWork(session)).create_job(
+            state.project_id, state.document_id, force=True
+        )
+    return "reanalysed"
+
+
+async def _document_state(
+    sessionmaker: async_sessionmaker[AsyncSession], document_id: uuid.UUID
+) -> tuple[str, uuid.UUID | None]:
+    async with sessionmaker() as session:
+        document = await session.get(Document, document_id)
+        assert document is not None
+        return document.status.value, document.current_analysis_job_id
+
+
+async def test_reset_in_ready_reopens_document(
+    pg_sessionmaker: async_sessionmaker[AsyncSession], review_state: ReviewState
+) -> None:
+    await _finalize(pg_sessionmaker, review_state)
+    _, job_id = await _document_state(pg_sessionmaker, review_state.document_id)
+    first = review_state.suggestion_ids[0]
+
+    await _reset_one(pg_sessionmaker, review_state, first)
+
+    assert await _document_state(pg_sessionmaker, review_state.document_id) == (
+        "awaiting_approval",
+        job_id,
+    )
+    assert (await _statuses(pg_sessionmaker, [first]))[first] is SuggestionStatus.PENDING
+
+
+async def test_reset_after_reanalysis_is_rejected(
+    pg_sessionmaker: async_sessionmaker[AsyncSession], review_state: ReviewState
+) -> None:
+    await _finalize(pg_sessionmaker, review_state)
+    first = review_state.suggestion_ids[0]
+    await _reanalyse(pg_sessionmaker, review_state)
+
+    with pytest.raises(InvalidDocumentStatusError):
+        await _reset_one(pg_sessionmaker, review_state, first)
+    assert (await _document_state(pg_sessionmaker, review_state.document_id))[0] == "draft"
+    assert (await _statuses(pg_sessionmaker, [first]))[first] is SuggestionStatus.ACCEPTED
+
+
+async def test_concurrent_reset_and_reanalysis_keep_document_consistent(
+    pg_sessionmaker: async_sessionmaker[AsyncSession], review_state: ReviewState
+) -> None:
+    """Кто бы ни выиграл гонку, документ не остаётся на утверждении с новым анализом."""
+    await _finalize(pg_sessionmaker, review_state)
+    _, old_job_id = await _document_state(pg_sessionmaker, review_state.document_id)
+
+    results = await asyncio.gather(
+        _reset_one(pg_sessionmaker, review_state, review_state.suggestion_ids[0]),
+        _reanalyse(pg_sessionmaker, review_state),
+        return_exceptions=True,
+    )
+    assert "reanalysed" in results, results
+    status, job_id = await _document_state(pg_sessionmaker, review_state.document_id)
+    assert job_id != old_job_id
+    assert status == "draft", results

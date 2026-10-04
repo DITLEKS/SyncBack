@@ -252,6 +252,27 @@ class DocumentRepository(IDocumentRepository):
         await self._session.flush()
         return document
 
+    async def compare_and_set_status(
+        self,
+        document_id: uuid.UUID,
+        analysis_job_id: uuid.UUID | None,
+        expected: DocumentStatusVO,
+        target: DocumentStatusVO,
+    ) -> bool:
+        stmt = (
+            update(Document)
+            .where(
+                Document.id == document_id,
+                Document.status == _status_to_orm(expected),
+                Document.current_analysis_job_id == analysis_job_id,
+            )
+            .values(status=_status_to_orm(target))
+            .returning(Document)
+        )
+        # ORM-UPDATE с RETURNING обновляет и объект документа в сессии.
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none() is not None
+
     async def set_current_job(self, document: Document, job_id: uuid.UUID | None) -> Document:
         document.current_analysis_job_id = job_id
         await self._session.flush()

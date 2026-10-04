@@ -92,6 +92,21 @@ class IDocumentRepository(ABC):
     async def update_status(self, document: Document, status: DocumentStatusVO) -> Document: ...
 
     @abstractmethod
+    async def compare_and_set_status(
+        self,
+        document_id: uuid.UUID,
+        analysis_job_id: uuid.UUID | None,
+        expected: DocumentStatusVO,
+        target: DocumentStatusVO,
+    ) -> bool:
+        """Сменить статус, только если в БД всё ещё expected и тот же текущий анализ.
+
+        False — документ успел изменить параллельный запрос (например, повторный анализ).
+        Загруженный в сессию объект документа получает новый статус.
+        """
+        ...
+
+    @abstractmethod
     async def set_current_job(self, document: Document, job_id: uuid.UUID | None) -> Document:
         """Назначить документу текущий (последний запущенный) анализ."""
         ...

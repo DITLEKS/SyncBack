@@ -142,6 +142,31 @@ class SuggestionService:
                 "Решения по правкам доступны только в статусе 'awaiting_approval'"
             )
 
+    def _assert_decisions_resettable(self, document: DocumentProtocol) -> None:
+        if not DocumentLifecycle.can_reset_review(document.status):
+            raise InvalidDocumentStatusError(
+                "Отменить решение можно только в статусах 'awaiting_approval' и 'ready'"
+            )
+
+    async def _reopen_review(self, document: DocumentProtocol) -> None:
+        """Вернуть готовый документ на утверждение, когда отменено хотя бы одно решение.
+
+        Статус меняется условным UPDATE: если параллельно запущен повторный анализ,
+        документ уже не ready или у него другой текущий анализ, и отмена решения
+        откатывается целиком.
+        """
+        if document.status != DocumentStatusVO.READY:
+            return
+        target = DocumentLifecycle.transition(document.status, DocumentStatusVO.AWAITING_APPROVAL)
+        reopened = await self._uow.documents.compare_and_set_status(
+            document.id, document.current_analysis_job_id, DocumentStatusVO.READY, target
+        )
+        if not reopened:
+            raise InvalidDocumentStatusError(
+                "Документ изменён параллельным запросом. Обновите данные и повторите."
+            )
+        self._outbox.record(document)
+
     def _assert_has_active_job(self, document: DocumentProtocol) -> uuid.UUID:
         if document.current_analysis_job_id is None:
             raise ReviewNotCompleteError("У документа отсутствует текущий результат анализа")
@@ -234,12 +259,13 @@ class SuggestionService:
     ) -> SuggestionProtocol:
         """Отменить ранее принятое или отклонённое решение — вернуть правку в PENDING.
 
-        Документ должен быть в AWAITING_APPROVAL, правка — принадлежать текущему
-        анализу и быть ACCEPTED/REJECTED.
+        Документ должен быть в AWAITING_APPROVAL или READY, правка — принадлежать
+        текущему анализу и быть ACCEPTED/REJECTED. Готовый документ при этом
+        возвращается в AWAITING_APPROVAL.
         """
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
-            self._assert_awaiting_approval(document)
+            self._assert_decisions_resettable(document)
             suggestion = await self._get_suggestion_for_document(document, suggestion_id)
 
             if suggestion.status == SuggestionStatusVO.PENDING:
@@ -247,6 +273,7 @@ class SuggestionService:
                     f"Правка {suggestion_id} уже в статусе PENDING — сбрасывать нечего"
                 )
 
+            await self._reopen_review(document)
             updated = await self._uow.suggestions.reset_status(suggestion)
             if updated is None:
                 raise SuggestionResetNotAllowedError(
@@ -277,17 +304,26 @@ class SuggestionService:
         правки обязаны быть в допустимом исходном статусе, иначе
         SuggestionAlreadyDecidedError / SuggestionResetNotAllowedError; для
         фильтра неподходящие правки просто пропускаются.
+
+        Принять или отклонить можно только в AWAITING_APPROVAL. Сброс решений
+        доступен и в READY: если хоть одна правка сброшена, документ
+        возвращается в AWAITING_APPROVAL.
         """
         if (ids is None) == (filter is None):
             raise ValueError("Укажите ровно одно из: ids или filter")
 
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
-            self._assert_awaiting_approval(document)
+            if target_status == SuggestionStatusVO.PENDING:
+                self._assert_decisions_resettable(document)
+            else:
+                self._assert_awaiting_approval(document)
             job_id = self._assert_has_active_job(document)
 
             if target_status == SuggestionStatusVO.PENDING:
                 updated_ids = await self._reset_to_pending(job_id, ids, filter)
+                if updated_ids:
+                    await self._reopen_review(document)
             else:
                 updated_ids = await self._decide_pending(
                     document_id, job_id, user_id, target_status, ids, filter

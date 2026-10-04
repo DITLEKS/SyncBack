@@ -231,6 +231,9 @@ async def patch_suggestions(
     | pending | accepted | принять          |
     | pending | rejected | отклонить        |
     | decided | pending  | сбросить решение |
+
+    Принять или отклонить можно только в awaiting_approval. Сброс доступен и в
+    ready: документ возвращается в awaiting_approval, новый статус — в document_status.
     """
     target_status = SuggestionStatusVO(payload.status)
 
@@ -348,7 +351,7 @@ async def review_save(
 
 
 # ---------------------------------------------------------------------------
-# POST /{suggestion_id}/reset — alias поверх PATCH (OPT-S4)
+# POST /{suggestion_id}/reset
 # ---------------------------------------------------------------------------
 
 
@@ -362,6 +365,8 @@ async def reset_suggestion(
     audit_log_service: AuditLogService = Depends(get_audit_log_service),
 ) -> SuggestionResponse:
     """Отменить ранее принятое/отклонённое решение — вернуть правку в PENDING.
+
+    В готовом документе это возвращает его в awaiting_approval.
 
     Для массового сброса используйте PATCH /suggestions с {"ids": [...], "status": "pending"}.
     """
