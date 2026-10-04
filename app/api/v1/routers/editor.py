@@ -1,45 +1,15 @@
-"""Агрегированный endpoint редактора документа + export + reset.
+"""Агрегированный endpoint редактора документа и сброс анализа.
 
-GET    /projects/{project_id}/documents/{document_id}/editor
-POST   /projects/{project_id}/documents/{document_id}/editor/reset
+GET  /projects/{project_id}/documents/{document_id}/editor
+POST /projects/{project_id}/documents/{document_id}/editor/reset
 
-#7: возвращаем view_mode и original_content (исходный plain_text без правок)
-#8: возвращаем sources_is_editable=False при in_progress / awaiting_approval
-
-API-1: пагинация правок в агрегате:
-  - query-параметры suggestions_limit (default=50, max=200) и suggestions_offset
-  - поле suggestions_total — полный счётчик правок документа (для пагинатора фронта)
-  - хардкод limit=200 убран; правки > suggestions_limit больше не теряются молча
-
-API-5: POST /editor/reset возвращает 200 + ResetResponse вместо 204:
-  - document_status, review_version, suggestions_reset_count
-  - фронт обновляет стор без дополнительного GET /editor
-
-C-3 (аудит): counters.total = suggestions_total (полный счётчик, а не длина страницы).
-  counters.pending/accepted/rejected берутся из агрегатного запроса O(1),
-  а не из O(n) прохода по текущей странице.
-
-REFACTOR: DELETE /editor/suggestions удалён — операция перенесена в
-  PATCH /projects/{project_id}/documents/{document_id}/suggestions
-  с телом {"filter":"pending","status":"rejected"}.
-
-PERF:
-  - get_document_content и get_original_content вызываются через asyncio.gather()
-  - reset_analysis: второй SELECT get_document убран — документ берётся из reset_result
-
-FIX-P0: убраны ссылки на DocumentStatusVO.ERROR и DocumentStatusVO.CANCELLED
-  (удалены в коммите fe39c67, 4STATUS).
-
-PR4-FIX:
-  - _safe_count_by_status теперь работает корректно — SuggestionService.count_by_document_and_status
-    добавлен в PR4. Fallback по странице убран (был маскировкой ошибки).
-  - reset_analysis(): reset_result — ResetResult dataclass; читаем reset_count и document напрямую.
-  - EditorDocumentMeta.updated_at: использует document.updated_at (с fallback на uploaded_at),
-    а не всегда uploaded_at.
+Агрегат возвращает метаданные документа, содержимое (и оригинал до правок для
+документов с результатами ревью), страницу правок с полным счётчиком
+suggestions_total, агрегатные счётчики по статусам и права действий из
+DocumentLifecycle.
 """
 
 import asyncio
-import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -65,10 +35,9 @@ from app.domain.services.analysis_job_service import AnalysisJobService
 from app.domain.services.document_service import DocumentService
 from app.domain.services.suggestion_service import SuggestionService
 from app.domain.value_objects import DocumentStatusVO, PaginationParams
+from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.user import User
-
-logger = logging.getLogger("syncscribe.api.editor")
 
 router = APIRouter(
     prefix="/projects/{project_id}/documents/{document_id}/editor",
@@ -150,53 +119,24 @@ async def get_editor_aggregate(
 
     needs_original = DocumentLifecycle.has_review_results(document.status)
 
-    async def _fetch_content():
-        try:
-            parsed = await document_service.get_document_content(document)
-            return _build_editor_content(parsed)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "Не удалось получить контент документа для редактора",
-                extra={"document_id": str(document_id)},
-            )
-            return None
-
-    async def _fetch_original():
-        if not needs_original:
-            return None
-        try:
-            orig_parsed = await document_service.get_original_content(document)
-            return _build_editor_content(orig_parsed)
-        except (AttributeError, NotImplementedError):
-            return None
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "Не удалось получить original_content документа",
-                extra={"document_id": str(document_id)},
-            )
-            return None
-
-    (
-        (editor_content, original_content_raw),
-        (suggestions_raw, suggestions_total),
-        status_counts,
-    ) = await asyncio.gather(
-        asyncio.gather(_fetch_content(), _fetch_original()),
-        suggestion_service.list_suggestions_for_document(
-            project.id,
-            document_id,
-            PaginationParams(limit=suggestions_limit, offset=suggestions_offset),
-        ),
-        _safe_count_by_status(suggestion_service, project.id, document_id),
+    # Содержимое читается из файлового хранилища, поэтому оба файла можно
+    # запрашивать параллельно. Запросы к БД ниже идут последовательно: у них одна
+    # AsyncSession на запрос, а SQLAlchemy не допускает её конкурентного использования.
+    editor_content, original_content_raw = await asyncio.gather(
+        _editor_content(document_service, document),
+        _original_content(document_service, document) if needs_original else _none(),
     )
+    suggestions_raw, suggestions_total = await suggestion_service.list_suggestions_for_document(
+        project.id,
+        document_id,
+        PaginationParams(limit=suggestions_limit, offset=suggestions_offset),
+    )
+    status_counts = await suggestion_service.count_by_document_and_status(project.id, document_id)
 
     original_content = original_content_raw if needs_original else editor_content
 
     suggestions = [SuggestionResponse.model_validate(s) for s in suggestions_raw]
 
-    # PR4-FIX: счётчики всегда из агрегатного запроса O(1).
-    # Fallback по текущей странице убран — он маскировал отсутствие метода
-    # и давал некорректные значения при пагинации.
     pending = status_counts.get("pending", 0)
     accepted = status_counts.get("accepted", 0)
     rejected = status_counts.get("rejected", 0)
@@ -227,23 +167,16 @@ async def get_editor_aggregate(
     )
 
 
-async def _safe_count_by_status(
-    suggestion_service: SuggestionService,
-    project_id: uuid.UUID,
-    document_id: uuid.UUID,
-) -> dict:
-    """PR4-FIX: SuggestionService.count_by_document_and_status() теперь существует.
-    AttributeError больше не возникает; except-ветка оставлена как защитный барьер
-    на случай неожиданных исключений при запросе к БД.
-    """
-    try:
-        return await suggestion_service.count_by_document_and_status(project_id, document_id)
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "Не удалось получить агрегатные счётчики правок",
-            extra={"document_id": str(document_id)},
-        )
-        return {}
+async def _editor_content(document_service: DocumentService, document: Document) -> EditorContent:
+    return _build_editor_content(await document_service.get_document_content(document))
+
+
+async def _original_content(document_service: DocumentService, document: Document) -> EditorContent:
+    return _build_editor_content(await document_service.get_original_content(document))
+
+
+async def _none() -> None:
+    return None
 
 
 @router.post(

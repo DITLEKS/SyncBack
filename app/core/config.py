@@ -43,6 +43,14 @@ class Settings(BaseSettings):
     login_max_attempts: int = 5
     login_lockout_seconds: int = 300
 
+    # Пул соединений API-процесса. Пул на каждый процесс gunicorn, поэтому
+    # суммарное число соединений = workers × (pool_size + max_overflow);
+    # оно должно укладываться в max_connections PostgreSQL.
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_pool_timeout_seconds: int = 30
+    db_pool_recycle_seconds: int = 1800
+
     # Хранилище счётчиков slowapi. memory:// считает лимиты отдельно в каждом
     # процессе gunicorn, поэтому вне локальной разработки нужен Redis
     # (например, redis://redis:6379/1 — отдельная база от очереди и SSE).

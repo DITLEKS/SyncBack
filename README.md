@@ -121,7 +121,7 @@ CI (`.github/workflows/ci.yml`) запускает оба набора авто�
 
 | Группа | Переменные | Назначение |
 |---|---|---|
-| БД | `DATABASE_URL` | Строка подключения PostgreSQL (async, `postgresql+asyncpg://`) |
+| БД | `DATABASE_URL`, `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT_SECONDS`, `DB_POOL_RECYCLE_SECONDS` | Строка подключения PostgreSQL (async, `postgresql+asyncpg://`) и пул соединений API-процесса |
 | Redis | `REDIS_URL` | Брокер и result backend Celery, счётчики блокировки входа, refresh-токены |
 | Rate limit | `RATE_LIMIT_STORAGE_URI` | Хранилище счётчиков slowapi: `memory://` для одного процесса, Redis при нескольких воркерах |
 | Прокси | `TRUSTED_PROXY_HOSTS` | Адреса reverse proxy, чьим `X-Forwarded-For` можно верить; пусто — заголовок игнорируется, `*` запрещено |
