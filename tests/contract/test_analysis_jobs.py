@@ -251,6 +251,20 @@ async def test_bulk_start_asks_confirmation_for_ready_documents(
     ]
     assert (body["started"], body["skipped"], body["confirmation_required"]) == (0, 4, 1)
 
+    # Запуск и пропуск в одном запросе, в заданном порядке: после отката на
+    # пропущенном документе уже созданная задача всё равно попадает в ответ.
+    second_draft = await upload_document(client, headers, project_id, filename="draft2.txt")
+    response = await client.post(
+        url, json={"document_ids": [second_draft["id"], ready["id"]]}, headers=headers
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert [(r["document_id"], r["skip_reason"]) for r in body["results"]] == [
+        (second_draft["id"], None),
+        (ready["id"], "confirmation_required"),
+    ]
+    assert body["results"][0]["job"]["status"] == "dispatched"
+
     # После подтверждения готовый документ уходит на повторный анализ.
     response = await client.post(
         url, json={"document_ids": [ready["id"]], "force": True}, headers=headers
@@ -258,7 +272,7 @@ async def test_bulk_start_asks_confirmation_for_ready_documents(
     assert response.status_code == 201, response.text
     body = response.json()
     assert (body["started"], body["skipped"], body["confirmation_required"]) == (1, 0, 0)
-    assert len(queue.enqueued) == 2
+    assert len(queue.enqueued) == 3
     assert (await _document_state(sessionmaker, ready["id"]))[0] == "in_progress"
 
 

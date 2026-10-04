@@ -51,6 +51,7 @@ class BulkJobOutcome:
 
     document_id: uuid.UUID
     job: AnalysisJob | None = None
+    job_id: uuid.UUID | None = None
     skip_reason: BulkSkipReason | None = None
     message: str | None = None
 
@@ -320,21 +321,19 @@ class AnalysisJobService:
                 # Ставим в очередь сразу, а не после цикла: задача не должна
                 # висеть в pending, пока создаются задачи для остальных документов.
                 job = await self.dispatch_job(job)
-                outcomes.append(BulkJobOutcome(document_id=document_id, job=job))
+                outcomes.append(BulkJobOutcome(document_id=document_id, job=job, job_id=job.id))
         return await self._reload_jobs(outcomes)
 
     async def _reload_jobs(self, outcomes: list[BulkJobOutcome]) -> list[BulkJobOutcome]:
         # Откат транзакции на пропущенном документе помечает все объекты сессии
-        # устаревшими, включая уже созданные задачи; без перечитывания их поля
-        # пришлось бы лениво догружать вне async-контекста.
-        job_ids = [o.job.id for o in outcomes if o.job is not None]
+        # устаревшими, включая уже созданные задачи; даже чтение job.id тогда
+        # полезло бы в БД вне async-контекста. Поэтому id запоминается сразу.
+        job_ids = [o.job_id for o in outcomes if o.job_id is not None]
         if not job_ids:
             return outcomes
         async with self._uow:
             jobs = {job.id: job for job in await self._uow.jobs.list_by_ids(job_ids)}
-        return [
-            replace(o, job=jobs.get(o.job.id, o.job)) if o.job is not None else o for o in outcomes
-        ]
+        return [replace(o, job=jobs[o.job_id]) if o.job_id in jobs else o for o in outcomes]
 
     # ------------------------------------------------------------------
     # Internal helpers
