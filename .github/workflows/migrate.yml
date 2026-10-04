@@ -1,8 +1,11 @@
 name: Migrate
 
-# Запускается только после успешного прогона CI на main.
-# Для деплоя на другие окружения — добавить отдельные jobs с environment.
+# Миграции production-БД. Job привязан к GitHub Environment «production»:
+# в настройках репозитория (Settings → Environments → production) должны быть
+# включены required reviewers — тогда каждый запуск ждёт ручного подтверждения.
+# Запускается при изменении миграций/моделей в main или вручную.
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:

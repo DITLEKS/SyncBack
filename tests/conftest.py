@@ -1,18 +1,23 @@
-"""
-P0-11: Глобальные fixtures для pytest.
+"""Глобальные fixtures для pytest."""
 
-TODO перед запуском:
-  - Заполнить TEST_DATABASE_URL в .env.test
-  - pip install httpx pytest-asyncio
-"""
+import os
 
-import pytest
-import pytest_asyncio
-from httpx import AsyncClient, ASGITransport
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+# Счётчики slowapi в тестах держим в памяти процесса независимо от .env:
+# реального Redis в unit- и контрактных тестах нет. Переменная окружения
+# имеет приоритет над .env и должна быть задана до импорта app.core.limiter.
+os.environ["RATE_LIMIT_STORAGE_URI"] = "memory://"
 
-from app.main import app
-from app.infrastructure.db.base import Base
+import pytest  # noqa: E402
+import pytest_asyncio  # noqa: E402
+from httpx import ASGITransport, AsyncClient  # noqa: E402
+from sqlalchemy.ext.asyncio import (  # noqa: E402
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+
+from app.infrastructure.db.base import Base  # noqa: E402
+from app.main import app  # noqa: E402
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 

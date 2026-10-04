@@ -5,7 +5,7 @@
 from functools import lru_cache
 from typing import Annotated, Literal
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -22,8 +22,14 @@ class Settings(BaseSettings):
     redis_sse_channel: str = "syncscribe:sse"
 
     minio_endpoint: str
-    minio_root_user: str
-    minio_root_password: str
+    # Приложению нужен сервисный пользователь с правами только на свой бакет.
+    # Старые имена переменных (MINIO_ROOT_*) принимаются для совместимости.
+    minio_access_key: str = Field(
+        validation_alias=AliasChoices("MINIO_ACCESS_KEY", "MINIO_ROOT_USER")
+    )
+    minio_secret_key: str = Field(
+        validation_alias=AliasChoices("MINIO_SECRET_KEY", "MINIO_ROOT_PASSWORD")
+    )
     minio_bucket: str
     minio_secure: bool = False
     minio_presigned_url_expire_seconds: int = 300
@@ -36,6 +42,11 @@ class Settings(BaseSettings):
 
     login_max_attempts: int = 5
     login_lockout_seconds: int = 300
+
+    # Хранилище счётчиков slowapi. memory:// считает лимиты отдельно в каждом
+    # процессе gunicorn, поэтому вне локальной разработки нужен Redis
+    # (например, redis://redis:6379/1 — отдельная база от очереди и SSE).
+    rate_limit_storage_uri: str = "memory://"
 
     max_upload_size_mb: int = 50
 
@@ -78,6 +89,24 @@ class Settings(BaseSettings):
             )
         if not v:
             raise ValueError("cors_allowed_origins не может быть пустым")
+        return v
+
+    # Адреса reverse proxy, чьим заголовкам X-Forwarded-For/-Proto можно верить.
+    # Пусто — заголовки игнорируются, клиентом считается прямое соединение.
+    trusted_proxy_hosts: Annotated[list[str], NoDecode] = []
+
+    @field_validator("trusted_proxy_hosts", mode="before")
+    @classmethod
+    def _parse_trusted_proxies(cls, v: object) -> list[str]:
+        if isinstance(v, str):
+            v = [host.strip() for host in v.split(",") if host.strip()]
+        if not isinstance(v, list):
+            raise ValueError("trusted_proxy_hosts должен быть списком адресов")
+        if "*" in v:
+            raise ValueError(
+                "trusted_proxy_hosts не может содержать «*»: тогда любой клиент "
+                "подменит свой адрес заголовком X-Forwarded-For"
+            )
         return v
 
     # M-3: jwt_secret обязан быть не менее 32 символов.

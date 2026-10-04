@@ -42,9 +42,11 @@ cp .env.example .env
 # при необходимости поправьте LLM_ENDPOINT/LLM_API_KEY — по умолчанию LLM_PROVIDER=stub,
 # реальный внешний вызов не требуется для локальной разработки
 
-# ВАЖНО (Windows): убедитесь, что порт 5432 не занят другим PostgreSQL-сервисом
-# (`netstat -ano | findstr :5432`) — конфликт приводит к asyncpg.InvalidPasswordError при
-# подключении с хоста.
+# Базовый compose не публикует порты Postgres/Redis/MinIO на хост.
+# Если нужен доступ к ним с машины разработчика — добавьте docker-compose.dev.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+# ВАЖНО (Windows): при этом порт 5432 не должен быть занят другим PostgreSQL —
+# конфликт приводит к asyncpg.InvalidPasswordError при подключении с хоста.
 
 docker compose up --build
 docker compose exec backend alembic upgrade head
@@ -120,9 +122,11 @@ CI (`.github/workflows/ci.yml`) запускает оба набора авто�
 | Группа | Переменные | Назначение |
 |---|---|---|
 | БД | `DATABASE_URL` | Строка подключения PostgreSQL (async, `postgresql+asyncpg://`) |
-| Redis | `REDIS_URL` | Брокер и result backend Celery, кэш rate limiting |
+| Redis | `REDIS_URL` | Брокер и result backend Celery, счётчики блокировки входа, refresh-токены |
+| Rate limit | `RATE_LIMIT_STORAGE_URI` | Хранилище счётчиков slowapi: `memory://` для одного процесса, Redis при нескольких воркерах |
+| Прокси | `TRUSTED_PROXY_HOSTS` | Адреса reverse proxy, чьим `X-Forwarded-For` можно верить; пусто — заголовок игнорируется, `*` запрещено |
 | Redis SSE | `REDIS_SSE_CHANNEL` | Канал Redis Pub/Sub для SSE (опционально; при отсутствии — in-memory fallback) |
-| Minio | `MINIO_ENDPOINT`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `MINIO_BUCKET`, `MINIO_SECURE`, `MINIO_PRESIGNED_URL_EXPIRE_SECONDS` | Файловое хранилище документов и источников |
+| Minio | `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET`, `MINIO_SECURE`, `MINIO_PRESIGNED_URL_EXPIRE_SECONDS` | Файловое хранилище. Приложение ходит под сервисным пользователем с правами на один бакет; `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` нужны только контейнерам MinIO и minio-init |
 | JWT | `JWT_SECRET`, `JWT_ALGORITHM`, `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | Подпись и срок жизни токенов доступа. **`JWT_SECRET` должен быть ≥ 32 байт** для HS256 |
 | Логин | `LOGIN_MAX_ATTEMPTS`, `LOGIN_LOCKOUT_SECONDS` | Защита от брутфорса (счётчик в Redis) |
 | Загрузка | `MAX_UPLOAD_SIZE_MB` | Лимит размера файла (документ/источник) |

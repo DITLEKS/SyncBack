@@ -43,8 +43,10 @@ class InMemoryFileStorage:
     async def download(self, key: str) -> bytes:
         return self.files[key]
 
-    async def get_presigned_url(self, key: str, expires_in: int) -> str:
-        return f"http://storage.test/{key}?expires={expires_in}"
+    async def get_presigned_url(
+        self, key: str, expires_in: int, download_name: str | None = None
+    ) -> str:
+        return f"http://storage.test/{key}?expires={expires_in}&name={download_name}"
 
     async def delete(self, key: str) -> None:
         self.files.pop(key, None)

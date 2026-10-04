@@ -170,7 +170,7 @@ jobs:
       - name: Start MinIO
         run: |
           docker run -d --name minio -p 9000:9000 -p 9001:9001 \
-            -e MINIO_ROOT_USER=syncscribe -e MINIO_ROOT_PASSWORD=syncscribe123 \
+            -e MINIO_ROOT_USER=syncscribe-admin -e MINIO_ROOT_PASSWORD=change-me-minio-root \
             minio/minio server /data --console-address ":9001"
           for i in $(seq 1 20); do
             curl -sf http://localhost:9000/minio/health/live && break
@@ -180,9 +180,11 @@ jobs:
       - name: Create MinIO bucket
         run: |
           docker run --rm --network host minio/mc:latest sh -c "
-            mc alias set local http://localhost:9000 syncscribe syncscribe123 &&
+            mc alias set local http://localhost:9000 syncscribe-admin change-me-minio-root &&
             mc mb -p local/syncscribe-documents &&
-            mc anonymous set none local/syncscribe-documents
+            mc anonymous set none local/syncscribe-documents &&
+            mc admin user add local syncscribe-app change-me-minio-app-secret &&
+            mc admin policy attach local readwrite --user syncscribe-app
           "
 
       - name: Prepare test environment
@@ -191,6 +193,7 @@ jobs:
           sed -i 's/POSTGRES_HOST=postgres/POSTGRES_HOST=localhost/' .env
           sed -i 's#DATABASE_URL=postgresql+asyncpg://syncscribe:syncscribe@postgres:5432/syncscribe#DATABASE_URL=postgresql+asyncpg://syncscribe:syncscribe@localhost:5432/syncscribe#' .env
           sed -i 's#REDIS_URL=redis://redis:6379/0#REDIS_URL=redis://localhost:6379/0#' .env
+          sed -i 's#RATE_LIMIT_STORAGE_URI=redis://redis:6379/1#RATE_LIMIT_STORAGE_URI=redis://localhost:6379/1#' .env
           sed -i 's/MINIO_ENDPOINT=minio:9000/MINIO_ENDPOINT=localhost:9000/' .env
 
       - name: Install dependencies

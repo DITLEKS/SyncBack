@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 import uuid
 from collections import defaultdict
-from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from app.domain.exceptions import (
@@ -25,6 +24,7 @@ from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.lifecycle import DocumentLifecycle
 from app.domain.policies import UploadLimits
 from app.domain.source_url import SourceUrl
+from app.domain.storage_keys import source_storage_key
 from app.domain.value_objects import SourceScopeVO, SourceTypeVO
 
 if TYPE_CHECKING:
@@ -33,12 +33,6 @@ if TYPE_CHECKING:
     from app.infrastructure.db.models.source import Source
 
 logger = logging.getLogger("syncscribe.sources")
-
-
-def _storage_filename(filename: str) -> str:
-    """Имя файла для ключа в хранилище: без каталогов и служебных имён."""
-    name = PurePosixPath(filename.replace("\\", "/")).name
-    return name if name not in {"", ".", ".."} else "upload"
 
 
 class SourceService:
@@ -175,7 +169,7 @@ class SourceService:
             raise FileTooLargeError(too_large_message)
 
         source_id = uuid.uuid4()
-        storage_key = f"projects/{project.id}/sources/{source_id}/{_storage_filename(filename)}"
+        storage_key = source_storage_key(project.id, source_id, filename)
         uploaded = False
         try:
             async with self._uow:
