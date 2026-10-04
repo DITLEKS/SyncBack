@@ -206,7 +206,7 @@ GET    /documents/attention                                        (топ-4 д�
 GET    /documents/recent                                           (5 последних открытых документов текущего пользователя)
 POST   /projects/{project_id}/documents/{document_id}/open        (трекинг открытия документа; 204 No Content)
 
-GET    /system/llm-health                                          (диагностика провайдера)
+GET    /system/llm-health                                          (диагностика провайдера, только admin)
 GET    /health                                                      (без префикса /api/v1)
 ```
 

@@ -11,9 +11,12 @@ from typing import Any, Protocol
 
 
 class IPasswordHasher(Protocol):
-    def hash(self, plain_password: str) -> str: ...
+    """Хэширование паролей. Методы асинхронные: алгоритм намеренно медленный
+    (сотни миллисекунд), и реализация не должна блокировать event loop."""
 
-    def verify(self, plain_password: str, password_hash: str) -> bool: ...
+    async def hash(self, plain_password: str) -> str: ...
+
+    async def verify(self, plain_password: str, password_hash: str) -> bool: ...
 
 
 class ITokenIssuer(Protocol):

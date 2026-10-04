@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends
 
-from app.api.deps import get_current_user
+from app.api.deps import require_admin
 from app.core.config import Settings, get_settings
 from app.core.dependencies import get_llm_client_instance
 from app.infrastructure.db.models.enums import DocumentFormat
@@ -18,10 +18,11 @@ _UNSUPPORTED_FORMATS = ["doc"]
 
 @router.get("/llm-health")
 async def llm_health(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
     llm_client=Depends(get_llm_client_instance),
     settings: Settings = Depends(get_settings),
 ) -> dict:
+    """Диагностика LLM-провайдера: только для администратора, раскрывает конфигурацию."""
     is_healthy = await llm_client.health_check()
     return {"provider": settings.llm_provider, "healthy": is_healthy}
 
