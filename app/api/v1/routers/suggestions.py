@@ -303,11 +303,14 @@ async def review_save(
 
     accepted_ids: list[uuid.UUID] = []
     rejected_ids: list[uuid.UUID] = []
+    edited_texts: dict[uuid.UUID, str] = {}
     audit_decisions: list[tuple[uuid.UUID, AuditActionVO]] = []
     for d in payload.decisions:
         if d.decision == "accepted":
             accepted_ids.append(d.suggestion_id)
             audit_decisions.append((d.suggestion_id, AuditActionVO.ACCEPT))
+            if d.edited_text is not None:
+                edited_texts[d.suggestion_id] = d.edited_text
         else:
             rejected_ids.append(d.suggestion_id)
             audit_decisions.append((d.suggestion_id, AuditActionVO.REJECT))
@@ -321,6 +324,7 @@ async def review_save(
             accepted_ids=tuple(accepted_ids),
             rejected_ids=tuple(rejected_ids),
             finalize=payload.finalize,
+            edited_texts=edited_texts,
         )
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
