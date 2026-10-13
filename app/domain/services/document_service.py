@@ -287,6 +287,15 @@ class DocumentService:
         )
         return url, expires_in
 
+    async def get_original_file(self, document: Document) -> bytes:
+        """Байты исходного файла для просмотра в браузере (режим «Оригинал»).
+
+        Выбор ключа тот же, что у get_original_content: original_storage_key, если он
+        когда-нибудь начнёт отличаться от storage_key.
+        """
+        original_key: str | None = getattr(document, "original_storage_key", None)
+        return await self._storage.download(original_key or document.storage_key)
+
     async def get_document_content(self, document: Document) -> ParsedDocument:
         raw_bytes = await self._storage.download(document.storage_key)
         return self._parser_registry.parse_by_filename(document.storage_key, raw_bytes)

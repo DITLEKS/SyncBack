@@ -23,6 +23,8 @@ from tests.contract.conftest import (
 
 pytestmark = pytest.mark.asyncio
 
+_DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
 
 def _docx_bytes(*paragraphs: str) -> bytes:
     document = DocxDocument()
@@ -93,6 +95,40 @@ async def test_document_content_and_download_write_audit(
     assert str(entries[0].document_id) == document["id"]
 
 
+async def test_document_file_streams_original_bytes(
+    client: AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """/file отдаёт исходник как есть: фронт рендерит его в режиме «Оригинал»."""
+    headers = await register_and_login(client)
+    project_id = await create_project(client, headers)
+    original = _docx_bytes("Заголовок", "Абзац с текстом")
+    document = await upload_document(
+        client,
+        headers,
+        project_id,
+        filename="Спецификация.docx",
+        content=original,
+        content_type=_DOCX_MEDIA_TYPE,
+    )
+    url = f"/api/v1/projects/{project_id}/documents/{document['id']}/file"
+
+    response = await client.get(url, headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith(_DOCX_MEDIA_TYPE)
+    disposition = response.headers["content-disposition"]
+    assert disposition.startswith("inline; ")
+    assert "filename*=UTF-8''" + quote("Спецификация.docx", safe="") in disposition
+    assert response.content == original
+
+    async with sessionmaker() as session:
+        entries = (await session.execute(select(AuditLog))).scalars().all()
+    assert [e.action for e in entries] == ["download"]
+
+    # Чужой проект — 404, как и у остальных эндпоинтов документов.
+    other_headers = await register_and_login(client, email="other@example.com")
+    assert (await client.get(url, headers=other_headers)).status_code == 404
+
+
 async def test_export_in_source_format_only(
     client: AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -104,7 +140,7 @@ async def test_export_in_source_format_only(
         project_id,
         filename="report.docx",
         content=_docx_bytes("Первый абзац", "Второй абзац"),
-        content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        content_type=_DOCX_MEDIA_TYPE,
     )
     base = f"/api/v1/projects/{project_id}/documents/{document['id']}/export"
 

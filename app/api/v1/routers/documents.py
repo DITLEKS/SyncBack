@@ -38,7 +38,7 @@ from app.domain.exceptions import (
     UnsupportedFileFormatError,
 )
 from app.domain.services.audit_log_service import AuditLogService
-from app.domain.services.document_export_service import DocumentExportService
+from app.domain.services.document_export_service import DocumentExportService, media_type_for
 from app.domain.services.document_service import DocumentService
 from app.domain.services.source_service import SourceService
 from app.domain.value_objects import DocumentFormatVO, DocumentStatusVO, PaginationParams
@@ -228,6 +228,51 @@ async def get_download_url(
     url, expires_in = await document_service.get_download_url(document)
     await _log_download(audit_log_service, current_user.id, document.id)
     return DocumentDownloadResponse(download_url=url, expires_in=expires_in)
+
+
+@router.get(
+    "/{document_id}/file",
+    summary="Исходный файл документа для просмотра в браузере",
+    response_class=Response,
+    responses={200: {"content": {"application/octet-stream": {}}}},
+)
+async def get_document_file(
+    document_id: uuid.UUID,
+    project: Project = Depends(get_allowed_project),
+    current_user: User = Depends(get_current_user),
+    document_service: DocumentService = Depends(get_document_service),
+    audit_log_service: AuditLogService = Depends(get_audit_log_service),
+) -> Response:
+    """Байты исходника без правок, под обычной авторизацией API.
+
+    В отличие от /download, не требует доступа браузера к хранилищу напрямую:
+    фронт рендерит .docx в режиме «Оригинал» из этого ответа.
+    """
+    try:
+        document = await document_service.get_document(project.id, document_id)
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    try:
+        raw_bytes = await document_service.get_original_file(document)
+    except OSError as exc:
+        logger.error(
+            "Storage error while fetching document file",
+            extra={"document_id": str(document_id)},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Ошибка хранилища: не удалось получить файл документа",
+        ) from exc
+    await _log_download(audit_log_service, current_user.id, document.id)
+    return Response(
+        content=raw_bytes,
+        media_type=media_type_for(DocumentFormatVO(document.format)),
+        headers={
+            "Content-Disposition": content_disposition(document.name, inline=True),
+            "Cache-Control": "private, max-age=60",
+        },
+    )
 
 
 @router.get("/{document_id}/export", summary="Экспорт документа с принятыми правками")

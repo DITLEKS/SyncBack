@@ -36,6 +36,11 @@ _MEDIA_TYPES: dict[DocumentFormatVO, str] = {
 _EXPORT_PAGE_SIZE: int = 500
 
 
+def media_type_for(document_format: DocumentFormatVO) -> str:
+    """MIME-тип файла документа по его формату (экспорт и отдача исходника)."""
+    return _MEDIA_TYPES.get(document_format, "application/octet-stream")
+
+
 class DocumentExportService:
     def __init__(
         self,
@@ -70,8 +75,7 @@ class DocumentExportService:
                 f"в {source_format.value}, запрошен {target_format.value}"
             )
         exported_bytes = await self._apply_accepted_changes(document)
-        media_type = _MEDIA_TYPES.get(source_format, "application/octet-stream")
-        return exported_bytes, document.name, media_type
+        return exported_bytes, document.name, media_type_for(source_format)
 
     async def export_and_save(self, document: Document) -> None:
         """Применить правки, сохранить результат в хранилище и записать exported_storage_key.
@@ -80,7 +84,7 @@ class DocumentExportService:
         загрузка в хранилище, и держать транзакцию открытой на время I/O нельзя.
         """
         exported_bytes = await self._apply_accepted_changes(document)
-        media_type = _MEDIA_TYPES.get(DocumentFormatVO(document.format), "application/octet-stream")
+        media_type = media_type_for(DocumentFormatVO(document.format))
 
         export_key = f"{document.storage_key}.exported"
         await self._storage.upload(export_key, UploadContent.from_bytes(exported_bytes, media_type))
