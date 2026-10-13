@@ -18,6 +18,12 @@ class SuggestionResponse(BaseModel):
     # У add нет исходного текста, у delete — предлагаемого.
     original_text: str | None = None
     suggested_text: str | None = None
+    edited_text: str | None = Field(
+        default=None,
+        description=(
+            "Текст, которым пользователь заменил suggested_text при принятии; None — без правки"
+        ),
+    )
     rationale: str | None = Field(default=None, description="Обоснование правки от модели")
     confidence_score: float | None = Field(default=None, description="Уверенность модели, 0–1")
     block_id: str | None = None

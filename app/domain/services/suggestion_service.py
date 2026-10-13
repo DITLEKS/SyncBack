@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
@@ -214,12 +214,13 @@ class SuggestionService:
             suggestions = await self._uow.suggestions.list_by_analysis_job_and_status(
                 document.current_analysis_job_id, SuggestionStatusVO.ACCEPTED
             )
+        # Ручная правка пользователя (edited_text) важнее текста модели.
         return [
             AppliedChange(
                 section_ref=s.section_ref,
                 change_type=s.change_type.value,
                 old_text=s.original_text,
-                new_text=s.suggested_text,
+                new_text=getattr(s, "edited_text", None) or s.suggested_text,
             )
             for s in suggestions
         ]
@@ -425,12 +426,15 @@ class SuggestionService:
         rejected_ids: tuple[uuid.UUID, ...] = (),
         finalize: bool = True,
         export_service: DocumentExportService | None = None,
+        edited_texts: Mapping[uuid.UUID, str] | None = None,
     ) -> ReviewSaveResult:
         """Сохранить решения ревью под одним оптимистичным локом (review_version).
 
         При finalize=True документ переводится в READY, если не осталось
-        pending-правок.
+        pending-правок. edited_texts — ручные правки текста для принимаемых
+        предложений (suggestion_id → текст); для id вне accepted_ids игнорируются.
         """
+        edits = dict(edited_texts or {})
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             self._assert_awaiting_approval(document)
@@ -442,6 +446,7 @@ class SuggestionService:
                         suggestion_id=sid,
                         status=SuggestionStatusVO.ACCEPTED,
                         user_id=user_id,
+                        edited_text=edits.get(sid),
                     )
                     for sid in accepted_ids
                 ],

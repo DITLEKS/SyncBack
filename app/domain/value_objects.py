@@ -150,6 +150,8 @@ class SuggestionDecision:
     suggestion_id: uuid.UUID
     status: SuggestionStatusVO
     user_id: uuid.UUID
+    # Ручная правка текста принятого предложения; None — использовать suggested_text.
+    edited_text: str | None = None
 
 
 @dataclass(frozen=True)

@@ -135,12 +135,13 @@ class DocumentExportService:
             )
             if not page:
                 break
+            # Ручная правка пользователя (edited_text) важнее текста модели.
             changes.extend(
                 AppliedChange(
                     section_ref=s.section_ref,
                     change_type=s.change_type.value,
                     old_text=s.original_text,
-                    new_text=s.suggested_text,
+                    new_text=getattr(s, "edited_text", None) or s.suggested_text,
                 )
                 for s in page
             )
