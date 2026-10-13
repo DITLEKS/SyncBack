@@ -68,6 +68,7 @@ def _make_suggestion(
     s.analysis_job_id = job_id
     s.document_id = document_id
     s.status = status
+    s.edited_text = None
     return s
 
 
@@ -117,6 +118,7 @@ class FakeSuggestionRepo:
                 and s.status == SuggestionStatusVO.PENDING
             ):
                 s.status = decision.status
+                s.edited_text = decision.edited_text
                 updated += 1
         return updated
 
@@ -309,3 +311,20 @@ async def test_sequential_saves_increment_version(service, uow, ids, document):
         finalize=False,
     )
     assert document.review_version == 2
+
+
+@pytest.mark.anyio
+async def test_edited_text_reaches_repository_for_accepted_only(service, uow, ids):
+    """edited_text привязывается к принятому решению; для отклонённого игнорируется."""
+    await service.atomic_review_save(
+        project_id=ids["project"],
+        document_id=ids["document"],
+        user_id=ids["user"],
+        review_version=0,
+        accepted_ids=(ids["s1"],),
+        rejected_ids=(ids["s2"],),
+        finalize=False,
+        edited_texts={ids["s1"]: "новый текст", ids["s2"]: "игнор"},
+    )
+    assert uow.suggestions._store[ids["s1"]].edited_text == "новый текст"
+    assert uow.suggestions._store[ids["s2"]].edited_text is None
