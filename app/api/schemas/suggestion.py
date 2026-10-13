@@ -21,8 +21,7 @@ class SuggestionResponse(BaseModel):
     edited_text: str | None = Field(
         default=None,
         description=(
-            "Текст, которым пользователь заменил suggested_text при принятии; "
-            "None — без правки"
+            "Текст, которым пользователь заменил suggested_text при принятии; None — без правки"
         ),
     )
     rationale: str | None = Field(default=None, description="Обоснование правки от модели")
