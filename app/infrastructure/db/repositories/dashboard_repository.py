@@ -226,13 +226,18 @@ class DashboardRepository(IDashboardQueryService):
         ]
 
     async def upsert_open(self, user_id: uuid.UUID, document_id: uuid.UUID) -> None:
-        """Отметить открытие документа. Commit обязателен: без него «Недавние документы» пусты."""
+        """Отметить открытие документа.
+
+        Уникальность пары (user_id, document_id) обеспечивает составной PK, отдельного
+        именованного ограничения у таблицы нет — поэтому цель конфликта задаётся колонками.
+        Commit обязателен: без него «Недавние документы» пусты.
+        """
         now = datetime.now(tz=UTC)
         stmt = (
             pg_insert(DocumentOpen)
             .values(user_id=user_id, document_id=document_id, last_opened_at=now)
             .on_conflict_do_update(
-                constraint="uq_document_opens_user_document",
+                index_elements=[DocumentOpen.user_id, DocumentOpen.document_id],
                 set_={"last_opened_at": now},
             )
         )
