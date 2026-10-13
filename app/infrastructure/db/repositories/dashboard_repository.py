@@ -8,6 +8,9 @@ DashboardRepository — SQL-агрегаты для GET /dashboard.
   get_attention_documents— Топ-N AWAITING_APPROVAL по pending_suggestions DESC
   get_recent_documents   — 5 последних открытых + счётчики правок
   upsert_open            — ON CONFLICT DO UPDATE last_opened_at
+
+Сессия репозитория создаётся напрямую через get_db_session, вне UoW: никто снаружи
+не делает commit, поэтому пишущие методы (upsert_*) фиксируют транзакцию сами.
 """
 
 from __future__ import annotations
@@ -32,25 +35,29 @@ class DashboardRepository(IDashboardQueryService):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    # ── базовая статистика ──────────────────────────────────────────────────────
+    # ── базовая статистика ──────────────────────────────────────────────────────────
 
     async def get_stats(self, owner_id: uuid.UUID) -> dict:
-        q = select(
-            func.count().label("total"),
-            func.count()
-            .filter(Document.status == DocumentStatus.AWAITING_APPROVAL)
-            .label("awaiting"),
-            func.count().filter(Document.status == DocumentStatus.READY).label("ready"),
-        ).select_from(
+        # Считаем по колонкам подзапроса. Ссылка на Document.status здесь добавила бы
+        # таблицу documents в FROM вторым источником (CROSS JOIN) и умножила все счётчики
+        # на число документов.
+        owned = (
             select(Document.status)
             .join(Project, Document.project_id == Project.id)
             .where(Project.owner_id == owner_id)
             .subquery()
         )
+        q = select(
+            func.count().label("total"),
+            func.count()
+            .filter(owned.c.status == DocumentStatus.AWAITING_APPROVAL)
+            .label("awaiting"),
+            func.count().filter(owned.c.status == DocumentStatus.READY).label("ready"),
+        ).select_from(owned)
         row = (await self._session.execute(q)).one()
         return {"total": row.total, "awaiting": row.awaiting, "ready": row.ready}
 
-    # ── снэпшоты / тренды ─────────────────────────────────────────────────────
+    # ── снэпшоты / тренды ─────────────────────────────────────────────────────────
 
     async def get_trends(self, owner_id: uuid.UUID, days: int = 7) -> list[dict]:
         """SELECT снэпшоты за последние `days` дней (today-days+1 … today)."""
@@ -88,7 +95,11 @@ class DashboardRepository(IDashboardQueryService):
         awaiting_count: int,
         relevance_percent: float,
     ) -> None:
-        """ON CONFLICT (owner_id, snapshot_date) DO UPDATE."""
+        """ON CONFLICT (owner_id, snapshot_date) DO UPDATE.
+
+        Фиксируем транзакцию здесь: сессия дашборда вне UoW, без commit снэпшот
+        откатывается при закрытии сессии и тренды не накапливаются.
+        """
         stmt = (
             pg_insert(DashboardSnapshot)
             .values(
@@ -108,9 +119,9 @@ class DashboardRepository(IDashboardQueryService):
             )
         )
         await self._session.execute(stmt)
-        await self._session.flush()
+        await self._session.commit()
 
-    # ── внимание / последние документы ──────────────────────────────────────
+    # ── внимание / последние документы ──────────────────────────────────────────────────────
 
     async def get_attention_documents(self, owner_id: uuid.UUID, limit: int = 4) -> list[dict]:
         q = (
@@ -215,6 +226,7 @@ class DashboardRepository(IDashboardQueryService):
         ]
 
     async def upsert_open(self, user_id: uuid.UUID, document_id: uuid.UUID) -> None:
+        """Отметить открытие документа. Commit обязателен: без него «Недавние документы» пусты."""
         now = datetime.now(tz=UTC)
         stmt = (
             pg_insert(DocumentOpen)
@@ -225,4 +237,4 @@ class DashboardRepository(IDashboardQueryService):
             )
         )
         await self._session.execute(stmt)
-        await self._session.flush()
+        await self._session.commit()
