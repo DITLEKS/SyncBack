@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, case, delete, func, literal, select, update
+from sqlalchemy import CursorResult, case, delete, func, literal, null, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import SuggestionAlreadyDecidedError
@@ -217,6 +217,9 @@ class SuggestionRepository(ISuggestionRepository):
         M-1 (issue #37): scope-фильтр исправлен — decisions.document_id
         сравнивается с денормализованной колонкой M.document_id, а не
         с M.analysis_job_id (что было семантически неверно).
+
+        edited_text пишется только тем решениям, где он передан; остальным — NULL,
+        чтобы не осталось старой правки от предыдущего решения.
         """
         all_decisions = decisions.decisions
         if not all_decisions:
@@ -226,6 +229,9 @@ class SuggestionRepository(ISuggestionRepository):
             d.suggestion_id for d in all_decisions if d.status == SuggestionStatusVO.ACCEPTED
         ]
         all_ids = [d.suggestion_id for d in all_decisions]
+        edits = [
+            (d.suggestion_id, d.edited_text) for d in all_decisions if d.edited_text is not None
+        ]
 
         where_clauses = [
             Suggestion.document_id == decisions.document_id,
@@ -239,11 +245,21 @@ class SuggestionRepository(ISuggestionRepository):
         status_type = Suggestion.__table__.c.status.type
         accepted = literal(_status_to_orm(SuggestionStatusVO.ACCEPTED), type_=status_type)
         rejected = literal(_status_to_orm(SuggestionStatusVO.REJECTED), type_=status_type)
+        text_type = Suggestion.__table__.c.edited_text.type
+        edited_text_expr = (
+            case(
+                *[(Suggestion.id == sid, literal(text, type_=text_type)) for sid, text in edits],
+                else_=null(),
+            )
+            if edits
+            else null()
+        )
         stmt = (
             update(Suggestion)
             .where(*where_clauses)
             .values(
                 status=case((Suggestion.id.in_(accepted_ids), accepted), else_=rejected),
+                edited_text=edited_text_expr,
                 decided_by=decisions.user_id,
                 decided_at=func.now(),
             )
@@ -333,6 +349,7 @@ class SuggestionRepository(ISuggestionRepository):
                 status=SuggestionStatus.PENDING,
                 decided_by=None,
                 decided_at=None,
+                edited_text=None,
             )
             .returning(Suggestion.id)
         )
@@ -378,7 +395,12 @@ class SuggestionRepository(ISuggestionRepository):
         stmt = (
             update(Suggestion)
             .where(*where_clauses)
-            .values(status=SuggestionStatus.PENDING, decided_by=None, decided_at=None)
+            .values(
+                status=SuggestionStatus.PENDING,
+                decided_by=None,
+                decided_at=None,
+                edited_text=None,
+            )
             .returning(Suggestion.id)
         )
         result = await self._session.execute(stmt)
