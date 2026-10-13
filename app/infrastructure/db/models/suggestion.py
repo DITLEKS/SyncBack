@@ -87,6 +87,9 @@ class Suggestion(Base):
     )
     original_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     suggested_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Текст принятой правки после ручной корректировки. Обнуляется при сбросе решения;
+    # при экспорте имеет приоритет над suggested_text.
+    edited_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     confidence_score: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
     # C-1: who made the decision and when

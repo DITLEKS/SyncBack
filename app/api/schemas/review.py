@@ -5,6 +5,8 @@ PUT /projects/{project_id}/documents/{document_id}/review
 - Принимает весь набор решений за один вызов.
 - Поле review_version обязательно для оптимистической блокировки (If-Match).
 - Допускает смешанные решения: часть accepted, часть rejected.
+- Принятое решение может нести edited_text — текст правки, скорректированный
+  пользователем; при экспорте он заменяет suggested_text.
 - После успешного сохранения документ переходит в READY, если pending == 0.
 """
 
@@ -13,7 +15,7 @@ from __future__ import annotations
 import uuid
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class SuggestionDecision(BaseModel):
@@ -21,6 +23,20 @@ class SuggestionDecision(BaseModel):
 
     suggestion_id: uuid.UUID
     decision: Literal["accepted", "rejected"]
+    edited_text: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=20_000,
+        description=(
+            "Скорректированный текст правки; допустим только вместе с decision='accepted'"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _edited_only_when_accepted(self) -> SuggestionDecision:
+        if self.edited_text is not None and self.decision != "accepted":
+            raise ValueError("edited_text допустим только для decision='accepted'")
+        return self
 
 
 class ReviewSaveRequest(BaseModel):
