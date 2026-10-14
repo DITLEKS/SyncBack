@@ -36,6 +36,15 @@ def test_prompt_asks_for_rationale_and_confidence() -> None:
     assert "confidence_score" in prompt
 
 
+def test_prompt_demands_completeness_and_document_section_refs() -> None:
+    prompt = build_prompt("doc", "src", "txt", max_input_chars=1000)
+    assert "ВСЕ места" in prompt
+    assert "Каждое расхождение — отдельный элемент" in prompt
+    assert "раздела ДОКУМЕНТА" in prompt
+    assert "без повторения old_text" in prompt
+    assert "Для delete" in prompt and "не переписывай абзац через modify" in prompt
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"), [(0.4, 0.4), (0, 0), (1, 1), (1.5, None), (-0.1, None)]
 )
