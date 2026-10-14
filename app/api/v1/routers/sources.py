@@ -225,9 +225,7 @@ async def get_source_content(
             detail="Ошибка хранилища: не удалось получить содержимое источника",
         ) from exc
     except Exception:
-        logger.exception(
-            "Источник не разобран для просмотра", extra={"source_id": str(source_id)}
-        )
+        logger.exception("Источник не разобран для просмотра", extra={"source_id": str(source_id)})
         return SourceContentResponse(
             **base,
             preview_available=False,
