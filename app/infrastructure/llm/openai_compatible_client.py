@@ -22,7 +22,7 @@ from app.domain.exceptions import LLMInvalidResponseError
 from app.domain.interfaces.llm_client import LLMSuggestionBatch, LLMSuggestionItem
 from app.infrastructure.llm.auth import AuthStrategy, build_auth
 from app.infrastructure.llm.http_retry_mixin import HttpConnectionRetryMixin
-from app.infrastructure.llm.prompt import build_prompt
+from app.infrastructure.llm.prompt import build_messages
 from app.infrastructure.llm.schemas import LLMHttpSuggestionResponse
 
 _FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
@@ -82,12 +82,12 @@ class OpenAICompatibleClient(HttpConnectionRetryMixin):
             verify=self._verify(),
         )
 
-    # ── LLMClient ────────────────────────────────────────────────────────────────────
+    # ── LLMClient ──────────────────────────────────────────────────────────────────
 
     async def generate_suggestions(
         self, document_text: str, source_text: str, document_format: str
     ) -> LLMSuggestionBatch:
-        prompt = build_prompt(
+        messages = build_messages(
             document_text,
             source_text,
             document_format,
@@ -95,7 +95,7 @@ class OpenAICompatibleClient(HttpConnectionRetryMixin):
         )
         payload: dict[str, Any] = {
             "model": self._settings.llm_model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "temperature": self._settings.llm_temperature,
             "stream": False,
         }

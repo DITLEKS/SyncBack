@@ -3,7 +3,7 @@
 import pytest
 
 from app.domain.exceptions import LLMInputTooLargeError
-from app.infrastructure.llm.prompt import build_prompt
+from app.infrastructure.llm.prompt import build_messages, build_prompt
 from app.infrastructure.llm.schemas import LLMHttpSuggestionItem
 
 
@@ -34,6 +34,19 @@ def test_prompt_asks_for_rationale_and_confidence() -> None:
     prompt = build_prompt("doc", "src", "txt", max_input_chars=1000)
     assert "rationale" in prompt
     assert "confidence_score" in prompt
+
+
+def test_messages_split_instructions_and_data_with_anchor_reminder() -> None:
+    messages = build_messages("Doc text", "Source text", "md", max_input_chars=1000)
+    assert [m["role"] for m in messages] == ["system", "user"]
+    system, user = messages[0]["content"], messages[1]["content"]
+    # Инструкция — без данных и без литеральных тегов-разделителей с переводом строки.
+    assert "Doc text" not in system
+    assert "<document>\n" not in system and "</source>" not in system
+    assert "ЯКОРЬ" in system and '"change_type": "add"' in system
+    # Данные и напоминание про якорь — после них.
+    assert user.index("</source>") < user.index("Напоминание")
+    assert "Пустое old_text недопустимо" in user
 
 
 @pytest.mark.parametrize(

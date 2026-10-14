@@ -91,8 +91,10 @@ async def test_bearer_request_shape_and_parsing(monkeypatch: pytest.MonkeyPatch)
     assert request.headers["Authorization"] == "Bearer secret-key"
     body = json.loads(request.content)
     assert body["model"] == "test-model"
-    assert body["messages"][0]["role"] == "user"
-    assert "<document>\ndoc\n</document>" in body["messages"][0]["content"]
+    # Инструкция — system, данные — user: так модели строже следуют правилам (якорь у add).
+    assert [m["role"] for m in body["messages"]] == ["system", "user"]
+    assert "old_text" in body["messages"][0]["content"]
+    assert "<document>\ndoc\n</document>" in body["messages"][1]["content"]
     assert body["temperature"] == 0.1
 
     assert len(batch.items) == 1
