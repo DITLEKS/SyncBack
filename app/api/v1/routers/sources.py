@@ -1,10 +1,12 @@
 """Источники истины внутри проекта.
 
-POST /projects/{id}/sources        — создать URL-источник
-POST /projects/{id}/sources/note   — создать текстовую заметку (deprecated)
-POST /projects/{id}/sources/file   — загрузить файл
-GET  /projects/{id}/sources        — список с пагинацией
-DEL  /projects/{id}/sources/{sid}  — удалить источник
+POST /projects/{id}/sources                 — создать URL-источник
+POST /projects/{id}/sources/note            — создать текстовую заметку (deprecated)
+POST /projects/{id}/sources/file            — загрузить файл
+GET  /projects/{id}/sources                 — список с пагинацией
+GET  /projects/{id}/sources/{sid}/download  — ссылка на скачивание (presigned или адрес url)
+GET  /projects/{id}/sources/{sid}/content   — текст для просмотра
+DEL  /projects/{id}/sources/{sid}           — удалить источник
 
 Правила «можно ли менять источники документа» живут в SourceService:
 роутер только переводит доменные исключения в HTTP-статусы. Источники заблокированы (423)
@@ -13,13 +15,20 @@ DEL  /projects/{id}/sources/{sid}  — удалить источник
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 
 from app.api.deps import get_allowed_project
 from app.api.schemas.pagination import Page
-from app.api.schemas.source import NoteCreateRequest, SourceCreateRequest, SourceResponse
+from app.api.schemas.source import (
+    NoteCreateRequest,
+    SourceContentResponse,
+    SourceCreateRequest,
+    SourceDownloadResponse,
+    SourceResponse,
+)
 from app.api.upload_utils import upload_content
 from app.core.config import Settings, get_settings
 from app.core.dependencies import get_source_service
@@ -30,10 +39,13 @@ from app.domain.exceptions import (
     InvalidSourceUrlError,
     SourceLockError,
     SourceNotFoundError,
+    UnsupportedFormatError,
 )
 from app.domain.services.source_service import SourceService
 from app.domain.value_objects import SourceScopeVO
 from app.infrastructure.db.models.project import Project
+
+logger = logging.getLogger("syncscribe.api.sources")
 
 router = APIRouter(prefix="/projects/{project_id}/sources", tags=["sources"])
 
@@ -153,6 +165,75 @@ async def list_sources(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/{source_id}/download", response_model=SourceDownloadResponse)
+async def get_source_download_url(
+    source_id: uuid.UUID,
+    project: Project = Depends(get_allowed_project),
+    source_service: SourceService = Depends(get_source_service),
+) -> SourceDownloadResponse:
+    """Ссылка на скачивание: presigned URL для файла, сам адрес для url-источника."""
+    try:
+        source = await source_service.get_source(project.id, source_id)
+        url, expires_in = await source_service.get_download_url(source)
+    except _SOURCE_ERRORS as exc:
+        raise _to_http(exc) from exc
+    return SourceDownloadResponse(download_url=url, expires_in=expires_in)
+
+
+@router.get("/{source_id}/content", response_model=SourceContentResponse)
+async def get_source_content(
+    source_id: uuid.UUID,
+    project: Project = Depends(get_allowed_project),
+    source_service: SourceService = Depends(get_source_service),
+) -> SourceContentResponse:
+    """Текст источника для просмотра без редактирования.
+
+    Для url-источника и файла неподдерживаемого формата ответ 200 с preview_available=false:
+    это не ошибка, а подсказка фронту показать ссылку или кнопку скачивания.
+    """
+    try:
+        source = await source_service.get_source(project.id, source_id)
+    except _SOURCE_ERRORS as exc:
+        raise _to_http(exc) from exc
+    base = {
+        "id": source.id,
+        "name": source.name,
+        "type": source.type,
+        "url": source.url,
+        "created_at": source.created_at,
+    }
+    if not source.storage_key:
+        return SourceContentResponse(
+            **base,
+            preview_available=False,
+            reason="Источник-ссылка открывается по адресу",
+        )
+    try:
+        text = await source_service.get_source_text(source)
+    except UnsupportedFormatError as exc:
+        return SourceContentResponse(**base, preview_available=False, reason=str(exc))
+    except OSError as exc:
+        logger.error(
+            "Storage error while fetching source content",
+            extra={"source_id": str(source_id)},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Ошибка хранилища: не удалось получить содержимое источника",
+        ) from exc
+    except Exception:
+        logger.exception(
+            "Источник не разобран для просмотра", extra={"source_id": str(source_id)}
+        )
+        return SourceContentResponse(
+            **base,
+            preview_available=False,
+            reason="Файл не удалось прочитать как текст — скачайте его",
+        )
+    return SourceContentResponse(**base, plain_text=text, preview_available=True)
 
 
 @router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT)

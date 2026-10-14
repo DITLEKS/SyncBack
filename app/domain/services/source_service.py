@@ -7,6 +7,9 @@
 Источники документа заморожены только пока идёт анализ (DocumentLifecycle.SOURCES_LOCKED).
 После его завершения источник можно удалить даже при нерассмотренных правках: они
 уже сохранены и от источника не зависят, а исчезнут только при следующем анализе.
+
+Просмотр и скачивание идут по той же схеме, что у документов: presigned-ссылка из хранилища
+и текст через реестр парсеров. Для url-источника «скачивание» — это сам адрес.
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections import defaultdict
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from app.domain.exceptions import (
@@ -22,7 +26,9 @@ from app.domain.exceptions import (
     InvalidSourceScopeError,
     SourceLockError,
     SourceNotFoundError,
+    UnsupportedFormatError,
 )
+from app.domain.interfaces.document_parser import IDocumentParserRegistry
 from app.domain.interfaces.file_storage import FileStorage, UploadContent
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.lifecycle import DocumentLifecycle
@@ -45,10 +51,14 @@ class SourceService:
         uow: IUnitOfWork,
         file_storage: FileStorage,
         upload_limits: UploadLimits,
+        parser_registry: IDocumentParserRegistry | None = None,
+        download_url_ttl_seconds: int = 3600,
     ) -> None:
         self._uow = uow
         self._storage = file_storage
         self._upload_limits = upload_limits
+        self._parser_registry = parser_registry
+        self._download_url_ttl_seconds = download_url_ttl_seconds
 
     @staticmethod
     def _assert_sources_mutable(document: Document) -> None:
@@ -278,3 +288,44 @@ class SourceService:
                     exc_info=True,
                     extra={"source_id": str(source_id), "storage_key": storage_key},
                 )
+
+    # ------------------------------------------------------------------
+    # Просмотр и скачивание
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _download_name(source: Source) -> str:
+        """Имя файла для браузера: название источника с расширением исходного файла."""
+        suffix = Path(source.storage_key or "").suffix
+        name = source.name.strip() or "source"
+        if suffix and not name.lower().endswith(suffix.lower()):
+            return f"{name}{suffix}"
+        return name
+
+    async def get_download_url(self, source: Source) -> tuple[str, int | None]:
+        """Ссылка на скачивание: presigned URL для файла или сам адрес для url-источника.
+
+        Второй элемент — срок жизни ссылки в секундах; для url-источника он не нужен (None).
+        """
+        if not source.storage_key:
+            if not source.url:
+                raise SourceNotFoundError(f"У источника {source.id} нет ни файла, ни ссылки")
+            return source.url, None
+        expires_in = self._download_url_ttl_seconds
+        url = await self._storage.get_presigned_url(
+            source.storage_key, expires_in, download_name=self._download_name(source)
+        )
+        return url, expires_in
+
+    async def get_source_text(self, source: Source) -> str:
+        """Текст файлового источника для просмотра.
+
+        UnsupportedFormatError — формат не разбирается (например, .doc); для url-источников
+        текста нет — просмотр идёт по ссылке, см. роутер.
+        """
+        if not source.storage_key:
+            raise UnsupportedFormatError("Источник-ссылка открывается по адресу, текста у него нет")
+        if self._parser_registry is None:
+            raise UnsupportedFormatError("Просмотр источников не настроен")
+        raw_bytes = await self._storage.download(source.storage_key)
+        return self._parser_registry.parse_by_filename(source.storage_key, raw_bytes).plain_text
