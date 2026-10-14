@@ -5,7 +5,7 @@
 from functools import lru_cache
 from typing import Annotated, Literal
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -69,13 +69,40 @@ class Settings(BaseSettings):
     def max_upload_size_bytes(self) -> int:
         return self.max_upload_size_mb * 1024 * 1024
 
-    llm_provider: Literal["stub", "remote_http", "onprem"] = "stub"
+    # ── LLM ───────────────────────────────────────────────────────────────────────────────────────
+    # Один клиент на всех провайдеров: OpenAI-совместимый POST {LLM_ENDPOINT}/chat/completions.
+    # Его понимают локальные движки (Ollama, vLLM, LM Studio), внешние API и GigaChat;
+    # разница между ними — только адрес, модель и способ авторизации.
+    # remote_http и onprem — устаревшие алиасы openai_compatible, оставлены для старых .env.
+    llm_provider: Literal["stub", "openai_compatible", "remote_http", "onprem"] = "stub"
+    # Базовый URL API без пути метода, например http://ollama:11434/v1.
     llm_endpoint: str = ""
+    llm_model: str = ""
+    # bearer: готовый API-ключ; oauth_gigachat: «ключ авторизации» (Basic), обмениваемый на токен.
     llm_api_key: str = ""
+    llm_auth: Literal["none", "bearer", "oauth_gigachat"] = "bearer"
+    llm_oauth_url: str = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+    llm_oauth_scope: str = "GIGACHAT_API_PERS"
+    # Путь к PEM с корневыми сертификатами (для GigaChat — сертификаты Минцифры); пусто — системные.
+    llm_ca_bundle: str = ""
+    llm_verify_ssl: bool = True
+    llm_temperature: float = 0.1
     llm_timeout_seconds: int = 60
     llm_max_retries: int = 3
     # Документ + источник в символах; запас под контекст модели и ответ.
     llm_max_input_chars: int = 200_000
+
+    @model_validator(mode="after")
+    def _validate_llm(self) -> "Settings":
+        if self.llm_provider == "stub":
+            return self
+        if not self.llm_endpoint:
+            raise ValueError("LLM_ENDPOINT обязателен для LLM_PROVIDER != stub")
+        if not self.llm_model:
+            raise ValueError("LLM_MODEL обязателен: у OpenAI-совместимых API нет модели по умолчанию")
+        if self.llm_auth != "none" and not self.llm_api_key:
+            raise ValueError(f"LLM_API_KEY обязателен для LLM_AUTH={self.llm_auth}")
+        return self
 
     log_level: str = "INFO"
     log_format: Literal["json", "text"] = "json"
