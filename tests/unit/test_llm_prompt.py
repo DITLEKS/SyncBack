@@ -54,6 +54,15 @@ def test_prompt_describes_insert_after_and_single_paragraph_rule() -> None:
     assert "Пример ответа:" in prompt
 
 
+def test_prompt_forbids_copying_source_and_splitting_modify() -> None:
+    prompt = build_prompt("doc", "src", "txt", max_input_chars=1000)
+    assert "Не копируй источник целиком" in prompt
+    assert "«Что менять в документации»" in prompt
+    assert "ОДНА правка modify, а не пара delete + add" in prompt
+    assert "только когда утверждение убирается без замены" in prompt
+    assert "а не modify с повторением абзаца" in prompt
+
+
 def test_example_in_prompt_is_valid_json_matching_schema() -> None:
     parsed = LLMHttpSuggestionResponse.model_validate(json.loads(_EXAMPLE))
     assert [s.change_type for s in parsed.suggestions] == ["add", "modify", "delete"]
