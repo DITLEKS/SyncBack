@@ -2,15 +2,13 @@
 Применяет принятые правки к txt/markdown простой текстовой заменой. Посимвольный diff
 сознательно не делаем на этой итерации.
 
-Добавление (add) вставляется по месту, а не в конец файла:
-  1. есть якорь old_text и он найден — новый абзац сразу после строки с якорем;
-  2. иначе section_ref совпадает с заголовком — в конец этого раздела (перед следующим заголовком);
-  3. иначе — в конец документа (прежнее поведение).
+Добавление (add) вставляется только по якорю: новый абзац встаёт сразу после строки
+с первым вхождением old_text. Якоря нет или он не найден — правка не применяется,
+как modify/delete с ненайденным old_text; место вставки за модель не выбираем.
 Тот же порядок повторяет фронтенд в «Чистовике», чтобы экран и экспорт не расходились.
 """
 
 from app.domain.interfaces.document_exporter import AppliedChange
-from app.infrastructure.parsers.markdown_parser import MarkdownParser
 
 
 def _insert_block(text: str, position: int, block: str) -> str:
@@ -32,28 +30,15 @@ def _anchor_line_end(text: str, anchor: str) -> int | None:
     return len(text) if newline < 0 else newline
 
 
-def _section_end(text: str, section_ref: str) -> int | None:
-    """Граница раздела по заголовку — тем же парсером, что считал разделы при загрузке."""
-    ref = section_ref.strip().casefold()
-    if not ref:
-        return None
-    for section in MarkdownParser().parse(text.encode("utf-8")).sections:
-        if section.ref.casefold() == ref:
-            return section.end_offset
-    return None
-
-
 def place_addition(text: str, change: AppliedChange) -> str:
-    block = (change.new_text or "").strip("\n")
+    """Вставить добавление после строки с якорем; без найденного якоря вернуть текст как есть."""
     anchor = (change.old_text or "").strip()
-    if anchor:
-        position = _anchor_line_end(text, anchor)
-        if position is not None:
-            return _insert_block(text, position, block)
-    position = _section_end(text, change.section_ref)
-    if position is not None:
-        return _insert_block(text, position, block)
-    return _insert_block(text, len(text), block)
+    if not anchor:
+        return text
+    position = _anchor_line_end(text, anchor)
+    if position is None:
+        return text
+    return _insert_block(text, position, (change.new_text or "").strip("\n"))
 
 
 class TextExporter:
