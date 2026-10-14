@@ -220,11 +220,11 @@ async def test_sources_are_locked_while_document_is_analysed(
         await client.delete(f"{base}/{project_source['id']}", headers=headers)
     ).status_code == 204
 
+    # Блокировка только на время анализа: на ревью источник удаляется, даже если правки
+    # по нему ещё не рассмотрены — они остаются до следующего анализа.
     await _set_status(sessionmaker, document["id"], DocumentStatus.AWAITING_APPROVAL)
-    assert (await client.delete(f"{base}/{attached['id']}", headers=headers)).status_code == 423
-
-    await _set_status(sessionmaker, document["id"], DocumentStatus.READY)
     assert (await client.delete(f"{base}/{attached['id']}", headers=headers)).status_code == 204
+    assert (await client.delete(f"{base}/{attached['id']}", headers=headers)).status_code == 404
 
 
 async def test_delete_source_removes_file_and_is_scoped_to_project(
