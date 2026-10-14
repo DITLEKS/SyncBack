@@ -106,7 +106,8 @@ async def test_editor_with_review_results_and_pagination(
     assert body["counters"] == {"total": 3, "pending": 2, "accepted": 1, "rejected": 0}
     assert body["original_content"]["plain_text"] == body["content"]["plain_text"]
     assert body["permissions"]["can_review"] is True
-    assert body["permissions"]["sources_is_editable"] is False
+    # Источники заблокированы только во время анализа; на ревью их можно менять.
+    assert body["permissions"]["sources_is_editable"] is True
 
 
 async def test_editor_not_found_and_foreign_project(client: AsyncClient) -> None:

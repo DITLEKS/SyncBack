@@ -7,7 +7,8 @@ GET  /projects/{id}/sources        — список с пагинацией
 DEL  /projects/{id}/sources/{sid}  — удалить источник
 
 Правила «можно ли менять источники документа» живут в SourceService:
-роутер только переводит доменные исключения в HTTP-статусы.
+роутер только переводит доменные исключения в HTTP-статусы. Источники заблокированы (423)
+только пока документ анализируется; на ревью их можно менять.
 """
 
 from __future__ import annotations
@@ -160,7 +161,7 @@ async def delete_source(
     project: Project = Depends(get_allowed_project),
     source_service: SourceService = Depends(get_source_service),
 ) -> None:
-    """Удалить источник. 423, если он прикреплён к документу на анализе или ревью."""
+    """Удалить источник. 423, если он прикреплён к документу, который сейчас анализируется."""
     try:
         await source_service.delete_source(project.id, source_id)
     except _SOURCE_ERRORS as exc:
