@@ -197,12 +197,14 @@ jobs:
       - name: Apply migrations
         run: alembic upgrade head
 
-      - name: Run integration tests with coverage
+      # Порог покрытия проверяется в lint-and-test на unit-тестах. Здесь покрытие только в отчёте:
+      # 15 сквозных сценариев не затрагивают LLM и воркер, и любой рост этого кода ронял бы джобу
+      # без какой-либо связи с качеством интеграционных тестов.
+      - name: Run integration tests with coverage report
         run: |
           pytest -m integration tests/integration -v \
             --cov=app \
-            --cov-report=term-missing \
-            --cov-fail-under=65
+            --cov-report=term-missing
 
   build-images:
     runs-on: ubuntu-latest
