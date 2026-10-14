@@ -99,7 +99,9 @@ class Settings(BaseSettings):
         if not self.llm_endpoint:
             raise ValueError("LLM_ENDPOINT обязателен для LLM_PROVIDER != stub")
         if not self.llm_model:
-            raise ValueError("LLM_MODEL обязателен: у OpenAI-совместимых API нет модели по умолчанию")
+            raise ValueError(
+                "LLM_MODEL обязателен: у OpenAI-совместимых API нет модели по умолчанию"
+            )
         if self.llm_auth != "none" and not self.llm_api_key:
             raise ValueError(f"LLM_API_KEY обязателен для LLM_AUTH={self.llm_auth}")
         return self

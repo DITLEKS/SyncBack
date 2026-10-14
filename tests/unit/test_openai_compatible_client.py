@@ -56,7 +56,9 @@ def settings(**overrides: object) -> Settings:
 
 
 def chat_response(content: str) -> httpx.Response:
-    return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": content}}]})
+    return httpx.Response(
+        200, json={"choices": [{"message": {"role": "assistant", "content": content}}]}
+    )
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, handler: Callable[[httpx.Request], httpx.Response]):
@@ -76,7 +78,9 @@ def _install(monkeypatch: pytest.MonkeyPatch, handler: Callable[[httpx.Request],
 
 
 async def test_bearer_request_shape_and_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
-    fenced = "Вот правки:\n```json\n" + json.dumps(SUGGESTIONS, ensure_ascii=False) + "\n```\nГотово."
+    fenced = (
+        "Вот правки:\n```json\n" + json.dumps(SUGGESTIONS, ensure_ascii=False) + "\n```\nГотово."
+    )
     calls = _install(monkeypatch, lambda r: chat_response(fenced))
 
     batch = await OpenAICompatibleClient(settings()).generate_suggestions("doc", "src", "md")
@@ -128,7 +132,9 @@ def _gigachat_handler(tokens: list[str], reject_tokens: set[str] | None = None):
 
 async def test_gigachat_token_is_fetched_once_and_reused(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _install(monkeypatch, _gigachat_handler(["t1"]))
-    client = OpenAICompatibleClient(settings(llm_auth="oauth_gigachat", llm_api_key="base64-auth-key"))
+    client = OpenAICompatibleClient(
+        settings(llm_auth="oauth_gigachat", llm_api_key="base64-auth-key")
+    )
 
     await client.generate_suggestions("doc", "src", "md")
     await client.generate_suggestions("doc", "src", "md")
@@ -143,7 +149,9 @@ async def test_gigachat_refreshes_token_on_401_and_retries_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _install(monkeypatch, _gigachat_handler(["stale", "fresh"], reject_tokens={"stale"}))
-    client = OpenAICompatibleClient(settings(llm_auth="oauth_gigachat", llm_api_key="base64-auth-key"))
+    client = OpenAICompatibleClient(
+        settings(llm_auth="oauth_gigachat", llm_api_key="base64-auth-key")
+    )
 
     batch = await client.generate_suggestions("doc", "src", "md")
 
