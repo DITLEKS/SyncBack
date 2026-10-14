@@ -106,9 +106,7 @@ def test_mapper_keeps_add_whose_anchor_has_plain_spaces() -> None:
 def test_text_exporter_matches_nbsp_in_file() -> None:
     raw = f"Auth Service\n{RAW_LINE}\nТаблица users\n".encode("utf-8")
     added = TextExporter().apply_changes(raw, [_change("add", CLEAN_LINE, SSO)])
-    assert added.decode("utf-8") == (
-        f"Auth Service\n{CLEAN_LINE}\n\n{SSO}\n\nТаблица users\n"
-    )
+    assert added.decode("utf-8") == f"Auth Service\n{CLEAN_LINE}\n\n{SSO}\n\nТаблица users\n"
     modified = TextExporter().apply_changes(raw, [_change("modify", CLEAN_LINE, ROLES)])
     assert modified.decode("utf-8") == f"Auth Service\n{ROLES}\nТаблица users\n"
 
