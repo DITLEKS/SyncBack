@@ -61,8 +61,13 @@ def map_to_suggestions(
             )
         )
     if skipped:
+        # Причины — в тексте сообщения: формат логов воркера может не выводить extra.
+        details = ", ".join(f"{reason}={count}" for reason, count in sorted(skipped.items()))
         logger.warning(
-            "Часть правок LLM отброшена как невалидные",
+            "Часть правок LLM отброшена как невалидные: %s (сохранено %d из %d)",
+            details,
+            len(suggestions),
+            len(batch.items),
             extra={
                 "analysis_job_id": str(analysis_job_id),
                 "document_id": str(document_id),

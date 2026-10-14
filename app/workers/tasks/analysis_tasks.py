@@ -44,6 +44,8 @@ logger = logging.getLogger("syncscribe.workers.analysis")
 
 _PARSED_DOC_KEY_PREFIX = "parsed_doc:"
 _PARSED_DOC_TTL_SECONDS = 3600
+# Сколько символов сырого ответа LLM писать в лог, если ни одна правка не прошла валидацию.
+_RAW_RESPONSE_LOG_LIMIT = 2000
 
 # Точка подмены в тестах: фабрика UoW над изолированным подключением.
 uow_factory = isolated_uow
@@ -229,6 +231,14 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
         return _failed(source_id, _generation_error_code(exc), str(exc))
 
     suggestions = map_to_suggestions(batch, job_uuid, document_id, document_text=plain_text)
+    if batch.items and not suggestions:
+        # Модель что-то вернула, но ничего не прошло валидацию: без сырого ответа причину не понять.
+        logger.warning(
+            "Все %d правок LLM для источника %s отброшены. Сырой ответ модели: %s",
+            len(batch.items),
+            source_id,
+            str(batch.raw_response)[:_RAW_RESPONSE_LOG_LIMIT],
+        )
 
     async with uow_factory() as uow:
         job = await uow.jobs.get_by_id(job_uuid)
