@@ -10,6 +10,8 @@ class LLMSuggestionItem:
     new_text: str | None
     rationale: str | None = None
     confidence_score: float | None = None
+    # Якорь добавления: фрагмент документа, после которого вставить new_text (только для add).
+    insert_after: str | None = None
 
 
 @dataclass
