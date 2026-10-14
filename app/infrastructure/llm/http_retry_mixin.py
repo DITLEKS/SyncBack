@@ -34,6 +34,13 @@ def _is_retryable_status(status_code: int) -> bool:
 
 
 class HttpConnectionRetryMixin:
+    def _make_client(self, timeout: float, verify: bool | str = True) -> httpx.AsyncClient:
+        """Единственное место создания HTTP-клиента — тесты подменяют httpx.AsyncClient здесь.
+
+        verify: True — системные CA, False — без проверки, строка — путь к PEM с корневыми сертификатами.
+        """
+        return httpx.AsyncClient(timeout=timeout, verify=verify)
+
     async def _post_with_retries(
         self,
         url: str,
@@ -41,13 +48,14 @@ class HttpConnectionRetryMixin:
         json_payload: dict[str, Any],
         timeout_seconds: int,
         max_retries: int,
+        verify: bool | str = True,
     ) -> httpx.Response:
         """POST с max_retries повторами временных сбоев.
 
         LLMTimeoutError — LLM недоступна или перегружена после всех попыток;
         LLMInvalidResponseError — LLM отклонила запрос (4xx, кроме 429).
         """
-        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        async with self._make_client(timeout=timeout_seconds, verify=verify) as client:
             for attempt in range(max_retries + 1):
                 retry_after: str | None = None
                 try:
