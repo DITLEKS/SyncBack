@@ -1,5 +1,5 @@
-"""Маппер отбрасывает добавления без якоря или с якорем, которого нет в документе,
-и пишет причины отброса в текст лога."""
+"""Маппер: якорь добавления из insert_after или первого абзаца раздела, нормализация
+modify→delete, отброс многоабзацных фрагментов для docx и причины отброса в тексте лога."""
 
 import logging
 import uuid
@@ -8,47 +8,121 @@ import pytest
 
 from app.domain.interfaces.llm_client import LLMSuggestionBatch, LLMSuggestionItem
 from app.infrastructure.db.models.enums import ChangeType
-from app.workers.pipeline.suggestion_mapper import map_to_suggestions
+from app.workers.pipeline.suggestion_mapper import infer_anchor, map_to_suggestions
 
 DOCUMENT = "# Сроки\nСрок ответа — 10 дней.\nОплата картой.\n"
 LOGGER = "syncscribe.workers.suggestion_mapper"
 
 
-def _item(change_type: str, old_text: str | None, new_text: str | None = "Новый текст."):
+def _item(
+    change_type: str,
+    old_text: str | None,
+    new_text: str | None = "Новый текст.",
+    *,
+    section: str = "Сроки",
+    insert_after: str | None = None,
+    rationale: str | None = None,
+) -> LLMSuggestionItem:
     return LLMSuggestionItem(
-        section_ref="Сроки",
+        section_ref=section,
         change_type=change_type,
         old_text=old_text,
         new_text=new_text,
-        rationale=None,
+        rationale=rationale,
         confidence_score=0.9,
+        insert_after=insert_after,
     )
 
 
-def _map(*items: LLMSuggestionItem, raw_response: str = "{}"):
+def _map(
+    *items: LLMSuggestionItem,
+    document: str = DOCUMENT,
+    document_format: str = "md",
+    raw_response: str = "{}",
+):
     batch = LLMSuggestionBatch(items=list(items), raw_response=raw_response)
-    return map_to_suggestions(batch, uuid.uuid4(), uuid.uuid4(), document_text=DOCUMENT)
+    return map_to_suggestions(
+        batch,
+        uuid.uuid4(),
+        uuid.uuid4(),
+        document_text=document,
+        document_format=document_format,
+    )
 
 
-def test_add_with_anchor_from_document_is_kept() -> None:
-    result = _map(_item("add", "Срок ответа — 10 дней."))
+# ── якорь добавления ───────────────────────────────────────────────────────────────────────────────
+
+
+def test_add_with_insert_after_is_kept_and_anchor_stored_in_original_text() -> None:
+    result = _map(_item("add", "", insert_after="Оплата картой.", rationale="Источник."))
     assert len(result) == 1
     assert result[0].change_type is ChangeType.ADD
+    assert result[0].original_text == "Оплата картой."
+    assert result[0].rationale == "Источник."
+
+
+def test_add_with_anchor_in_old_text_is_still_accepted() -> None:
+    result = _map(_item("add", "Срок ответа — 10 дней."))
+    assert len(result) == 1
     assert result[0].original_text == "Срок ответа — 10 дней."
 
 
+def test_insert_after_wins_over_old_text() -> None:
+    result = _map(_item("add", "Срок ответа — 10 дней.", insert_after="Оплата картой."))
+    assert result[0].original_text == "Оплата картой."
+
+
 @pytest.mark.parametrize("anchor", [None, "", "   "])
-def test_add_without_anchor_is_dropped(anchor: str | None) -> None:
-    assert _map(_item("add", anchor)) == []
+def test_add_without_anchor_infers_first_paragraph_of_section(anchor: str | None) -> None:
+    result = _map(_item("add", anchor, rationale="Источник: новое правило."))
+    assert len(result) == 1
+    assert result[0].original_text == "Срок ответа — 10 дней."
+    assert result[0].rationale == (
+        "Источник: новое правило. Место вставки выбрано автоматически: "
+        "после первого абзаца раздела «Сроки»."
+    )
+
+
+def test_inferred_anchor_note_without_rationale() -> None:
+    result = _map(_item("add", None))
+    assert result[0].rationale.startswith("Место вставки выбрано автоматически")
+
+
+def test_add_without_anchor_and_unknown_section_is_dropped() -> None:
+    assert _map(_item("add", None, section="Нет такого раздела")) == []
 
 
 def test_add_with_anchor_missing_from_document_is_dropped() -> None:
-    assert _map(_item("add", "Такого абзаца в документе нет.")) == []
+    assert _map(_item("add", "", insert_after="Такого абзаца нет.")) == []
 
 
 def test_anchor_is_matched_after_strip() -> None:
-    result = _map(_item("add", "  Оплата картой.\n"))
-    assert len(result) == 1
+    assert len(_map(_item("add", "", insert_after="  Оплата картой.\n"))) == 1
+
+
+# ── infer_anchor ─────────────────────────────────────────────────────────────────────────────────
+
+
+def test_infer_anchor_handles_markdown_and_plain_headings() -> None:
+    assert infer_anchor(DOCUMENT, "Сроки") == "Срок ответа — 10 дней."
+    docx_like = "Support Service\n\nЕдиная служба поддержки.\nТаблица tickets\n"
+    assert infer_anchor(docx_like, "Support Service") == "Единая служба поддержки."
+    assert infer_anchor("## **Auth**\nАбзац.\n", "Auth") == "Абзац."
+
+
+def test_infer_anchor_falls_back_to_heading_and_none() -> None:
+    assert infer_anchor("# Пустой раздел\n", "Пустой раздел") == "# Пустой раздел"
+    assert infer_anchor(DOCUMENT, "Нет такого") is None
+    assert infer_anchor(DOCUMENT, "") is None
+
+
+# ── modify / delete ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_modify_with_empty_new_text_becomes_delete() -> None:
+    result = _map(_item("modify", "Оплата картой.", ""), _item("modify", "Оплата картой.", None))
+    assert [s.change_type for s in result] == [ChangeType.DELETE, ChangeType.DELETE]
+    assert all(s.suggested_text is None for s in result)
 
 
 def test_modify_and_delete_are_not_filtered_by_anchor_rule() -> None:
@@ -56,17 +130,28 @@ def test_modify_and_delete_are_not_filtered_by_anchor_rule() -> None:
     assert [s.change_type for s in result] == [ChangeType.MODIFY, ChangeType.DELETE]
 
 
+def test_old_text_spanning_paragraphs_is_dropped_only_for_docx() -> None:
+    spanning = _item("modify", "Срок ответа — 10 дней.\nОплата картой.", "Один абзац.")
+    assert _map(spanning, document_format="docx") == []
+    assert _map(spanning, document_format="DOCX") == []
+    assert len(_map(spanning, document_format="md")) == 1
+    assert len(_map(spanning, document_format="txt")) == 1
+
+
 def test_unknown_change_type_is_still_dropped() -> None:
     result = _map(_item("rename", "Оплата картой."), _item("add", "Оплата картой."))
     assert [s.change_type for s in result] == [ChangeType.ADD]
 
 
+# ── логи ────────────────────────────────────────────────────────────────────────────────────────
+
+
 def test_skip_reasons_and_items_are_in_log_message(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         result = _map(
-            _item("add", "Оплата картой."),
-            _item("add", "такого текста нет"),
-            _item("add", None),
+            _item("add", "", insert_after="Оплата картой."),
+            _item("add", "", insert_after="такого текста нет"),
+            _item("add", None, section="Нет такого"),
         )
     assert len(result) == 1
     messages = [record.getMessage() for record in caplog.records]
@@ -81,9 +166,18 @@ def test_skip_reasons_and_items_are_in_log_message(caplog: pytest.LogCaptureFixt
 def test_raw_response_is_logged_only_when_everything_is_dropped(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    raw = '{"suggestions": [{"change_type": "add", "old_text": "нет"}]}'
+    raw = '{"suggestions": [{"change_type": "add", "insert_after": "нет"}]}'
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        result = _map(_item("add", "такого текста нет"), raw_response=raw)
+        result = _map(_item("add", "", insert_after="такого текста нет"), raw_response=raw)
     assert result == []
     messages = [record.getMessage() for record in caplog.records]
     assert any(m.startswith("Все 1 правок LLM отброшены") and raw in m for m in messages)
+
+
+def test_inferred_anchors_are_counted_in_log(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        _map(_item("add", None), _item("add", None))
+    assert any(
+        "Для 2 добавлений якорь выбран автоматически" in record.getMessage()
+        for record in caplog.records
+    )

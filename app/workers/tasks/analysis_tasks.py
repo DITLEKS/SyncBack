@@ -228,7 +228,13 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
         )
         return _failed(source_id, _generation_error_code(exc), str(exc))
 
-    suggestions = map_to_suggestions(batch, job_uuid, document_id, document_text=plain_text)
+    suggestions = map_to_suggestions(
+        batch,
+        job_uuid,
+        document_id,
+        document_text=plain_text,
+        document_format=document_format,
+    )
 
     async with uow_factory() as uow:
         job = await uow.jobs.get_by_id(job_uuid)

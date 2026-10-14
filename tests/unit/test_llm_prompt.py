@@ -1,10 +1,12 @@
 """Структура промпта, экранирование разделителей и лимит размера входа."""
 
+import json
+
 import pytest
 
 from app.domain.exceptions import LLMInputTooLargeError
-from app.infrastructure.llm.prompt import build_prompt
-from app.infrastructure.llm.schemas import LLMHttpSuggestionItem
+from app.infrastructure.llm.prompt import _EXAMPLE, build_prompt
+from app.infrastructure.llm.schemas import LLMHttpSuggestionItem, LLMHttpSuggestionResponse
 
 
 def test_document_and_source_are_wrapped_as_data() -> None:
@@ -41,8 +43,23 @@ def test_prompt_demands_completeness_and_document_section_refs() -> None:
     assert "ВСЕ места" in prompt
     assert "Каждое расхождение — отдельный элемент" in prompt
     assert "раздела ДОКУМЕНТА" in prompt
-    assert "без повторения old_text" in prompt
-    assert "Для delete" in prompt and "не переписывай абзац через modify" in prompt
+    assert "не переписывай абзац через modify" in prompt
+
+
+def test_prompt_describes_insert_after_and_single_paragraph_rule() -> None:
+    prompt = build_prompt("doc", "src", "txt", max_input_chars=1000)
+    assert "insert_after — дословное предложение документа" in prompt
+    assert "add: old_text пустой" in prompt
+    assert "без переводов строки" in prompt
+    assert "Пример ответа:" in prompt
+
+
+def test_example_in_prompt_is_valid_json_matching_schema() -> None:
+    parsed = LLMHttpSuggestionResponse.model_validate(json.loads(_EXAMPLE))
+    assert [s.change_type for s in parsed.suggestions] == ["add", "modify", "delete"]
+    added = parsed.suggestions[0]
+    assert added.old_text == ""
+    assert added.insert_after == "Оплата принимается картой."
 
 
 @pytest.mark.parametrize(

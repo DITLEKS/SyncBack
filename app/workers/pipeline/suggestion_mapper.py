@@ -1,7 +1,19 @@
-"""Перевод ответа LLM в ORM-правки анализа."""
+"""Перевод ответа LLM в ORM-правки анализа.
+
+Модель оформляет правки не всегда так, как просит промпт, поэтому перед сохранением
+ответ нормализуется:
+- modify с пустым new_text — это delete;
+- якорь добавления берётся из insert_after (или old_text для старых ответов); если его нет,
+  а раздел section_ref есть в документе, якорём становится первый абзац раздела, и это
+  явно отмечается в rationale — ревьюер видит, что место выбрано автоматически;
+- для docx фрагмент с переводом строки отбрасывается: экспорт ищет old_text внутри
+  одного абзаца и такую правку всё равно не применит.
+Якорь добавления сохраняется в original_text — так его ждут экспортёры и фронтенд.
+"""
 
 import logging
 import uuid
+from dataclasses import replace
 
 from app.domain.interfaces.llm_client import LLMSuggestionBatch, LLMSuggestionItem
 from app.infrastructure.db.models.enums import ChangeType, SuggestionStatus
@@ -10,27 +22,81 @@ from app.infrastructure.db.models.suggestion import Suggestion
 logger = logging.getLogger("syncscribe.workers.suggestion_mapper")
 
 _CHANGE_TYPE_MAP = {"add": ChangeType.ADD, "modify": ChangeType.MODIFY, "delete": ChangeType.DELETE}
+_SINGLE_PARAGRAPH_FORMATS = frozenset({"docx", "doc"})
 _OLD_TEXT_LOG_LIMIT = 120
 _RAW_RESPONSE_LOG_LIMIT = 4000
 
 
-def _skip_reason(item: LLMSuggestionItem, document_text: str) -> str | None:
-    """Почему правку нельзя сохранить; None — если можно.
+def _heading_text(line: str) -> str:
+    """Текст заголовка без markdown-решёток и выделения: '## **Auth**' → 'Auth'."""
+    return line.strip().lstrip("#").strip().strip("*").strip()
 
-    Добавление без якоря не сохраняется: без него текст негде разместить, а выбирать место
-    за модель (конец раздела, конец документа) мы не должны. Якорь, которого нет в документе
-    дословно, — та же ошибка модели: экспорт такую правку всё равно не применит.
+
+def infer_anchor(document_text: str, section_ref: str) -> str | None:
+    """Якорь для добавления без якоря: первый абзац раздела section_ref.
+
+    Если раздел есть, но абзацев после заголовка нет — сам заголовок.
+    None, если заголовка с таким текстом в документе нет.
     """
+    wanted = _heading_text(section_ref or "")
+    if not wanted:
+        return None
+    lines = document_text.split("\n")
+    for index, line in enumerate(lines):
+        if _heading_text(line) != wanted:
+            continue
+        for candidate in lines[index + 1 :]:
+            if candidate.strip():
+                return candidate.strip()
+        return line.strip()
+    return None
+
+
+def _normalize(item: LLMSuggestionItem) -> LLMSuggestionItem:
+    """modify без нового текста — это удаление: модель часто оформляет delete именно так."""
+    if (
+        item.change_type == "modify"
+        and (item.old_text or "").strip()
+        and not (item.new_text or "").strip()
+    ):
+        return replace(item, change_type="delete", new_text=None)
+    return item
+
+
+def _resolve_anchor(item: LLMSuggestionItem, document_text: str) -> tuple[LLMSuggestionItem, bool]:
+    """Для add положить якорь в old_text; второй элемент — выбран ли он автоматически."""
+    if item.change_type != "add":
+        return item, False
+    anchor = (item.insert_after or item.old_text or "").strip()
+    if anchor:
+        return replace(item, old_text=anchor, insert_after=None), False
+    inferred = infer_anchor(document_text, item.section_ref)
+    return replace(item, old_text=inferred, insert_after=None), inferred is not None
+
+
+def _skip_reason(
+    item: LLMSuggestionItem, document_text: str, *, single_paragraph: bool
+) -> str | None:
+    """Почему правку нельзя сохранить; None — если можно."""
     if item.change_type not in _CHANGE_TYPE_MAP:
         return "unknown_change_type"
-    if item.change_type != "add":
+    if item.change_type == "add":
+        anchor = (item.old_text or "").strip()
+        if not anchor:
+            return "add_without_anchor"
+        if anchor not in document_text:
+            return "add_anchor_not_in_document"
         return None
-    anchor = (item.old_text or "").strip()
-    if not anchor:
-        return "add_without_anchor"
-    if anchor not in document_text:
-        return "add_anchor_not_in_document"
+    if single_paragraph and "\n" in (item.old_text or "").strip():
+        return "old_text_spans_paragraphs"
     return None
+
+
+def _with_inferred_note(rationale: str | None, section_ref: str) -> str:
+    note = f"Место вставки выбрано автоматически: после первого абзаца раздела «{section_ref}»."
+    if rationale and rationale.strip():
+        return f"{rationale.rstrip()} {note}"
+    return note
 
 
 def _short(text: str | None, limit: int) -> str:
@@ -92,16 +158,24 @@ def map_to_suggestions(
     document_id: uuid.UUID,
     *,
     document_text: str,
+    document_format: str = "",
 ) -> list[Suggestion]:
     """Невалидные элементы пропускаются с предупреждением в логе: лучше потерять одну правку,
     чем уронить обработку источника целиком."""
+    single_paragraph = document_format.lower() in _SINGLE_PARAGRAPH_FORMATS
     suggestions: list[Suggestion] = []
     skipped_items: list[tuple[str, LLMSuggestionItem]] = []
-    for item in batch.items:
-        reason = _skip_reason(item, document_text)
+    inferred_count = 0
+    for raw_item in batch.items:
+        item, inferred = _resolve_anchor(_normalize(raw_item), document_text)
+        reason = _skip_reason(item, document_text, single_paragraph=single_paragraph)
         if reason is not None:
             skipped_items.append((reason, item))
             continue
+        rationale = item.rationale
+        if inferred:
+            inferred_count += 1
+            rationale = _with_inferred_note(rationale, item.section_ref)
         suggestions.append(
             Suggestion(
                 analysis_job_id=analysis_job_id,
@@ -111,9 +185,15 @@ def map_to_suggestions(
                 status=SuggestionStatus.PENDING,
                 original_text=item.old_text,
                 suggested_text=item.new_text,
-                rationale=item.rationale,
+                rationale=rationale,
                 confidence_score=item.confidence_score,
             )
+        )
+    if inferred_count:
+        logger.info(
+            "Для %d добавлений якорь выбран автоматически (первый абзац раздела)",
+            inferred_count,
+            extra={"analysis_job_id": str(analysis_job_id), "document_id": str(document_id)},
         )
     if skipped_items:
         _log_skipped(

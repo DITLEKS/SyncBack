@@ -11,6 +11,8 @@ class LLMHttpSuggestionItem(BaseModel):
     change_type: str
     old_text: str | None = None
     new_text: str | None = None
+    # Для add: дословный фрагмент документа, после которого вставить new_text.
+    insert_after: str | None = None
     rationale: str | None = None
     confidence_score: float | None = None
 

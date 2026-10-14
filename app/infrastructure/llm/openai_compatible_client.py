@@ -82,7 +82,7 @@ class OpenAICompatibleClient(HttpConnectionRetryMixin):
             verify=self._verify(),
         )
 
-    # ── LLMClient ────────────────────────────────────────────────────────────────────
+    # ── LLMClient ──────────────────────────────────────────────────────────────────
 
     async def generate_suggestions(
         self, document_text: str, source_text: str, document_format: str
@@ -115,6 +115,7 @@ class OpenAICompatibleClient(HttpConnectionRetryMixin):
                 new_text=item.new_text,
                 rationale=item.rationale,
                 confidence_score=item.confidence_score,
+                insert_after=item.insert_after,
             )
             for item in parsed.suggestions
         ]
