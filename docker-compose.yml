@@ -68,6 +68,9 @@ services:
       dockerfile: docker/backend.Dockerfile
     restart: unless-stopped
     env_file: .env
+    volumes:
+      # Корневые сертификаты для LLM_CA_BUNDLE (например, Минцифры для GigaChat).
+      - ./certs:/srv/app/certs:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -86,6 +89,8 @@ services:
       dockerfile: docker/worker.Dockerfile
     restart: unless-stopped
     env_file: .env
+    volumes:
+      - ./certs:/srv/app/certs:ro
     depends_on:
       postgres:
         condition: service_healthy
