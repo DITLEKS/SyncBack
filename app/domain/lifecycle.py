@@ -63,8 +63,10 @@ class DocumentLifecycle:
         {DocumentStatusVO.DRAFT, DocumentStatusVO.AWAITING_APPROVAL, DocumentStatusVO.READY}
     )
     ANALYSIS_NEEDS_CONFIRMATION = frozenset({DocumentStatusVO.READY})
-    # Источники заморожены, пока идёт анализ или ревью его результатов.
-    SOURCES_LOCKED = frozenset({DocumentStatusVO.IN_PROGRESS, DocumentStatusVO.AWAITING_APPROVAL})
+    # Источники заморожены только пока идёт анализ: воркер читает их во время задачи.
+    # На ревью и после него источники можно менять; уже созданные правки от этого не исчезают
+    # и живут до следующего анализа.
+    SOURCES_LOCKED = frozenset({DocumentStatusVO.IN_PROGRESS})
     REVIEW_RESETTABLE = frozenset({DocumentStatusVO.AWAITING_APPROVAL, DocumentStatusVO.READY})
     # В этих статусах содержимое документа отличается от исходника правками анализа.
     WITH_REVIEW_RESULTS = frozenset({DocumentStatusVO.AWAITING_APPROVAL, DocumentStatusVO.READY})

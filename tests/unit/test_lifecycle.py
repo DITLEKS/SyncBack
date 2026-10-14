@@ -53,13 +53,15 @@ def test_document_transition_accepts_orm_enum_and_string() -> None:
 
 
 def test_document_permissions_by_status() -> None:
+    # Источники заблокированы только в in_progress: на ревью их можно менять,
+    # правки по старым источникам остаются до следующего анализа.
     rules = {
         Doc.DRAFT: dict(analyze=True, sources=True, review=False, export=False, delete=True),
         Doc.IN_PROGRESS: dict(
             analyze=False, sources=False, review=False, export=False, delete=False
         ),
         Doc.AWAITING_APPROVAL: dict(
-            analyze=True, sources=False, review=True, export=False, delete=True
+            analyze=True, sources=True, review=True, export=False, delete=True
         ),
         Doc.READY: dict(analyze=True, sources=True, review=False, export=True, delete=True),
     }
