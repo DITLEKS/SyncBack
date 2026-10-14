@@ -10,6 +10,8 @@ from app.infrastructure.db.models.suggestion import Suggestion
 logger = logging.getLogger("syncscribe.workers.suggestion_mapper")
 
 _CHANGE_TYPE_MAP = {"add": ChangeType.ADD, "modify": ChangeType.MODIFY, "delete": ChangeType.DELETE}
+_OLD_TEXT_LOG_LIMIT = 120
+_RAW_RESPONSE_LOG_LIMIT = 4000
 
 
 def _skip_reason(item: LLMSuggestionItem, document_text: str) -> str | None:
@@ -31,6 +33,59 @@ def _skip_reason(item: LLMSuggestionItem, document_text: str) -> str | None:
     return None
 
 
+def _short(text: str | None, limit: int) -> str:
+    text = text or ""
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _log_skipped(
+    batch: LLMSuggestionBatch,
+    skipped_items: list[tuple[str, LLMSuggestionItem]],
+    *,
+    kept: int,
+    analysis_job_id: uuid.UUID,
+    document_id: uuid.UUID,
+) -> None:
+    """Причины отброса — в тексте сообщения: консольный форматтер воркера не печатает extra.
+
+    Сырой ответ модели логируется только когда отброшено всё: это единственный способ понять,
+    что именно вернула модель, а при частичном отбросе достаточно построчного списка.
+    """
+    skipped: dict[str, int] = {}
+    for reason, _ in skipped_items:
+        skipped[reason] = skipped.get(reason, 0) + 1
+    context = {
+        "analysis_job_id": str(analysis_job_id),
+        "document_id": str(document_id),
+        "skipped": skipped,
+        "kept": kept,
+    }
+    details = ", ".join(f"{reason}={count}" for reason, count in sorted(skipped.items()))
+    logger.warning(
+        "Часть правок LLM отброшена как невалидные: %s (сохранено %d из %d)",
+        details,
+        kept,
+        len(batch.items),
+        extra=context,
+    )
+    for reason, item in skipped_items:
+        logger.warning(
+            "Отброшена правка [%s] %s / раздел %r / old_text: %r",
+            reason,
+            item.change_type,
+            item.section_ref,
+            _short(item.old_text, _OLD_TEXT_LOG_LIMIT),
+            extra=context,
+        )
+    if kept == 0:
+        logger.warning(
+            "Все %d правок LLM отброшены. Сырой ответ модели: %s",
+            len(batch.items),
+            _short(batch.raw_response, _RAW_RESPONSE_LOG_LIMIT),
+            extra=context,
+        )
+
+
 def map_to_suggestions(
     batch: LLMSuggestionBatch,
     analysis_job_id: uuid.UUID,
@@ -41,11 +96,11 @@ def map_to_suggestions(
     """Невалидные элементы пропускаются с предупреждением в логе: лучше потерять одну правку,
     чем уронить обработку источника целиком."""
     suggestions: list[Suggestion] = []
-    skipped: dict[str, int] = {}
+    skipped_items: list[tuple[str, LLMSuggestionItem]] = []
     for item in batch.items:
         reason = _skip_reason(item, document_text)
         if reason is not None:
-            skipped[reason] = skipped.get(reason, 0) + 1
+            skipped_items.append((reason, item))
             continue
         suggestions.append(
             Suggestion(
@@ -60,14 +115,12 @@ def map_to_suggestions(
                 confidence_score=item.confidence_score,
             )
         )
-    if skipped:
-        logger.warning(
-            "Часть правок LLM отброшена как невалидные",
-            extra={
-                "analysis_job_id": str(analysis_job_id),
-                "document_id": str(document_id),
-                "skipped": skipped,
-                "kept": len(suggestions),
-            },
+    if skipped_items:
+        _log_skipped(
+            batch,
+            skipped_items,
+            kept=len(suggestions),
+            analysis_job_id=analysis_job_id,
+            document_id=document_id,
         )
     return suggestions
