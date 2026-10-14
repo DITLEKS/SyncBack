@@ -63,9 +63,7 @@ def _normalize(item: LLMSuggestionItem) -> LLMSuggestionItem:
     return item
 
 
-def _resolve_anchor(
-    item: LLMSuggestionItem, document_text: str
-) -> tuple[LLMSuggestionItem, bool]:
+def _resolve_anchor(item: LLMSuggestionItem, document_text: str) -> tuple[LLMSuggestionItem, bool]:
     """Для add положить якорь в old_text; второй элемент — выбран ли он автоматически."""
     if item.change_type != "add":
         return item, False
@@ -95,10 +93,7 @@ def _skip_reason(
 
 
 def _with_inferred_note(rationale: str | None, section_ref: str) -> str:
-    note = (
-        "Место вставки выбрано автоматически: после первого абзаца раздела "
-        f"«{section_ref}»."
-    )
+    note = f"Место вставки выбрано автоматически: после первого абзаца раздела «{section_ref}»."
     if rationale and rationale.strip():
         return f"{rationale.rstrip()} {note}"
     return note
