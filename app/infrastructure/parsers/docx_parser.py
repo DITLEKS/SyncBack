@@ -3,6 +3,7 @@ import io
 from docx import Document as DocxDocument
 
 from app.domain.interfaces.document_parser import DocumentSection, ParsedDocument
+from app.domain.text_normalization import normalize_text
 
 
 class DocxParser:
@@ -12,7 +13,7 @@ class DocxParser:
         text_parts: list[str] = []
         offset = 0
         for paragraph in docx_document.paragraphs:
-            paragraph_text = paragraph.text
+            paragraph_text = normalize_text(paragraph.text)
             if paragraph.style is not None and paragraph.style.name.startswith("Heading"):
                 sections.append(
                     DocumentSection(

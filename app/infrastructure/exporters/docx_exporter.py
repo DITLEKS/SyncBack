@@ -6,6 +6,10 @@
 Добавление (add) вставляется только по якорю — новым абзацем сразу после абзаца с первым
 вхождением old_text, как в TextExporter. Якоря нет или он не найден — правка не применяется;
 место вставки за модель не выбираем.
+
+Текст абзаца и фрагменты правок сравниваются после normalize_text: в docx часто стоят
+неразрывные пробелы, а модель возвращает обычные. Нетронутые абзацы остаются как есть;
+в переписанном абзаце NBSP заменяются на обычные пробелы.
 """
 
 import io
@@ -13,6 +17,7 @@ import io
 from docx import Document as DocxDocument
 
 from app.domain.interfaces.document_exporter import AppliedChange
+from app.domain.text_normalization import normalize_text
 
 
 def _set_paragraph_text(paragraph, new_text: str) -> None:
@@ -32,11 +37,11 @@ def _insert_paragraph_after(paragraph, text: str):
 
 
 def _place_addition(document, change: AppliedChange) -> None:
-    anchor = (change.old_text or "").strip()
+    anchor = normalize_text(change.old_text or "").strip()
     if not anchor:
         return
     for paragraph in document.paragraphs:
-        if anchor in paragraph.text:
+        if anchor in normalize_text(paragraph.text):
             _insert_paragraph_after(paragraph, change.new_text or "")
             return
 
@@ -45,10 +50,12 @@ class DocxExporter:
     def apply_changes(self, raw_bytes: bytes, changes: list[AppliedChange]) -> bytes:
         document = DocxDocument(io.BytesIO(raw_bytes))
         for change in changes:
-            if change.change_type in ("modify", "delete") and change.old_text:
+            old_text = normalize_text(change.old_text or "")
+            if change.change_type in ("modify", "delete") and old_text:
                 for paragraph in document.paragraphs:
-                    if change.old_text in paragraph.text:
-                        new_text = paragraph.text.replace(change.old_text, change.new_text or "", 1)
+                    paragraph_text = normalize_text(paragraph.text)
+                    if old_text in paragraph_text:
+                        new_text = paragraph_text.replace(old_text, change.new_text or "", 1)
                         _set_paragraph_text(paragraph, new_text)
                         break
             elif change.change_type == "add" and change.new_text:

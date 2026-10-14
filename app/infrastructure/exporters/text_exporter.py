@@ -6,9 +6,14 @@
 с первым вхождением old_text. Якоря нет или он не найден — правка не применяется,
 как modify/delete с ненайденным old_text; место вставки за модель не выбираем.
 Тот же порядок повторяет фронтенд в «Чистовике», чтобы экран и экспорт не расходились.
+
+Текст файла и фрагменты правок перед сравнением нормализуются (см. normalize_text):
+модель возвращает обычные пробелы там, где в файле неразрывные. Побочный эффект —
+в экспортированном файле NBSP заменяются на обычные пробелы.
 """
 
 from app.domain.interfaces.document_exporter import AppliedChange
+from app.domain.text_normalization import normalize_text
 
 
 def _insert_block(text: str, position: int, block: str) -> str:
@@ -32,7 +37,7 @@ def _anchor_line_end(text: str, anchor: str) -> int | None:
 
 def place_addition(text: str, change: AppliedChange) -> str:
     """Вставить добавление после строки с якорем; без найденного якоря вернуть текст как есть."""
-    anchor = (change.old_text or "").strip()
+    anchor = normalize_text(change.old_text or "").strip()
     if not anchor:
         return text
     position = _anchor_line_end(text, anchor)
@@ -43,12 +48,13 @@ def place_addition(text: str, change: AppliedChange) -> str:
 
 class TextExporter:
     def apply_changes(self, raw_bytes: bytes, changes: list[AppliedChange]) -> bytes:
-        text = raw_bytes.decode("utf-8", errors="replace")
+        text = normalize_text(raw_bytes.decode("utf-8", errors="replace"))
         for change in changes:
-            if change.change_type == "modify" and change.old_text:
-                text = text.replace(change.old_text, change.new_text or "", 1)
-            elif change.change_type == "delete" and change.old_text:
-                text = text.replace(change.old_text, "", 1)
+            old_text = normalize_text(change.old_text or "")
+            if change.change_type == "modify" and old_text:
+                text = text.replace(old_text, change.new_text or "", 1)
+            elif change.change_type == "delete" and old_text:
+                text = text.replace(old_text, "", 1)
             elif change.change_type == "add" and change.new_text:
                 text = place_addition(text, change)
         return text.encode("utf-8")
