@@ -1,4 +1,4 @@
-"""Принятые добавления вставляются по месту: якорь → раздел → конец документа."""
+"""Принятые добавления вставляются только по якорю; без якоря документ не меняется."""
 
 import io
 
@@ -44,43 +44,28 @@ def test_text_add_goes_right_after_anchor_line() -> None:
     )
 
 
-def test_text_add_without_anchor_goes_to_end_of_section() -> None:
-    result = _apply_text([_add("Возможна оплата по счёту.", section="Сроки")])
-    assert result == (
-        "# Сроки\n"
-        "Срок ответа — 10 дней.\n"
-        "Оплата картой.\n"
-        "\n"
-        "Возможна оплата по счёту.\n"
-        "\n"
-        "# Ответственность\n"
-        "Стороны несут ответственность.\n"
-    )
-
-
-def test_text_section_match_is_case_insensitive() -> None:
-    result = _apply_text([_add("Дополнение.", section="сроки")])
-    assert result.index("Дополнение.") < result.index("# Ответственность")
-
-
-def test_text_add_falls_back_to_document_end_like_before() -> None:
-    result = _apply_text([_add("Новый раздел.", anchor="такого текста нет", section="Нет такого")])
-    assert result == MD.rstrip("\n") + "\n\nНовый раздел.\n"
-
-
-def test_text_anchor_wins_over_section() -> None:
+def test_text_anchor_is_used_even_if_section_points_elsewhere() -> None:
     change = _add("Уточнение.", anchor="Стороны несут ответственность.", section="Сроки")
     result = _apply_text([change])
     assert result.endswith("Стороны несут ответственность.\n\nУточнение.\n")
     assert "Уточнение." not in result.split("# Ответственность")[0]
 
 
-def test_plain_txt_without_headings_uses_anchor_then_end() -> None:
+def test_text_add_without_anchor_is_not_applied() -> None:
+    assert _apply_text([_add("Возможна оплата по счёту.", section="Сроки")]) == MD
+    assert _apply_text([_add("Пробелы.", anchor="   ", section="Сроки")]) == MD
+
+
+def test_text_add_with_unknown_anchor_is_not_applied() -> None:
+    assert _apply_text([_add("Новый раздел.", anchor="такого текста нет", section="Сроки")]) == MD
+
+
+def test_plain_txt_without_headings_uses_anchor() -> None:
     txt = "Первая строка.\nВторая строка.\n"
-    by_anchor = _apply_text([_add("Вставка.", anchor="Первая строка.")], txt)
-    assert by_anchor == "Первая строка.\n\nВставка.\n\nВторая строка.\n"
-    at_end = _apply_text([_add("Вставка.", section="Раздел")], txt)
-    assert at_end == "Первая строка.\nВторая строка.\n\nВставка.\n"
+    assert _apply_text([_add("Вставка.", anchor="Первая строка.")], txt) == (
+        "Первая строка.\n\nВставка.\n\nВторая строка.\n"
+    )
+    assert _apply_text([_add("Вставка.", section="Раздел")], txt) == txt
 
 
 # ── docx ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -96,6 +81,15 @@ def _docx_bytes() -> bytes:
     buffer = io.BytesIO()
     document.save(buffer)
     return buffer.getvalue()
+
+
+DOCX_PARAGRAPHS = [
+    "Сроки",
+    "Срок ответа — 10 дней.",
+    "Оплата картой.",
+    "Ответственность",
+    "Стороны несут ответственность.",
+]
 
 
 def _paragraphs(raw: bytes) -> list[str]:
@@ -116,23 +110,15 @@ def test_docx_add_goes_right_after_anchor_paragraph() -> None:
     ]
 
 
-def test_docx_add_without_anchor_goes_to_end_of_section() -> None:
+def test_docx_add_without_anchor_is_not_applied() -> None:
     raw = DocxExporter().apply_changes(
         _docx_bytes(), [_add("Возможна оплата по счёту.", section="Сроки")]
     )
-    assert _paragraphs(raw) == [
-        "Сроки",
-        "Срок ответа — 10 дней.",
-        "Оплата картой.",
-        "Возможна оплата по счёту.",
-        "Ответственность",
-        "Стороны несут ответственность.",
-    ]
+    assert _paragraphs(raw) == DOCX_PARAGRAPHS
 
 
-def test_docx_add_falls_back_to_document_end() -> None:
+def test_docx_add_with_unknown_anchor_is_not_applied() -> None:
     raw = DocxExporter().apply_changes(
         _docx_bytes(), [_add("Новый раздел.", anchor="нет такого", section="Нет такого")]
     )
-    assert _paragraphs(raw)[-1] == "Новый раздел."
-    assert len(_paragraphs(raw)) == 6
+    assert _paragraphs(raw) == DOCX_PARAGRAPHS

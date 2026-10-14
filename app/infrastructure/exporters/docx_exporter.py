@@ -3,9 +3,9 @@
 (все runs очищаются и заменяются одним run с новым текстом — внутреннее форматирование
 изменённого абзаца не сохраняется, это упрощение MVP).
 
-Добавление (add) вставляется по месту в том же порядке, что и в TextExporter:
-после абзаца с якорем old_text → после последнего абзаца раздела section_ref → в конец документа.
-Заголовком считается абзац со стилем Heading* — как в DocxParser.
+Добавление (add) вставляется только по якорю — новым абзацем сразу после абзаца с первым
+вхождением old_text, как в TextExporter. Якоря нет или он не найден — правка не применяется;
+место вставки за модель не выбираем.
 """
 
 import io
@@ -24,10 +24,6 @@ def _set_paragraph_text(paragraph, new_text: str) -> None:
         paragraph.add_run(new_text)
 
 
-def _is_heading(paragraph) -> bool:
-    return paragraph.style is not None and paragraph.style.name.startswith("Heading")
-
-
 def _insert_paragraph_after(paragraph, text: str):
     # python-docx умеет только insert_paragraph_before; переставляем созданный элемент за якорь.
     new_paragraph = paragraph.insert_paragraph_before(text)
@@ -36,29 +32,13 @@ def _insert_paragraph_after(paragraph, text: str):
 
 
 def _place_addition(document, change: AppliedChange) -> None:
-    text = change.new_text or ""
-    paragraphs = list(document.paragraphs)
-
     anchor = (change.old_text or "").strip()
-    if anchor:
-        for paragraph in paragraphs:
-            if anchor in paragraph.text:
-                _insert_paragraph_after(paragraph, text)
-                return
-
-    ref = change.section_ref.strip().casefold()
-    if ref:
-        for index, paragraph in enumerate(paragraphs):
-            if _is_heading(paragraph) and paragraph.text.strip().casefold() == ref:
-                last = paragraph
-                for following in paragraphs[index + 1 :]:
-                    if _is_heading(following):
-                        break
-                    last = following
-                _insert_paragraph_after(last, text)
-                return
-
-    document.add_paragraph(text)
+    if not anchor:
+        return
+    for paragraph in document.paragraphs:
+        if anchor in paragraph.text:
+            _insert_paragraph_after(paragraph, change.new_text or "")
+            return
 
 
 class DocxExporter:
