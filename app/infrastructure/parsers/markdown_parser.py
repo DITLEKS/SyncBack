@@ -1,13 +1,14 @@
 import re
 
 from app.domain.interfaces.document_parser import DocumentSection, ParsedDocument
+from app.domain.text_normalization import normalize_text
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 
 
 class MarkdownParser:
     def parse(self, raw_bytes: bytes) -> ParsedDocument:
-        text = raw_bytes.decode("utf-8", errors="replace")
+        text = normalize_text(raw_bytes.decode("utf-8", errors="replace"))
         matches = list(_HEADING_RE.finditer(text))
         sections: list[DocumentSection] = []
         for i, match in enumerate(matches):
