@@ -19,9 +19,7 @@ MD = (
 
 
 def _add(new_text: str, *, anchor: str | None = None, section: str = "") -> AppliedChange:
-    return AppliedChange(
-        section_ref=section, change_type="add", old_text=anchor, new_text=new_text
-    )
+    return AppliedChange(section_ref=section, change_type="add", old_text=anchor, new_text=new_text)
 
 
 def _apply_text(changes: list[AppliedChange], text: str = MD) -> str:
