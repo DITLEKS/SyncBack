@@ -6,13 +6,16 @@
 - modify, где new_text начинается с old_text, — это добавление: модель «дописала»
   предложение, повторив абзац. Такая правка становится add с якорем в последнем абзаце
   old_text и new_text без повторённой части — иначе для docx она была бы отброшена
-  как многоабзацная, а для md/txt заменила бы абзац сама собой;
+  как многоабзацная, а для md/txt заменила абзац сама собой;
 - якорь добавления берётся из insert_after (или old_text для старых ответов); если его нет,
-  а раздел section_ref есть в документе, якорём становится первый абзац раздела, и это
+  а раздел section_ref есть в документе, якорем становится первый абзац раздела, и это
   явно отмечается в rationale — ревьюер видит, что место выбрано автоматически;
 - для docx фрагмент с переводом строки отбрасывается: экспорт ищет old_text внутри
   одного абзаца и такую правку всё равно не применит.
 Якорь добавления сохраняется в original_text — так его ждут экспортёры и фронтенд.
+
+Логи не содержат текста документа и ответа модели: только идентификаторы, счётчики и
+причины отброса, чтобы данные пользователя не попадали в внешнюю систему логирования.
 """
 
 import logging
@@ -27,8 +30,6 @@ logger = logging.getLogger("syncscribe.workers.suggestion_mapper")
 
 _CHANGE_TYPE_MAP = {"add": ChangeType.ADD, "modify": ChangeType.MODIFY, "delete": ChangeType.DELETE}
 _SINGLE_PARAGRAPH_FORMATS = frozenset({"docx", "doc"})
-_OLD_TEXT_LOG_LIMIT = 120
-_RAW_RESPONSE_LOG_LIMIT = 4000
 
 
 def _heading_text(line: str) -> str:
@@ -120,11 +121,6 @@ def _with_inferred_note(rationale: str | None, section_ref: str) -> str:
     return note
 
 
-def _short(text: str | None, limit: int) -> str:
-    text = text or ""
-    return text if len(text) <= limit else text[:limit] + "…"
-
-
 def _log_skipped(
     batch: LLMSuggestionBatch,
     skipped_items: list[tuple[str, LLMSuggestionItem]],
@@ -133,10 +129,11 @@ def _log_skipped(
     analysis_job_id: uuid.UUID,
     document_id: uuid.UUID,
 ) -> None:
-    """Причины отброса — в тексте сообщения: консольный форматтер воркера не печатает extra.
+    """Агрегированная диагностика отброшенных правок без текста документа и ответа модели.
 
-    Сырой ответ модели логируется только когда отброшено всё: это единственный способ понять,
-    что именно вернула модель, а при частичном отбросе достаточно построчного списка.
+    Причины отброса — в тексте сообщения: консольный форматтер воркера не печатает extra.
+    Тексты old_text/new_text, section_ref и сырой ответ модели в логи не попадают:
+    они могут содержать фрагменты пользовательского документа или источников.
     """
     skipped: dict[str, int] = {}
     for reason, _ in skipped_items:
@@ -155,20 +152,12 @@ def _log_skipped(
         len(batch.items),
         extra=context,
     )
-    for reason, item in skipped_items:
-        logger.warning(
-            "Отброшена правка [%s] %s / раздел %r / old_text: %r",
-            reason,
-            item.change_type,
-            item.section_ref,
-            _short(item.old_text, _OLD_TEXT_LOG_LIMIT),
-            extra=context,
-        )
     if kept == 0:
         logger.warning(
-            "Все %d правок LLM отброшены. Сырой ответ модели: %s",
+            "Все %d правок LLM отброшены (job=%s, document=%s)",
             len(batch.items),
-            _short(batch.raw_response, _RAW_RESPONSE_LOG_LIMIT),
+            analysis_job_id,
+            document_id,
             extra=context,
         )
 
