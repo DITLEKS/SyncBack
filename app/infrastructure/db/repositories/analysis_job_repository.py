@@ -11,8 +11,10 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.exceptions import AnalysisJobConflictError
 from app.domain.interfaces.repositories import IAnalysisJobRepository
 from app.domain.lifecycle import AnalysisJobLifecycle
 from app.domain.value_objects import AnalysisJobStatusVO, KeysetPage
@@ -26,6 +28,17 @@ def _status_to_orm(vo: AnalysisJobStatusVO):
 
 
 _ACTIVE_ORM_STATUSES = tuple(_status_to_orm(st) for st in AnalysisJobLifecycle.ACTIVE)
+
+_IDEMPOTENCY_CONSTRAINT = "uq_analysis_jobs_doc_idem_key"
+
+
+def _violates_idempotency_key(exc: IntegrityError) -> bool:
+    """Какой уникальный ключ нарушен: идемпотентности или «одна активная задача».
+
+    PostgreSQL называет ограничение в сообщении, SQLite перечисляет колонки.
+    """
+    message = str(exc.orig)
+    return _IDEMPOTENCY_CONSTRAINT in message or "idempotency_key" in message
 
 
 class AnalysisJobRepository(IAnalysisJobRepository):
@@ -117,6 +130,11 @@ class AnalysisJobRepository(IAnalysisJobRepository):
 
         H-NEW-1: session.refresh(job) удалён — flush() достаточно.
         Commit — ответственность вызывающего UoW.
+
+        P0-1: INSERT выполняется в SAVEPOINT. Нарушение уникального индекса
+        («одна активная задача на документ» или ключ идемпотентности) при
+        параллельном запуске превращается в AnalysisJobConflictError, а не в
+        «сырой» IntegrityError, который клиент увидел бы как 500.
         """
         job = AnalysisJob(
             id=job_id or uuid.uuid4(),
@@ -124,8 +142,16 @@ class AnalysisJobRepository(IAnalysisJobRepository):
             status=_status_to_orm(status),
             idempotency_key=idempotency_key,
         )
-        self._session.add(job)
-        await self._session.flush()
+        try:
+            async with self._session.begin_nested():
+                self._session.add(job)
+                await self._session.flush()
+        except IntegrityError as exc:
+            by_key = idempotency_key is not None and _violates_idempotency_key(exc)
+            raise AnalysisJobConflictError(
+                "Задача анализа для документа уже создана параллельным запросом",
+                by_idempotency_key=by_key,
+            ) from exc
         return job
 
     async def set_celery_task_id(self, job: AnalysisJob, task_id: str) -> AnalysisJob:

@@ -3,6 +3,8 @@
 Повторный запуск с тем же Idempotency-Key возвращает уже созданную задачу.
 Повторный анализ готового документа требует force=true, иначе 409 с
 confirmation_required=true, чтобы клиент показал диалог подтверждения.
+Параллельные запросы не приводят к 500: проигравший гонку получает 409
+(конкурирующий запуск) или 200 с уже созданной задачей (тот же Idempotency-Key).
 """
 
 import logging
@@ -22,6 +24,7 @@ from app.core.dependencies import get_analysis_job_service
 from app.domain.exceptions import (
     AnalysisAlreadyRunningError,
     AnalysisConfirmationRequiredError,
+    AnalysisJobAlreadyExistsError,
     AnalysisJobNotCancellableError,
     DocumentNotFoundError,
     InvalidDocumentStatusError,
@@ -87,6 +90,10 @@ async def start_analysis_job(
         )
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except AnalysisJobAlreadyExistsError as exc:
+        # Параллельный запрос с тем же Idempotency-Key успел раньше: возвращаем
+        # его задачу и не ставим в очередь второй раз — это делает победитель.
+        return _job_response(exc.job, status.HTTP_200_OK)
     except AnalysisConfirmationRequiredError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
