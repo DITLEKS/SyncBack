@@ -290,11 +290,13 @@ async def test_source_not_found_is_reported(
 
 
 @pytest.mark.parametrize(
-    ("failure", "error_code"),
+    ("failure", "status", "error_code"),
     [
-        (LLMInputTooLargeError("слишком длинно"), "LLM_INPUT_TOO_LARGE"),
-        (LLMTimeoutError("нет ответа"), "LLM_UNAVAILABLE"),
-        (LLMInvalidResponseError("HTTP 400"), "LLM_INVALID_RESPONSE"),
+        (LLMInputTooLargeError("слишком длинно"), "failed", "LLM_INPUT_TOO_LARGE"),
+        # P0-2b: таймаут LLM — временная ошибка, Celery-обёртка повторяет задачу с backoff
+        # и лишь после исчерпания лимита отдаёт failed/LLM_UNAVAILABLE в chord.
+        (LLMTimeoutError("нет ответа"), "retryable", "LLM_UNAVAILABLE"),
+        (LLMInvalidResponseError("HTTP 400"), "failed", "LLM_INVALID_RESPONSE"),
     ],
 )
 async def test_llm_failures_are_reported_with_specific_codes(
@@ -302,6 +304,7 @@ async def test_llm_failures_are_reported_with_specific_codes(
     queue: FakeAnalysisQueue,  # noqa: F811
     worker: FakeLLM,
     failure: Exception,
+    status: str,
     error_code: str,
 ) -> None:
     worker.fail_for_source_text = "A"
@@ -310,5 +313,5 @@ async def test_llm_failures_are_reported_with_specific_codes(
 
     result = await tasks._process_source(job_id, source_ids[0])
 
-    assert result["status"] == "failed"
+    assert result["status"] == status
     assert result["error_code"] == error_code
