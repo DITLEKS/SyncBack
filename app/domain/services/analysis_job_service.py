@@ -116,13 +116,17 @@ class AnalysisJobService:
         Повторный анализ готового документа без force → AnalysisConfirmationRequiredError:
         проверка идёт в той же транзакции, что и создание задачи.
 
+        Если задача с таким Idempotency-Key уже есть (в том числе создана
+        параллельным запросом), бросается AnalysisJobAlreadyExistsError с этой
+        задачей: роутер вернёт 200 и не поставит её в очередь повторно.
+
         P0-1: предварительные проверки не атомарны, поэтому окончательным арбитром
         служат уникальные индексы БД. Проигравший гонку запрос получает
         AnalysisAlreadyRunningError (конкурирующий запуск) или
         AnalysisJobAlreadyExistsError (тот же Idempotency-Key), а не 500.
         """
         try:
-            return await self._create_job_once(
+            job, created = await self._create_job_once(
                 project_id, document_id, idempotency_key, force=force
             )
         except AnalysisJobConflictError as exc:
@@ -130,6 +134,9 @@ class AnalysisJobService:
             # не должно уйти подписчикам.
             self._outbox.discard()
             await self._raise_create_conflict(document_id, idempotency_key, exc)
+        if not created:
+            raise AnalysisJobAlreadyExistsError(job)
+        return job
 
     async def _create_job_once(
         self,
@@ -138,7 +145,8 @@ class AnalysisJobService:
         idempotency_key: str | None,
         *,
         force: bool,
-    ) -> AnalysisJob:
+    ) -> tuple[AnalysisJob, bool]:
+        """Вернуть (задача, создана_ли_сейчас)."""
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
             if document is None or document.project_id != project_id:
@@ -149,7 +157,7 @@ class AnalysisJobService:
             if idempotency_key is not None:
                 existing = await self._uow.jobs.get_by_idempotency_key(document_id, idempotency_key)
                 if existing is not None:
-                    return existing
+                    return existing, False
 
             if not DocumentLifecycle.can_start_analysis(document.status):
                 raise InvalidDocumentStatusError(
@@ -177,7 +185,7 @@ class AnalysisJobService:
             )
             await self._uow.documents.set_current_job(document, job.id)
             await self._commit()
-        return job
+        return job, True
 
     async def _raise_create_conflict(
         self,
