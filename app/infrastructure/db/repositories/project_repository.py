@@ -128,23 +128,29 @@ class ProjectRepository(IProjectRepository):
         }
 
     async def collect_storage_keys(self, project_id: uuid.UUID) -> list[str]:
-        """Собирает ключи хранилища для документов и файл-источников проекта."""
-        doc_keys_result = await self._session.execute(
-            select(Document.storage_key).where(
-                Document.project_id == project_id,
-                Document.storage_key.isnot(None),
-            )
+        """Собирает все ключи хранилища проекта без дубликатов (P0-3).
+
+        Для документов: storage_key, original_storage_key и exported_storage_key;
+        для источников: storage_key. Порядок сохраняется для репродуцируемости.
+        """
+        doc_rows = await self._session.execute(
+            select(
+                Document.storage_key,
+                Document.original_storage_key,
+                Document.exported_storage_key,
+            ).where(Document.project_id == project_id)
         )
-        source_keys_result = await self._session.execute(
+        source_rows = await self._session.execute(
             select(Source.storage_key).where(
                 Source.project_id == project_id,
                 Source.storage_key.isnot(None),
             )
         )
         keys: list[str] = []
-        keys.extend(r[0] for r in doc_keys_result if r[0])
-        keys.extend(r[0] for r in source_keys_result if r[0])
-        return keys
+        for row in doc_rows:
+            keys.extend(key for key in row if key)
+        keys.extend(r[0] for r in source_rows if r[0])
+        return list(dict.fromkeys(keys))
 
     async def delete(self, project: Project) -> None:
         await self._session.delete(project)
