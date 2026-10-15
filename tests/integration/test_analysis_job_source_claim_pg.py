@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.models.analysis_job_source import (
+    SOURCE_RUN_COMPLETED,
     SOURCE_RUN_PENDING,
     SOURCE_RUN_PROCESSING,
     AnalysisJobSource,
@@ -150,8 +151,20 @@ async def test_completed_source_cannot_be_claimed(
         assert await repo.mark_completed(job_state.job_id, job_state.source_id, 2) is True
         await session.commit()
 
+    # mark_completed сбрасывает lease: completed-строка не выглядит как «захваченная».
+    row = await _row(pg_sessionmaker, job_state)
+    assert row.status == SOURCE_RUN_COMPLETED
+    assert row.locked_at is None
+    assert row.suggestions_count == 2
+
     assert await _claim(pg_sessionmaker, job_state) is False
+    row = await _row(pg_sessionmaker, job_state)
+    assert row.status == SOURCE_RUN_COMPLETED
+    assert row.locked_at is None
+
+    # Даже «просроченный» locked_at на completed-строке не делает её доступной для захвата.
     await _age_lock(pg_sessionmaker, job_state, LEASE + 60)
     assert await _claim(pg_sessionmaker, job_state) is False
     row = await _row(pg_sessionmaker, job_state)
-    assert row.locked_at is None or row.status != SOURCE_RUN_PROCESSING
+    assert row.status == SOURCE_RUN_COMPLETED
+    assert row.suggestions_count == 2
