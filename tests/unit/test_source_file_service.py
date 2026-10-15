@@ -19,9 +19,7 @@ pytestmark = pytest.mark.asyncio
 async def test_returns_original_bytes_and_filename(name, expected):
     project_id, source_id = uuid.uuid4(), uuid.uuid4()
     sources = SimpleNamespace(
-        get_source=AsyncMock(
-            return_value=SimpleNamespace(name=name, storage_key="sources/s.docx")
-        )
+        get_source=AsyncMock(return_value=SimpleNamespace(name=name, storage_key="sources/s.docx"))
     )
     storage = SimpleNamespace(download=AsyncMock(return_value=b"original bytes"))
 
@@ -44,9 +42,7 @@ async def test_missing_or_foreign_source_is_not_read_from_storage():
 
 
 async def test_url_source_does_not_trigger_storage_or_external_request():
-    sources = SimpleNamespace(
-        get_source=AsyncMock(return_value=SimpleNamespace(storage_key=None))
-    )
+    sources = SimpleNamespace(get_source=AsyncMock(return_value=SimpleNamespace(storage_key=None)))
     storage = SimpleNamespace(download=AsyncMock())
 
     with pytest.raises(UnsupportedFormatError):
