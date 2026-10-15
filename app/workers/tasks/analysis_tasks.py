@@ -4,6 +4,10 @@ Chord: process_source_for_analysis_job для каждого источника 
 с результатами всех источников. Каждая задача выполняется через asyncio.run()
 (воркер должен работать с пулом prefork, см. celery_app.py), поэтому все
 подключения (БД, Redis) создаются внутри запуска и закрываются при выходе.
+
+P0-2: обработка источника идемпотентна по (job_id, source_id): правки и отметка
+«completed» пишутся в одной транзакции, повторная доставка не вызывает LLM или
+не дублирует правки.
 """
 
 from __future__ import annotations
@@ -192,6 +196,7 @@ def _failed(source_id: str, error_code: str, error_message: str) -> dict[str, An
 
 async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
     job_uuid = uuid.UUID(job_id)
+    source_uuid = uuid.UUID(source_id)
     async with uow_factory() as uow:
         job = await uow.jobs.get_by_id(job_uuid)
         if job is None:
@@ -203,12 +208,23 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
             return {"source_id": source_id, "status": "cancelled"}
         await uow.commit()
 
-        source = await uow.sources.get_by_id(uuid.UUID(source_id))
+        source = await uow.sources.get_by_id(source_uuid)
         if source is None:
             return _failed(source_id, "SOURCE_NOT_FOUND", "Источник не найден")
         document = await uow.documents.get_by_id(job.document_id)
         if document is None:
             return _failed(source_id, "DOCUMENT_NOT_FOUND", "Документ не найден")
+
+        # P0-2: повторная доставка уже завершённого источника — без LLM и записи правок.
+        run = await uow.job_sources.ensure(job_uuid, source_uuid)
+        already_done = await uow.job_sources.get_completed_count(job_uuid, source_uuid)
+        await uow.commit()
+        if already_done is not None:
+            logger.info(
+                "process_source: источник уже обработан, повтор пропущен",
+                extra={"job_id": job_id, "source_id": source_id, "run_id": str(run.id)},
+            )
+            return {"source_id": source_id, "status": "ok", "count": already_done}
 
         source_ref = _build_source_ref(source)
         document_id = document.id
@@ -241,6 +257,13 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
         # Пока шла генерация, задачу могли отменить — тогда правки не сохраняем.
         if job is None or not AnalysisJobLifecycle.is_active(job.status):
             return {"source_id": source_id, "status": "cancelled"}
+        # P0-2: первый победивший вызов пишет правки и отметку completed одной
+        # транзакцией; дубль (повторная доставка/конкурентный воркер) ничего не пишет.
+        won = await uow.job_sources.mark_completed(job_uuid, source_uuid, len(suggestions))
+        if not won:
+            await uow.rollback()
+            stored = await uow.job_sources.get_completed_count(job_uuid, source_uuid)
+            return {"source_id": source_id, "status": "ok", "count": stored or 0}
         await uow.suggestions.bulk_create(suggestions)
         await uow.commit()
 

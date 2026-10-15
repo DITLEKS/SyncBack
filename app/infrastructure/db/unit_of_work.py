@@ -25,6 +25,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.infrastructure.db.repositories.analysis_job_repository import AnalysisJobRepository
+from app.infrastructure.db.repositories.analysis_job_source_repository import (
+    AnalysisJobSourceRepository,
+)
 from app.infrastructure.db.repositories.audit_log_repository import AuditLogRepository
 from app.infrastructure.db.repositories.document_repository import DocumentRepository
 from app.infrastructure.db.repositories.project_repository import ProjectRepository
@@ -53,6 +56,8 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         # Extended repositories
         self.projects = ProjectRepository(session)
         self.sources = SourceRepository(session)
+        # P0-2: состояние обработки источников внутри job
+        self.job_sources = AnalysisJobSourceRepository(session)
 
         # Auth repositories (HIGH-A: добавлен, чтобы uow.users не давал AttributeError)
         self.users = UserRepository(session)
