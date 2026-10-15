@@ -138,8 +138,10 @@ class IDocumentRepository(ABC):
     ) -> dict[str, str | None] | None:
         """Удалить документ проекта одним запросом без предварительной загрузки.
 
-        Возвращает ключи файлов в хранилище ({"storage_key", "original_storage_key"})
+        Возвращает ключи файлов в хранилище
+        ({"storage_key", "original_storage_key", "exported_storage_key"})
         для последующей очистки или None, если документа в проекте нет.
+        Значение каждого ключа может быть None.
         """
         ...
 
