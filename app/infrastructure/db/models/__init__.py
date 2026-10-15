@@ -4,6 +4,7 @@
 """
 
 from app.infrastructure.db.models.analysis_job import AnalysisJob  # noqa: F401
+from app.infrastructure.db.models.analysis_job_source import AnalysisJobSource  # noqa: F401
 from app.infrastructure.db.models.audit_log import AuditLog  # noqa: F401
 from app.infrastructure.db.models.dashboard_snapshot import DashboardSnapshot  # noqa: F401
 from app.infrastructure.db.models.document import Document  # noqa: F401
