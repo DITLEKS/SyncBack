@@ -40,13 +40,22 @@ class AnalysisJobSourceRepository:
             raise RuntimeError("analysis_job_sources: запись не создана")
         return row
 
-    async def claim(self, job_id: uuid.UUID, source_id: uuid.UUID, lease_seconds: int) -> bool:
+    async def claim(
+        self,
+        job_id: uuid.UUID,
+        source_id: uuid.UUID,
+        lease_seconds: int,
+        claim_token: uuid.UUID | None = None,
+    ) -> bool:
         """Атомарно захватить источник перед вызовом LLM (P0-2b).
 
         True — источник был pending либо в processing с просроченным lease и
         теперь принадлежит этому воркеру; False — его держит другой воркер или
         он уже completed. Конкурентный UPDATE ждёт блокировку строки и после
         коммита первого перепроверяет условие.
+
+        claim_token сохраняется как владелец захвата: release и mark_completed
+        с тем же токеном не затронут захват, перехваченный другим воркером.
         """
         now = datetime.now(UTC)
         expired_before = now - timedelta(seconds=lease_seconds)
@@ -63,44 +72,70 @@ class AnalysisJobSourceRepository:
                     ),
                 ),
             )
-            .values(status=SOURCE_RUN_PROCESSING, locked_at=now)
+            .values(status=SOURCE_RUN_PROCESSING, locked_at=now, claim_token=claim_token)
         )
         return result.rowcount == 1  # type: ignore[attr-defined]
 
-    async def release(self, job_id: uuid.UUID, source_id: uuid.UUID) -> None:
-        """Вернуть источник в pending после сбоя или отмены, чтобы повтор не ждал lease."""
+    async def release(
+        self,
+        job_id: uuid.UUID,
+        source_id: uuid.UUID,
+        claim_token: uuid.UUID | None = None,
+    ) -> None:
+        """Вернуть источник в pending после сбоя или отмены, чтобы повтор не ждал lease.
+
+        С claim_token освобождается только захват этого владельца; без токена —
+        любой захват в processing.
+        """
+        conditions = [
+            AnalysisJobSource.job_id == job_id,
+            AnalysisJobSource.source_id == source_id,
+            AnalysisJobSource.status == SOURCE_RUN_PROCESSING,
+        ]
+        if claim_token is not None:
+            conditions.append(AnalysisJobSource.claim_token == claim_token)
         await self._session.execute(
             update(AnalysisJobSource)
-            .where(
-                AnalysisJobSource.job_id == job_id,
-                AnalysisJobSource.source_id == source_id,
-                AnalysisJobSource.status == SOURCE_RUN_PROCESSING,
-            )
-            .values(status=SOURCE_RUN_PENDING, locked_at=None)
+            .where(*conditions)
+            .values(status=SOURCE_RUN_PENDING, locked_at=None, claim_token=None)
         )
 
     async def mark_completed(
-        self, job_id: uuid.UUID, source_id: uuid.UUID, suggestions_count: int
+        self,
+        job_id: uuid.UUID,
+        source_id: uuid.UUID,
+        suggestions_count: int,
+        claim_token: uuid.UUID | None = None,
     ) -> bool:
         """Атомарно пометить источник завершённым.
 
         True — этот вызов был первым и должен записать правки в той же
         транзакции; False — источник уже завершён (дубль доставки
-        или конкурентный воркер). Конкурентный UPDATE ждёт блокировку
+        или конкурентный воркер) либо, при заданном claim_token, захват
+        перешёл к другому воркеру. Конкурентный UPDATE ждёт блокировку
         строки и после коммита первого перепроверяет условие.
         """
+        conditions = [
+            AnalysisJobSource.job_id == job_id,
+            AnalysisJobSource.source_id == source_id,
+            AnalysisJobSource.status != SOURCE_RUN_COMPLETED,
+        ]
+        if claim_token is not None:
+            conditions.extend(
+                [
+                    AnalysisJobSource.status == SOURCE_RUN_PROCESSING,
+                    AnalysisJobSource.claim_token == claim_token,
+                ]
+            )
         result = await self._session.execute(
             update(AnalysisJobSource)
-            .where(
-                AnalysisJobSource.job_id == job_id,
-                AnalysisJobSource.source_id == source_id,
-                AnalysisJobSource.status != SOURCE_RUN_COMPLETED,
-            )
+            .where(*conditions)
             .values(
                 status=SOURCE_RUN_COMPLETED,
                 suggestions_count=suggestions_count,
                 finished_at=datetime.now(UTC),
                 locked_at=None,
+                claim_token=None,
             )
         )
         return result.rowcount == 1  # type: ignore[attr-defined]

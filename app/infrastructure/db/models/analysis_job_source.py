@@ -4,7 +4,8 @@
 повторной доставке Celery-задачи (acks_late / reject_on_worker_lost).
 
 P0-2b: статус processing + locked_at (lease) защищают от двойного вызова LLM
-при конкурентной обработке одного источника.
+при конкурентной обработке одного источника. claim_token отличает владельца
+текущего захвата от воркера, у которого lease уже истёк.
 """
 
 import uuid
@@ -44,3 +45,4 @@ class AnalysisJobSource(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)

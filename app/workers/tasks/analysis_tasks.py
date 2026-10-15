@@ -14,6 +14,9 @@ P0-2b: перед вызовом LLM источник захватывается
 и повторяет задачу через Celery; таймаут LLM повторяется с backoff. Ожидание занятого
 источника и повторы LLM считаются раздельно (busy_attempts / llm_attempts в kwargs
 задачи), а не общим self.request.retries.
+
+Захват помечается уникальным claim_token: снять его или завершить источник может только
+владелец, поэтому воркер с просроченным lease не сбросит захват, перехваченный другим.
 """
 
 from __future__ import annotations
@@ -231,11 +234,13 @@ def _retryable(source_id: str, error_code: str, error_message: str) -> dict[str,
     }
 
 
-async def _release_source(job_uuid: uuid.UUID, source_uuid: uuid.UUID) -> None:
+async def _release_source(
+    job_uuid: uuid.UUID, source_uuid: uuid.UUID, claim_token: uuid.UUID | None = None
+) -> None:
     """Снять захват (processing → pending), чтобы повтор не ждал истечения lease."""
     try:
         async with uow_factory() as uow:
-            await uow.job_sources.release(job_uuid, source_uuid)
+            await uow.job_sources.release(job_uuid, source_uuid, claim_token=claim_token)
             await uow.commit()
     except Exception:
         logger.warning(
@@ -248,6 +253,7 @@ async def _release_source(job_uuid: uuid.UUID, source_uuid: uuid.UUID) -> None:
 async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
     job_uuid = uuid.UUID(job_id)
     source_uuid = uuid.UUID(source_id)
+    claim_token = uuid.uuid4()
     async with uow_factory() as uow:
         job = await uow.jobs.get_by_id(job_uuid)
         if job is None:
@@ -272,7 +278,9 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
         # P0-2b: захват источника до вызова LLM; commit делает метку видимой другим воркерам.
         claimed = False
         if already_done is None:
-            claimed = await uow.job_sources.claim(job_uuid, source_uuid, _SOURCE_LEASE_SECONDS)
+            claimed = await uow.job_sources.claim(
+                job_uuid, source_uuid, _SOURCE_LEASE_SECONDS, claim_token=claim_token
+            )
         await uow.commit()
         if already_done is not None:
             logger.info(
@@ -303,7 +311,7 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
             "Ошибка генерации правок для источника",
             extra={"job_id": job_id, "source_id": source_id},
         )
-        await _release_source(job_uuid, source_uuid)
+        await _release_source(job_uuid, source_uuid, claim_token)
         error_code = _generation_error_code(exc)
         if isinstance(exc, LLMTimeoutError):
             return _retryable(source_id, error_code, str(exc))
@@ -321,16 +329,21 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
         job = await uow.jobs.get_by_id(job_uuid)
         # Пока шла генерация, задачу могли отменить — тогда правки не сохраняем.
         if job is None or not AnalysisJobLifecycle.is_active(job.status):
-            await uow.job_sources.release(job_uuid, source_uuid)
+            await uow.job_sources.release(job_uuid, source_uuid, claim_token=claim_token)
             await uow.commit()
             return {"source_id": source_id, "status": "cancelled"}
         # P0-2: первый победивший вызов пишет правки и отметку completed одной
         # транзакцией; дубль (повторная доставка/конкурентный воркер) ничего не пишет.
-        won = await uow.job_sources.mark_completed(job_uuid, source_uuid, len(suggestions))
+        won = await uow.job_sources.mark_completed(
+            job_uuid, source_uuid, len(suggestions), claim_token=claim_token
+        )
         if not won:
             await uow.rollback()
             stored = await uow.job_sources.get_completed_count(job_uuid, source_uuid)
-            return {"source_id": source_id, "status": "ok", "count": stored or 0}
+            if stored is None:
+                # Захват перешёл другому воркеру, но он ещё не завершил источник.
+                return {"source_id": source_id, "status": "busy"}
+            return {"source_id": source_id, "status": "ok", "count": stored}
         await uow.suggestions.bulk_create(suggestions)
         await uow.commit()
 

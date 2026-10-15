@@ -13,6 +13,7 @@ Namespace-атрибуты (все объявлены здесь для type-che
   documents   — IDocumentRepository
   suggestions — ISuggestionRepository
   jobs        — IAnalysisJobRepository
+  job_sources — IAnalysisJobSourceRepository
   audit       — IAuditLogRepository
   projects    — IProjectRepository
   sources     — ISourceRepository
@@ -30,6 +31,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from app.domain.interfaces.job_source_repository import IAnalysisJobSourceRepository
     from app.domain.interfaces.repositories import (
         IAnalysisJobRepository,
         IAuditLogRepository,
@@ -58,6 +60,7 @@ class IUnitOfWork(ABC):
     documents: IDocumentRepository
     suggestions: ISuggestionRepository
     jobs: IAnalysisJobRepository
+    job_sources: IAnalysisJobSourceRepository
     audit: IAuditLogRepository
 
     # Extended
@@ -92,6 +95,6 @@ class IUnitOfWork(ABC):
     async def refresh(self, obj: Any, attribute_names: list[str] | None = None) -> None:
         """H-4: Обновить ORM-объект из БД через интерфейс.
 
-        Используется в воркере вместо прямого обращения к uow._session.
+        Используется в воркере вместо прямого обращения к uow._session напрямую.
         attribute_names: список ленивых атрибутов для загрузки (напр., ["sources"]).
         """
