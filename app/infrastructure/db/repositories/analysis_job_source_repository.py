@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -58,7 +58,7 @@ class AnalysisJobSourceRepository:
             .values(
                 status=SOURCE_RUN_COMPLETED,
                 suggestions_count=suggestions_count,
-                finished_at=datetime.now(timezone.utc),
+                finished_at=datetime.now(UTC),
             )
         )
         return result.rowcount == 1  # type: ignore[attr-defined]
