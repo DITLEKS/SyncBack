@@ -4,7 +4,7 @@ POST /projects/{id}/sources                 — создать URL-источн�
 POST /projects/{id}/sources/note            — создать текстовую заметку (deprecated)
 POST /projects/{id}/sources/file            — загрузить файл
 GET  /projects/{id}/sources                 — список с пагинацией
-GET  /projects/{id}/sources/{sid}/download  — ссылка на скачивание (presigned или адрес url)
+GET  /projects/{id}/sources/{sid}/file      — исходный файл (см. source_files.py)
 GET  /projects/{id}/sources/{sid}/content   — текст для просмотра
 DEL  /projects/{id}/sources/{sid}           — удалить источник
 
@@ -26,7 +26,6 @@ from app.api.schemas.source import (
     NoteCreateRequest,
     SourceContentResponse,
     SourceCreateRequest,
-    SourceDownloadResponse,
     SourceResponse,
 )
 from app.api.upload_utils import upload_content
@@ -165,21 +164,6 @@ async def list_sources(
         limit=limit,
         offset=offset,
     )
-
-
-@router.get("/{source_id}/download", response_model=SourceDownloadResponse)
-async def get_source_download_url(
-    source_id: uuid.UUID,
-    project: Project = Depends(get_allowed_project),
-    source_service: SourceService = Depends(get_source_service),
-) -> SourceDownloadResponse:
-    """Ссылка на скачивание: presigned URL для файла, сам адрес для url-источника."""
-    try:
-        source = await source_service.get_source(project.id, source_id)
-        url, expires_in = await source_service.get_download_url(source)
-    except _SOURCE_ERRORS as exc:
-        raise _to_http(exc) from exc
-    return SourceDownloadResponse(download_url=url, expires_in=expires_in)
 
 
 @router.get("/{source_id}/content", response_model=SourceContentResponse)
