@@ -50,7 +50,7 @@ def _map(
     )
 
 
-# ── якорь добавления ───────────────────────────────────────────────────────────────────────────────────
+# ── якорь добавления ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
 def test_add_with_insert_after_is_kept_and_anchor_stored_in_original_text() -> None:
@@ -100,7 +100,7 @@ def test_anchor_is_matched_after_strip() -> None:
     assert len(_map(_item("add", "", insert_after="  Оплата картой.\n"))) == 1
 
 
-# ── infer_anchor ────────────────────────────────────────────────────────────────────────────────────────
+# ── infer_anchor ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
 def test_infer_anchor_handles_markdown_and_plain_headings() -> None:
@@ -116,7 +116,7 @@ def test_infer_anchor_falls_back_to_heading_and_none() -> None:
     assert infer_anchor(DOCUMENT, "") is None
 
 
-# ── modify / delete ────────────────────────────────────────────────────────────────────────────────────
+# ── modify / delete ──────────────────────────────────────────────────────────────────────────────────────────────────
 
 
 def test_modify_with_empty_new_text_becomes_delete() -> None:
@@ -143,7 +143,7 @@ def test_unknown_change_type_is_still_dropped() -> None:
     assert [s.change_type for s in result] == [ChangeType.ADD]
 
 
-# ── modify с дописыванием → add ───────────────────────────────────────────────────────────────────────────────
+# ── modify с дописыванием → add ────────────────────────────────────────────────────────────────────────────────────────────────
 
 
 def test_modify_that_appends_text_becomes_add_after_old_text() -> None:
@@ -183,10 +183,12 @@ def test_appended_modifies_are_counted_in_log(caplog: pytest.LogCaptureFixture) 
     )
 
 
-# ── логи ──────────────────────────────────────────────────────────────────────────────────────────────
+# ── логи ──────────────────────────────────────────────────────────────────────────────────────────────────
 
 
-def test_skip_reasons_and_items_are_in_log_message(caplog: pytest.LogCaptureFixture) -> None:
+def test_skip_reasons_are_in_log_message_without_user_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         result = _map(
             _item("add", "", insert_after="Оплата картой."),
@@ -199,11 +201,11 @@ def test_skip_reasons_and_items_are_in_log_message(caplog: pytest.LogCaptureFixt
     assert "add_anchor_not_in_document=1" in summary
     assert "add_without_anchor=1" in summary
     assert "сохранено 1 из 3" in summary
-    assert any("[add_anchor_not_in_document]" in m and "такого текста нет" in m for m in messages)
+    assert not any("такого текста нет" in m for m in messages)
     assert not any("Сырой ответ" in m for m in messages)
 
 
-def test_raw_response_is_logged_only_when_everything_is_dropped(
+def test_raw_response_is_never_logged_when_everything_is_dropped(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     raw = '{"suggestions": [{"change_type": "add", "insert_after": "нет"}]}'
@@ -211,7 +213,9 @@ def test_raw_response_is_logged_only_when_everything_is_dropped(
         result = _map(_item("add", "", insert_after="такого текста нет"), raw_response=raw)
     assert result == []
     messages = [record.getMessage() for record in caplog.records]
-    assert any(m.startswith("Все 1 правок LLM отброшены") and raw in m for m in messages)
+    assert any(m.startswith("Все 1 правок LLM отброшены") for m in messages)
+    assert not any(raw in m for m in messages)
+    assert not any("такого текста нет" in m for m in messages)
 
 
 def test_inferred_anchors_are_counted_in_log(caplog: pytest.LogCaptureFixture) -> None:
