@@ -4,7 +4,7 @@
 Текстовые заметки (/sources/note) сохраняются как файл и возвращаются с type=file.
 
 В ответах есть url и created_at: фронтенд показывает дату загрузки и открывает url-источник
-по адресу без отдельного запроса; файловые источники скачиваются через /download и читаются
+по адресу без отдельного запроса; файловые источники скачиваются через /file и читаются
 через /content.
 """
 
@@ -71,14 +71,6 @@ class SourceBadge(BaseModel):
     model_config = {"from_attributes": True}
 
     _normalise_type = field_validator("type", mode="before")(_enum_value)
-
-
-class SourceDownloadResponse(BaseModel):
-    download_url: str
-    expires_in: int | None = Field(
-        default=None,
-        description="Срок жизни ссылки в секундах; None для url-источника — это его постоянный адрес",
-    )
 
 
 class SourceContentResponse(BaseModel):
