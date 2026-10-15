@@ -1,4 +1,4 @@
-"""P0-2b: claim/release источника перед вызовом LLM (PostgreSQL)."""
+"""claim/release/mark_completed источника перед вызовом LLM (PostgreSQL)."""
 
 from __future__ import annotations
 
@@ -65,9 +65,35 @@ async def job_state(pg_sessionmaker: async_sessionmaker[AsyncSession]) -> JobSta
     return state
 
 
-async def _claim(sessionmaker: async_sessionmaker[AsyncSession], state: JobState) -> bool:
+async def _claim(
+    sessionmaker: async_sessionmaker[AsyncSession], state: JobState
+) -> uuid.UUID | None:
     async with sessionmaker() as session:
-        won = await AnalysisJobSourceRepository(session).claim(state.job_id, state.source_id, LEASE)
+        token = await AnalysisJobSourceRepository(session).claim(
+            state.job_id, state.source_id, LEASE
+        )
+        await session.commit()
+        return token
+
+
+async def _release(
+    sessionmaker: async_sessionmaker[AsyncSession], state: JobState, token: uuid.UUID
+) -> None:
+    async with sessionmaker() as session:
+        await AnalysisJobSourceRepository(session).release(state.job_id, state.source_id, token)
+        await session.commit()
+
+
+async def _complete(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    state: JobState,
+    token: uuid.UUID,
+    count: int,
+) -> bool:
+    async with sessionmaker() as session:
+        won = await AnalysisJobSourceRepository(session).mark_completed(
+            state.job_id, state.source_id, token, count
+        )
         await session.commit()
         return won
 
@@ -104,65 +130,103 @@ async def test_concurrent_claim_has_one_winner(
         _claim(pg_sessionmaker, job_state),
     )
 
-    assert sorted(results) == [False, True]
+    winners = [token for token in results if token is not None]
+    assert len(winners) == 1
     row = await _row(pg_sessionmaker, job_state)
     assert row.status == SOURCE_RUN_PROCESSING
     assert row.locked_at is not None
+    assert row.lock_token == winners[0]
 
 
 async def test_fresh_lease_is_not_reclaimed(
     pg_sessionmaker: async_sessionmaker[AsyncSession], job_state: JobState
 ) -> None:
-    assert await _claim(pg_sessionmaker, job_state) is True
-    assert await _claim(pg_sessionmaker, job_state) is False
+    assert await _claim(pg_sessionmaker, job_state) is not None
+    assert await _claim(pg_sessionmaker, job_state) is None
 
 
 async def test_expired_lease_is_taken_over(
     pg_sessionmaker: async_sessionmaker[AsyncSession], job_state: JobState
 ) -> None:
-    assert await _claim(pg_sessionmaker, job_state) is True
+    first = await _claim(pg_sessionmaker, job_state)
+    assert first is not None
     await _age_lock(pg_sessionmaker, job_state, LEASE + 60)
 
-    assert await _claim(pg_sessionmaker, job_state) is True
+    second = await _claim(pg_sessionmaker, job_state)
+    assert second is not None
+    assert second != first
 
 
 async def test_release_allows_immediate_reclaim(
     pg_sessionmaker: async_sessionmaker[AsyncSession], job_state: JobState
 ) -> None:
-    assert await _claim(pg_sessionmaker, job_state) is True
-    async with pg_sessionmaker() as session:
-        await AnalysisJobSourceRepository(session).release(job_state.job_id, job_state.source_id)
-        await session.commit()
+    token = await _claim(pg_sessionmaker, job_state)
+    assert token is not None
+    await _release(pg_sessionmaker, job_state, token)
 
     row = await _row(pg_sessionmaker, job_state)
     assert row.status == SOURCE_RUN_PENDING
     assert row.locked_at is None
-    assert await _claim(pg_sessionmaker, job_state) is True
+    assert row.lock_token is None
+    assert await _claim(pg_sessionmaker, job_state) is not None
 
 
 async def test_completed_source_cannot_be_claimed(
     pg_sessionmaker: async_sessionmaker[AsyncSession], job_state: JobState
 ) -> None:
-    assert await _claim(pg_sessionmaker, job_state) is True
-    async with pg_sessionmaker() as session:
-        repo = AnalysisJobSourceRepository(session)
-        assert await repo.mark_completed(job_state.job_id, job_state.source_id, 2) is True
-        await session.commit()
+    token = await _claim(pg_sessionmaker, job_state)
+    assert token is not None
+    assert await _complete(pg_sessionmaker, job_state, token, 2) is True
 
     # mark_completed сбрасывает lease: completed-строка не выглядит как «захваченная».
     row = await _row(pg_sessionmaker, job_state)
     assert row.status == SOURCE_RUN_COMPLETED
     assert row.locked_at is None
+    assert row.lock_token is None
     assert row.suggestions_count == 2
 
-    assert await _claim(pg_sessionmaker, job_state) is False
+    assert await _claim(pg_sessionmaker, job_state) is None
     row = await _row(pg_sessionmaker, job_state)
     assert row.status == SOURCE_RUN_COMPLETED
     assert row.locked_at is None
 
     # Даже «просроченный» locked_at на completed-строке не делает её доступной для захвата.
     await _age_lock(pg_sessionmaker, job_state, LEASE + 60)
-    assert await _claim(pg_sessionmaker, job_state) is False
+    assert await _claim(pg_sessionmaker, job_state) is None
     row = await _row(pg_sessionmaker, job_state)
     assert row.status == SOURCE_RUN_COMPLETED
     assert row.suggestions_count == 2
+
+
+async def test_taken_over_worker_cannot_complete_or_release(
+    pg_sessionmaker: async_sessionmaker[AsyncSession], job_state: JobState
+) -> None:
+    """A захватил, lease истёк, B перехватил: A больше ничего не меняет, B завершает."""
+    stale = await _claim(pg_sessionmaker, job_state)
+    assert stale is not None
+    await _age_lock(pg_sessionmaker, job_state, LEASE + 60)
+    owner = await _claim(pg_sessionmaker, job_state)
+    assert owner is not None
+
+    await _release(pg_sessionmaker, job_state, stale)
+    row = await _row(pg_sessionmaker, job_state)
+    assert row.status == SOURCE_RUN_PROCESSING
+    assert row.lock_token == owner
+
+    assert await _complete(pg_sessionmaker, job_state, stale, 5) is False
+    row = await _row(pg_sessionmaker, job_state)
+    assert row.status == SOURCE_RUN_PROCESSING
+    assert row.lock_token == owner
+
+    assert await _complete(pg_sessionmaker, job_state, owner, 2) is True
+    row = await _row(pg_sessionmaker, job_state)
+    assert row.status == SOURCE_RUN_COMPLETED
+    assert row.suggestions_count == 2
+
+
+async def test_pending_source_cannot_be_completed_without_claim(
+    pg_sessionmaker: async_sessionmaker[AsyncSession], job_state: JobState
+) -> None:
+    assert await _complete(pg_sessionmaker, job_state, uuid.uuid4(), 1) is False
+    row = await _row(pg_sessionmaker, job_state)
+    assert row.status == SOURCE_RUN_PENDING

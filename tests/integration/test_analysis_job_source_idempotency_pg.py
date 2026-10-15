@@ -1,4 +1,4 @@
-"""P0-2: повторная доставка задачи источника не дублирует правки (PostgreSQL)."""
+"""Повторная доставка задачи источника не дублирует правки (PostgreSQL)."""
 
 from __future__ import annotations
 
@@ -20,6 +20,9 @@ from app.infrastructure.db.models.user import User
 from app.infrastructure.db.repositories.analysis_job_source_repository import (
     AnalysisJobSourceRepository,
 )
+
+
+LEASE = 600
 
 
 @dataclass
@@ -53,13 +56,26 @@ async def job_state(pg_sessionmaker: async_sessionmaker[AsyncSession]) -> JobSta
         return JobState(job_id=job.id, source_id=uuid.uuid4())
 
 
-async def _complete(
-    sessionmaker: async_sessionmaker[AsyncSession], state: JobState, count: int
-) -> bool:
+async def _claim(
+    sessionmaker: async_sessionmaker[AsyncSession], state: JobState
+) -> uuid.UUID | None:
     async with sessionmaker() as session:
         repo = AnalysisJobSourceRepository(session)
         await repo.ensure(state.job_id, state.source_id)
-        first = await repo.mark_completed(state.job_id, state.source_id, count)
+        token = await repo.claim(state.job_id, state.source_id, LEASE)
+        await session.commit()
+        return token
+
+
+async def _complete(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    state: JobState,
+    token: uuid.UUID,
+    count: int,
+) -> bool:
+    async with sessionmaker() as session:
+        repo = AnalysisJobSourceRepository(session)
+        first = await repo.mark_completed(state.job_id, state.source_id, token, count)
         await session.commit()
         return first
 
@@ -88,8 +104,13 @@ async def test_ensure_is_idempotent(
 async def test_redelivery_after_completion_is_skipped(
     pg_sessionmaker: async_sessionmaker[AsyncSession], job_state: JobState
 ) -> None:
-    assert await _complete(pg_sessionmaker, job_state, 3) is True
-    assert await _complete(pg_sessionmaker, job_state, 5) is False
+    token = await _claim(pg_sessionmaker, job_state)
+    assert token is not None
+    assert await _complete(pg_sessionmaker, job_state, token, 3) is True
+
+    # Повторная доставка: источник уже completed, захватить и завершить его нельзя.
+    assert await _claim(pg_sessionmaker, job_state) is None
+    assert await _complete(pg_sessionmaker, job_state, token, 5) is False
 
     async with pg_sessionmaker() as session:
         repo = AnalysisJobSourceRepository(session)
@@ -99,13 +120,13 @@ async def test_redelivery_after_completion_is_skipped(
 async def test_concurrent_completion_has_one_winner(
     pg_sessionmaker: async_sessionmaker[AsyncSession], job_state: JobState
 ) -> None:
-    async with pg_sessionmaker() as session:
-        await AnalysisJobSourceRepository(session).ensure(job_state.job_id, job_state.source_id)
-        await session.commit()
+    token = await _claim(pg_sessionmaker, job_state)
+    assert token is not None
 
+    # Две доставки одного захвата завершаются одновременно: правки пишет одна.
     results = await asyncio.gather(
-        _complete(pg_sessionmaker, job_state, 2),
-        _complete(pg_sessionmaker, job_state, 2),
+        _complete(pg_sessionmaker, job_state, token, 2),
+        _complete(pg_sessionmaker, job_state, token, 2),
     )
 
     assert sorted(results) == [False, True]
