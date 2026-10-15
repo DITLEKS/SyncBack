@@ -31,6 +31,11 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
+# P0-2b: лимиты времени (soft 540 с / hard 570 с) заданы на самой задаче
+# process_source_for_analysis_job (см. analysis_tasks.py) вместе с lease захвата
+# источника (600 с), чтобы инвариант «lease больше жёсткого лимита» жил в одном
+# месте и не распространялся на finalize_analysis_job и будущие задачи.
+
 celery_app = Celery(
     "syncscribe",
     broker=settings.redis_url,

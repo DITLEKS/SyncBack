@@ -8,6 +8,12 @@ Chord: process_source_for_analysis_job для каждого источника 
 P0-2: обработка источника идемпотентна по (job_id, source_id): правки и отметка
 «completed» пишутся в одной транзакции, повторная доставка не вызывает LLM или
 не дублирует правки.
+
+P0-2b: перед вызовом LLM источник захватывается (claim: processing + lease), чтобы
+конкурентный воркер не платил за второй запрос. Проигравший получает статус busy
+и повторяет задачу через Celery; таймаут LLM повторяется с backoff. Ожидание занятого
+источника и повторы LLM считаются раздельно (busy_attempts / llm_attempts в kwargs
+задачи), а не общим self.request.retries.
 """
 
 from __future__ import annotations
@@ -20,6 +26,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
+from celery import Task
+from celery.exceptions import MaxRetriesExceededError
 from redis.asyncio import Redis
 
 from app.core.config import get_settings
@@ -48,6 +56,26 @@ logger = logging.getLogger("syncscribe.workers.analysis")
 
 _PARSED_DOC_KEY_PREFIX = "parsed_doc:"
 _PARSED_DOC_TTL_SECONDS = 3600
+
+# P0-2b: lease захвата источника; должен быть больше жёсткого лимита времени задачи
+# (_TASK_TIME_LIMIT_SECONDS), иначе источник могут перехватить у ещё живого воркера.
+_SOURCE_LEASE_SECONDS = 600
+# Лимиты времени заданы на уровне задачи обработки источника, а не глобально в celery_app:
+# finalize_analysis_job и будущие задачи не должны наследовать ограничения LLM-пайплайна.
+_TASK_SOFT_TIME_LIMIT_SECONDS = 540
+_TASK_TIME_LIMIT_SECONDS = 570
+# Проигравший захват ждёт победителя: 20 повторов по 30 с ≈ lease.
+_BUSY_RETRY_COUNTDOWN_SECONDS = 30
+_BUSY_RETRY_LIMIT = 20
+# Таймаут LLM повторяется не более трёх раз, затем источник считается failed.
+_LLM_RETRY_LIMIT = 3
+_LLM_RETRY_BACKOFF_SECONDS = 30
+# Счётчики busy и LLM независимы и передаются через kwargs повтора; max_retries Celery —
+# лишь общий потолок, который при соблюдении обоих лимитов не достигается.
+_TASK_MAX_RETRIES = _BUSY_RETRY_LIMIT + _LLM_RETRY_LIMIT
+
+if _SOURCE_LEASE_SECONDS <= _TASK_TIME_LIMIT_SECONDS:  # pragma: no cover - инвариант конфигурации
+    raise RuntimeError("_SOURCE_LEASE_SECONDS должен быть больше _TASK_TIME_LIMIT_SECONDS")
 
 # Точка подмены в тестах: фабрика UoW над изолированным подключением.
 uow_factory = isolated_uow
@@ -194,6 +222,29 @@ def _failed(source_id: str, error_code: str, error_message: str) -> dict[str, An
     }
 
 
+def _retryable(source_id: str, error_code: str, error_message: str) -> dict[str, Any]:
+    return {
+        "source_id": source_id,
+        "status": "retryable",
+        "error_code": error_code,
+        "error_message": error_message,
+    }
+
+
+async def _release_source(job_uuid: uuid.UUID, source_uuid: uuid.UUID) -> None:
+    """Снять захват (processing → pending), чтобы повтор не ждал истечения lease."""
+    try:
+        async with uow_factory() as uow:
+            await uow.job_sources.release(job_uuid, source_uuid)
+            await uow.commit()
+    except Exception:
+        logger.warning(
+            "Не удалось снять захват источника, он освободится по истечении lease",
+            extra={"job_id": str(job_uuid), "source_id": str(source_uuid)},
+            exc_info=True,
+        )
+
+
 async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
     job_uuid = uuid.UUID(job_id)
     source_uuid = uuid.UUID(source_id)
@@ -218,6 +269,10 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
         # P0-2: повторная доставка уже завершённого источника — без LLM и записи правок.
         run = await uow.job_sources.ensure(job_uuid, source_uuid)
         already_done = await uow.job_sources.get_completed_count(job_uuid, source_uuid)
+        # P0-2b: захват источника до вызова LLM; commit делает метку видимой другим воркерам.
+        claimed = False
+        if already_done is None:
+            claimed = await uow.job_sources.claim(job_uuid, source_uuid, _SOURCE_LEASE_SECONDS)
         await uow.commit()
         if already_done is not None:
             logger.info(
@@ -225,6 +280,12 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
                 extra={"job_id": job_id, "source_id": source_id, "run_id": str(run.id)},
             )
             return {"source_id": source_id, "status": "ok", "count": already_done}
+        if not claimed:
+            logger.info(
+                "process_source: источник захвачен другим воркером",
+                extra={"job_id": job_id, "source_id": source_id, "run_id": str(run.id)},
+            )
+            return {"source_id": source_id, "status": "busy"}
 
         source_ref = _build_source_ref(source)
         document_id = document.id
@@ -242,7 +303,11 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
             "Ошибка генерации правок для источника",
             extra={"job_id": job_id, "source_id": source_id},
         )
-        return _failed(source_id, _generation_error_code(exc), str(exc))
+        await _release_source(job_uuid, source_uuid)
+        error_code = _generation_error_code(exc)
+        if isinstance(exc, LLMTimeoutError):
+            return _retryable(source_id, error_code, str(exc))
+        return _failed(source_id, error_code, str(exc))
 
     suggestions = map_to_suggestions(
         batch,
@@ -256,6 +321,8 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
         job = await uow.jobs.get_by_id(job_uuid)
         # Пока шла генерация, задачу могли отменить — тогда правки не сохраняем.
         if job is None or not AnalysisJobLifecycle.is_active(job.status):
+            await uow.job_sources.release(job_uuid, source_uuid)
+            await uow.commit()
             return {"source_id": source_id, "status": "cancelled"}
         # P0-2: первый победивший вызов пишет правки и отметку completed одной
         # транзакцией; дубль (повторная доставка/конкурентный воркер) ничего не пишет.
@@ -344,9 +411,96 @@ def _join_errors(failed: list[dict[str, Any]]) -> str:
 # ---------------------------------------------------------------------------
 
 
-@celery_app.task(name="process_source_for_analysis_job", bind=True, max_retries=3)
-def process_source_for_analysis_job(self, job_id: str, source_id: str) -> dict[str, Any]:
-    return _run_async(_process_source(job_id, source_id))
+def _retry_later(
+    task: Task,
+    job_id: str,
+    source_id: str,
+    *,
+    countdown: int,
+    busy_attempts: int,
+    llm_attempts: int,
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    """Перепоставить задачу с обновлёнными счётчиками повторов.
+
+    args=() обязателен: иначе Celery возьмёт исходные позиционные аргументы запроса и
+    добавит к ним kwargs — job_id окажется передан дважды. Исчерпание общего потолка
+    max_retries превращается в итоговый результат fallback, а не в исключение.
+    """
+    try:
+        raise task.retry(
+            args=(),
+            kwargs={
+                "job_id": job_id,
+                "source_id": source_id,
+                "busy_attempts": busy_attempts,
+                "llm_attempts": llm_attempts,
+            },
+            countdown=countdown,
+        )
+    except MaxRetriesExceededError:
+        return fallback
+
+
+@celery_app.task(
+    name="process_source_for_analysis_job",
+    bind=True,
+    max_retries=_TASK_MAX_RETRIES,
+    soft_time_limit=_TASK_SOFT_TIME_LIMIT_SECONDS,
+    time_limit=_TASK_TIME_LIMIT_SECONDS,
+)
+def process_source_for_analysis_job(
+    self,
+    job_id: str,
+    source_id: str,
+    busy_attempts: int = 0,
+    llm_attempts: int = 0,
+) -> dict[str, Any]:
+    """Обработать один источник; busy и таймаут LLM повторяются независимыми счётчиками.
+
+    busy_attempts/llm_attempts передаются через kwargs повтора, поэтому ожидание занятого
+    источника не расходует бюджет повторов LLM (и наоборот). Первичный вызов из chord
+    передаёт только (job_id, source_id).
+    """
+    result = _run_async(_process_source(job_id, source_id))
+    status = result.get("status")
+
+    if status == "busy":
+        # Источник держит другой воркер: ждём его результата, не отдавая busy в chord.
+        busy_failed = _failed(
+            source_id, "SOURCE_BUSY", "Источник занят другим воркером дольше допустимого"
+        )
+        if busy_attempts >= _BUSY_RETRY_LIMIT:
+            return busy_failed
+        return _retry_later(
+            self,
+            job_id,
+            source_id,
+            countdown=_BUSY_RETRY_COUNTDOWN_SECONDS,
+            busy_attempts=busy_attempts + 1,
+            llm_attempts=llm_attempts,
+            fallback=busy_failed,
+        )
+
+    if status == "retryable":
+        llm_failed = _failed(
+            source_id,
+            result.get("error_code") or "LLM_UNAVAILABLE",
+            result.get("error_message") or "LLM недоступен",
+        )
+        if llm_attempts >= _LLM_RETRY_LIMIT:
+            return llm_failed
+        return _retry_later(
+            self,
+            job_id,
+            source_id,
+            countdown=_LLM_RETRY_BACKOFF_SECONDS * (2**llm_attempts),
+            busy_attempts=busy_attempts,
+            llm_attempts=llm_attempts + 1,
+            fallback=llm_failed,
+        )
+
+    return result
 
 
 @celery_app.task(name="finalize_analysis_job", bind=True)
