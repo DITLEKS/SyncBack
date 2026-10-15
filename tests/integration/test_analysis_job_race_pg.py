@@ -78,8 +78,10 @@ async def _job_count(
     idempotency_key: str | None = None,
 ) -> int:
     async with sessionmaker() as session:
-        stmt = select(func.count()).select_from(AnalysisJob).where(
-            AnalysisJob.document_id == state.document_id
+        stmt = (
+            select(func.count())
+            .select_from(AnalysisJob)
+            .where(AnalysisJob.document_id == state.document_id)
         )
         if idempotency_key is not None:
             stmt = stmt.where(AnalysisJob.idempotency_key == idempotency_key)
