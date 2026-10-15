@@ -120,7 +120,7 @@ class AnalysisJobService:
         параллельным запросом), бросается AnalysisJobAlreadyExistsError с этой
         задачей: роутер вернёт 200 и не поставит её в очередь повторно.
 
-        P0-1: предварительные проверки не атомарны, поэтому окончательным арбитром
+        Предварительные проверки не атомарны, поэтому окончательным арбитром
         служат уникальные индексы БД. Проигравший гонку запрос получает
         AnalysisAlreadyRunningError (конкурирующий запуск) или
         AnalysisJobAlreadyExistsError (тот же Idempotency-Key), а не 500.
@@ -164,7 +164,12 @@ class AnalysisJobService:
                     f"Анализ нельзя запустить для документа в статусе {document.status.value}"
                 )
 
-            if await self._uow.jobs.get_active_by_document_id(document.id) is not None:
+            active = await self._uow.jobs.get_active_by_document_id(document.id)
+            if active is not None:
+                # Параллельный запрос с тем же ключом мог закоммитить задачу уже после
+                # поиска по ключу выше: для клиента это та же задача, а не конфликт.
+                if idempotency_key is not None and active.idempotency_key == idempotency_key:
+                    return active, False
                 raise AnalysisAlreadyRunningError("Для документа уже выполняется анализ")
 
             if DocumentLifecycle.analysis_needs_confirmation(document.status) and not force:
