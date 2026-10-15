@@ -24,7 +24,7 @@ class CeleryAnalysisQueue(AnalysisQueue):
     @staticmethod
     def _send(job_id: str, source_ids: list[str]) -> str:
         if not source_ids:
-            return finalize_analysis_job.delay([], job_id).id
+            return str(finalize_analysis_job.delay([], job_id).id)
         header = [process_source_for_analysis_job.si(job_id, source_id) for source_id in source_ids]
         # Callback chord получает список результатов первым аргументом, поэтому .s(), а не .si()
-        return chord(header)(finalize_analysis_job.s(job_id)).id
+        return str(chord(header)(finalize_analysis_job.s(job_id)).id)

@@ -1,11 +1,12 @@
-"""Репозиторий состояния обработки источников (P0-2). commit делает UoW."""
+"""Репозиторий состояния обработки источников. commit делает UoW."""
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import CursorResult, and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,7 +42,7 @@ class AnalysisJobSourceRepository:
         return row
 
     async def claim(self, job_id: uuid.UUID, source_id: uuid.UUID, lease_seconds: int) -> bool:
-        """Атомарно захватить источник перед вызовом LLM (P0-2b).
+        """Атомарно захватить источник перед вызовом LLM.
 
         True — источник был pending либо в processing с просроченным lease и
         теперь принадлежит этому воркеру; False — его держит другой воркер или
@@ -65,7 +66,7 @@ class AnalysisJobSourceRepository:
             )
             .values(status=SOURCE_RUN_PROCESSING, locked_at=now)
         )
-        return result.rowcount == 1  # type: ignore[attr-defined]
+        return cast(CursorResult[Any], result).rowcount == 1
 
     async def release(self, job_id: uuid.UUID, source_id: uuid.UUID) -> None:
         """Вернуть источник в pending после сбоя или отмены, чтобы повтор не ждал lease."""
@@ -103,7 +104,7 @@ class AnalysisJobSourceRepository:
                 locked_at=None,
             )
         )
-        return result.rowcount == 1  # type: ignore[attr-defined]
+        return cast(CursorResult[Any], result).rowcount == 1
 
     async def get_completed_count(self, job_id: uuid.UUID, source_id: uuid.UUID) -> int | None:
         row = await self._get(job_id, source_id)

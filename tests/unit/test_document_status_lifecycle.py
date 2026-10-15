@@ -6,6 +6,7 @@ import pytest
 
 from app.domain.exceptions import (
     AnalysisAlreadyRunningError,
+    AnalysisJobAlreadyExistsError,
     InvalidDocumentStatusError,
     ReviewNotCompleteError,
 )
@@ -37,6 +38,41 @@ async def test_second_active_analysis_is_rejected():
     service = AnalysisJobService(FakeUnitOfWork(jobs=jobs, documents=documents))
     with pytest.raises(AnalysisAlreadyRunningError):
         await service.create_job(document.project_id, document.id)
+
+
+@pytest.mark.asyncio
+async def test_active_job_with_same_idempotency_key_is_returned_not_rejected():
+    """Задачу с тем же ключом закоммитил параллельный запрос между поиском по ключу
+    и проверкой активной задачи: клиент получает её же, а не 409."""
+    document = SimpleNamespace(
+        id=uuid.uuid4(), project_id=uuid.uuid4(), status=DocumentStatus.DRAFT
+    )
+    active = SimpleNamespace(id=uuid.uuid4(), idempotency_key="key-1")
+    documents = SimpleNamespace(get_by_id=AsyncMock(return_value=document))
+    jobs = SimpleNamespace(
+        get_by_idempotency_key=AsyncMock(return_value=None),
+        get_active_by_document_id=AsyncMock(return_value=active),
+    )
+    service = AnalysisJobService(FakeUnitOfWork(jobs=jobs, documents=documents))
+    with pytest.raises(AnalysisJobAlreadyExistsError) as exc_info:
+        await service.create_job(document.project_id, document.id, idempotency_key="key-1")
+    assert exc_info.value.job is active
+
+
+@pytest.mark.asyncio
+async def test_active_job_with_other_idempotency_key_is_rejected():
+    document = SimpleNamespace(
+        id=uuid.uuid4(), project_id=uuid.uuid4(), status=DocumentStatus.DRAFT
+    )
+    active = SimpleNamespace(id=uuid.uuid4(), idempotency_key="key-1")
+    documents = SimpleNamespace(get_by_id=AsyncMock(return_value=document))
+    jobs = SimpleNamespace(
+        get_by_idempotency_key=AsyncMock(return_value=None),
+        get_active_by_document_id=AsyncMock(return_value=active),
+    )
+    service = AnalysisJobService(FakeUnitOfWork(jobs=jobs, documents=documents))
+    with pytest.raises(AnalysisAlreadyRunningError):
+        await service.create_job(document.project_id, document.id, idempotency_key="key-2")
 
 
 @pytest.mark.asyncio

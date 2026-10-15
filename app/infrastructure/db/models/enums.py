@@ -1,14 +1,15 @@
 """Перечисления уровня БД (типы PostgreSQL ENUM).
 
-Значения должны совпадать с доменными VO из app.domain.value_objects;
-репозитории переводят VO в эти типы. DocumentStatus пока содержит
-значения error и cancelled, которых нет в DocumentStatusVO: они остались
-в типе БД и будут убраны отдельной миграцией.
+Значения совпадают с доменными VO из app.domain.value_objects. Где у типа БД
+нет значений сверх домена (формат и статус документа, статус правки), используется сам VO —
+так ORM-атрибуты удовлетворяют доменным протоколам без преобразований.
 """
 
 import enum
 
 from app.domain.value_objects import DocumentFormatVO as DocumentFormat  # noqa: F401
+from app.domain.value_objects import DocumentStatusVO as DocumentStatus  # noqa: F401
+from app.domain.value_objects import SuggestionStatusVO as SuggestionStatus  # noqa: F401
 
 
 class UserRole(enum.StrEnum):
@@ -16,18 +17,7 @@ class UserRole(enum.StrEnum):
     USER = "user"
 
 
-class DocumentStatus(enum.StrEnum):
-    DRAFT = "draft"
-    IN_PROGRESS = "in_progress"
-    AWAITING_APPROVAL = "awaiting_approval"
-    READY = "ready"
-    ERROR = "error"
-    CANCELLED = "cancelled"
-
-
 class SourceType(enum.StrEnum):
-    """После миграции 0018 в БД только 'file' и 'url'."""
-
     FILE = "file"
     URL = "url"
 
@@ -46,12 +36,6 @@ class ChangeType(enum.StrEnum):
     ADD = "add"
     MODIFY = "modify"
     DELETE = "delete"
-
-
-class SuggestionStatus(enum.StrEnum):
-    PENDING = "pending"
-    ACCEPTED = "accepted"
-    REJECTED = "rejected"
 
 
 class AuditAction(enum.StrEnum):

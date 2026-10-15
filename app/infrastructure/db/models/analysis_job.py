@@ -1,12 +1,9 @@
 """
 Путь в репозитории: app/infrastructure/db/models/analysis_job.py
 
-Фикс: values_callable у AnalysisJobStatus.
-P0-7: добавлена колонка idempotency_key (nullable, unique per document).
-R-6: удалён одиночный index=True на idempotency_key — все запросы
-    идут через get_by_idempotency_key(document_id, key), поэтому
-    составной уникальный индекс uq_analysis_jobs_doc_idem_key
-    (document_id, idempotency_key) полностью покрывает этот кейс.
+idempotency_key уникален в пределах документа (uq_analysis_jobs_doc_idem_key):
+все запросы идут через get_by_idempotency_key(document_id, key), поэтому отдельный
+индекс по ключу не нужен.
 """
 
 import uuid
@@ -41,9 +38,6 @@ class AnalysisJob(Base):
     __table_args__ = (
         # Один ключ идемпотентности может относиться только к одному документу.
         # NULL-значения не нарушают уникальность в PostgreSQL.
-        # R-6: этот составной уникальный индекс покрывает запросы
-        #     WHERE document_id = ? AND idempotency_key = ?, поэтому
-        #     одиночный B-tree на idempotency_key был лишним.
         UniqueConstraint("document_id", "idempotency_key", name="uq_analysis_jobs_doc_idem_key"),
         # У документа не может быть двух незавершённых задач одновременно.
         Index(
@@ -74,8 +68,7 @@ class AnalysisJob(Base):
         default=AnalysisJobStatus.PENDING,
         server_default=AnalysisJobStatus.PENDING.value,
     )
-    # P0-7: ключ идемпотентности, переданный клиентом при создании job.
-    # R-6: index=True удалён — uq_analysis_jobs_doc_idem_key полностью покрывает этот кейс.
+    # Ключ идемпотентности из заголовка Idempotency-Key.
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     celery_task_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)

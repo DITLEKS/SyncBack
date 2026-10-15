@@ -1,8 +1,8 @@
 """
 Celery-приложение SyncScribe.
 
-Требования к воркер (H-6)
----------------------------------
+Требования к воркеру
+--------------------
 Задачи в analysis_tasks.py используют asyncio.run() для запуска async-кода из
 синхронного Celery-таска. asyncio.run() создаёт новый event loop на каждый
 вызов и закрывает его по завершении. Это безопасно только при использовании
@@ -31,7 +31,7 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
-# P0-2b: лимиты времени (soft 540 с / hard 570 с) заданы на самой задаче
+# Лимиты времени (soft 540 с / hard 570 с) заданы на самой задаче
 # process_source_for_analysis_job (см. analysis_tasks.py) вместе с lease захвата
 # источника (600 с), чтобы инвариант «lease больше жёсткого лимита» жил в одном
 # месте и не распространялся на finalize_analysis_job и будущие задачи.
@@ -49,7 +49,7 @@ celery_app.conf.update(
     accept_content=["json"],
     task_track_started=True,
     task_acks_late=True,
-    # H-4: при падении воркера незавершённая задача возвращается в очередь,
+    # При падении воркера незавершённая задача возвращается в очередь,
     # а не теряется. Работает в паре с task_acks_late=True.
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,

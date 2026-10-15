@@ -16,9 +16,9 @@ Namespace-атрибуты (все объявлены здесь для type-che
   audit       — IAuditLogRepository
   projects    — IProjectRepository
   sources     — ISourceRepository
-  users       — IUserRepository  (раньше UserRepository — устранён инфра-лик)
+  users       — IUserRepository
 
-L-C: dashboard УБРАН из IUnitOfWork. DashboardRepository — read-model, не агрегат.
+Дашборда в UoW нет: DashboardRepository — read-model, а не агрегат.
   Инжектируется как IDashboardQueryService через FastAPI Depends(get_dashboard_query_service).
   См. app/domain/interfaces/dashboard_query_service.py.
 """
@@ -90,7 +90,7 @@ class IUnitOfWork(ABC):
 
     @abstractmethod
     async def refresh(self, obj: Any, attribute_names: list[str] | None = None) -> None:
-        """H-4: Обновить ORM-объект из БД через интерфейс.
+        """Обновить ORM-объект из БД через интерфейс.
 
         Используется в воркере вместо прямого обращения к uow._session.
         attribute_names: список ленивых атрибутов для загрузки (напр., ["sources"]).

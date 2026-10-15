@@ -1,5 +1,5 @@
 """
-REVIEW-1: хранилище активных refresh-токенов в Redis.
+Хранилище активных refresh-токенов в Redis.
 
 Принцип работы (rotation with revocation):
   - При логине / обновлении токена: save(jti, user_id, ttl)
@@ -39,7 +39,7 @@ class RefreshTokenStore:
         Возвращает False, если токен не существует (уже использован или отозван).
         """
         deleted = await self._redis.delete(self._key(jti))
-        return deleted > 0
+        return int(deleted) > 0
 
     async def revoke(self, jti: str) -> None:
         """Отозвать токен (logout)."""

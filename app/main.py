@@ -1,9 +1,10 @@
 """Точка входа FastAPI-приложения."""
 
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
@@ -42,7 +43,7 @@ from app.infrastructure.events.sse_broker import init_sse_broker, shutdown_sse_b
 
 logger = logging.getLogger("syncscribe.main")
 
-# M-2: NotFound-исключения, которые должны возвращать 404 (не 400).
+# NotFound-исключения домена отдаются как 404, а не общий 400.
 _NOT_FOUND_EXCEPTIONS = (
     DocumentNotFoundError,
     ProjectNotFoundError,
@@ -53,7 +54,7 @@ _NOT_FOUND_EXCEPTIONS = (
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     settings = get_settings()
     logger.info(
@@ -83,7 +84,8 @@ def create_app() -> FastAPI:
 
     # slowapi limiter — до регистрации роутеров.
     app.state.limiter = limiter
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    # Обработчик slowapi объявлен с узким типом исключения, Starlette ждёт Exception.
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
     # Starlette оборачивает приложение в middleware в порядке добавления, так что
     # последний добавленный оказывается внешним. CORS добавляется последним:
@@ -107,19 +109,19 @@ def create_app() -> FastAPI:
     if settings.trusted_proxy_hosts:
         app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxy_hosts)
 
-    # M-2: NotFound-подклассы DomainError → 404 (должны быть ПЕРЕД общим DomainError handler).
+    # NotFound-подклассы DomainError регистрируются до общего обработчика DomainError.
     @app.exception_handler(_NOT_FOUND_EXCEPTIONS[0])
     @app.exception_handler(_NOT_FOUND_EXCEPTIONS[1])
     @app.exception_handler(_NOT_FOUND_EXCEPTIONS[2])
     @app.exception_handler(_NOT_FOUND_EXCEPTIONS[3])
     @app.exception_handler(_NOT_FOUND_EXCEPTIONS[4])
-    async def not_found_error_handler(request, exc) -> JSONResponse:
+    async def not_found_error_handler(request: Request, exc: Exception) -> JSONResponse:
         logger.warning("Ресурс не найден", extra={"error_type": type(exc).__name__})
         return JSONResponse(status_code=404, content={"detail": str(exc)})
 
     # Общий обработчик DomainError → 400 (после специфичных 404-handlers).
     @app.exception_handler(DomainError)
-    async def domain_error_handler(request, exc: DomainError) -> JSONResponse:
+    async def domain_error_handler(request: Request, exc: DomainError) -> JSONResponse:
         logger.warning("Необработанная доменная ошибка", extra={"error_type": type(exc).__name__})
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 

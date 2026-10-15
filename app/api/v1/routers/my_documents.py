@@ -1,7 +1,7 @@
 """
 Мои документы — список всех документов пользователя.
 
-I-1: после list_all_for_user делается один батч-запрос
+После list_all_for_user делается один батч-запрос
   list_sources_for_documents() и результат раскладывается
   в DocumentListItem.sources: list[SourceBadge].
   Фронт получает бейджи источников без доп-запросов.

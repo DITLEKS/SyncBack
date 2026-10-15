@@ -20,7 +20,7 @@ from app.infrastructure.db.models.enums import SourceType
 from app.infrastructure.db.models.source import Source
 
 
-def _type_to_orm(vo: SourceTypeVO):
+def _type_to_orm(vo: SourceTypeVO) -> SourceType:
     return SourceType(vo.value)
 
 

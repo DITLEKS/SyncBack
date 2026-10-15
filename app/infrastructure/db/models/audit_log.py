@@ -29,9 +29,7 @@ class AuditLog(Base):
             "AND suggestion_id IS NOT NULL)",
             name="ck_audit_logs_target",
         ),
-        # R-5: составной индекс (document_id, created_at) уже покрывает все
-        # запросы по document_id, поэтому одиночный index=True на document_id
-        # удалён — индекс был лишним и только увеличивал write-overhead.
+        # Покрывает и запросы только по document_id, отдельный индекс не нужен.
         Index("ix_audit_logs_document_created", "document_id", "created_at"),
     )
 
@@ -46,7 +44,6 @@ class AuditLog(Base):
         UUID(as_uuid=True),
         sa.ForeignKey("documents.id", ondelete="CASCADE"),
         nullable=True,
-        # R-5: index=True удалён — ix_audit_logs_document_created уже покрывает document_id.
     )
     # SET NULL: удаление пользователя НЕ должно уничтожать аудит-лог.
     user_id: Mapped[uuid.UUID | None] = mapped_column(

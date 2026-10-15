@@ -158,11 +158,9 @@ async def db_session_context() -> AsyncGenerator[AsyncSession, None]:
     """Тонкая обёртка над isolated_db_session() для использования вне FastAPI DI:
     тесты, скрипты, Celery-воркер.
 
-    ИСПРАВЛЕНО: раньше эта функция ошибочно переиспользовала общий request-scoped
-    sessionmaker (get_sessionmaker()), что при вызове из Celery-задач или
-    pytest-asyncio тестов с per-test event loop приводило к RuntimeError
-    "attached to a different loop". Теперь она всегда создаёт изолированный движок
-    и безопасна для использования на любом event loop.
+    Всегда создаёт изолированный движок: общий request-scoped sessionmaker
+    привязан к event loop, и в Celery-задачах или тестах с отдельным loop на тест
+    падал бы с RuntimeError "attached to a different loop".
 
     Пример:
         async with db_session_context() as session:

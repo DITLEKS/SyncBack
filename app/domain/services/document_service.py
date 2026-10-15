@@ -10,7 +10,7 @@ import logging
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 
 from app.domain.exceptions import (
     DocumentNotFoundError,
@@ -20,6 +20,7 @@ from app.domain.exceptions import (
 )
 from app.domain.interfaces.document_parser import IDocumentParserRegistry, ParsedDocument
 from app.domain.interfaces.file_storage import FileStorage, UploadContent
+from app.domain.interfaces.repositories import DocumentRow
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.lifecycle import DocumentLifecycle
 from app.domain.policies import UploadLimits
@@ -128,7 +129,6 @@ class DocumentService:
         """Постраничный список документов проекта.
 
         status_filter — опциональный фильтр по статусу (пробрасывается в репозиторий).
-        CRIT-NEW-2: передаём pagination-объект целиком, не limit/offset позиционно.
         """
         async with self._uow:
             items = await self._uow.documents.list_for_project(
@@ -175,12 +175,11 @@ class DocumentService:
         sort_by: Literal["created_at", "updated_at", "name"] = "updated_at",
         sort_dir: Literal["asc", "desc"] = "desc",
         pagination: PaginationParams | None = None,
-    ) -> tuple[list[dict[str, Any]], int]:
+    ) -> tuple[list[DocumentRow], int]:
         """Список всех документов пользователя с агрегированными счётчиками правок.
 
-        BUG-FIX-2: принимает outdated: bool, пробрасывает в репозиторий.
-        BUG-FIX-3: возвращает tuple[list[dict], int] — репозиторий формирует dict
-        с ключами document / project_name / suggestions_*.
+        Возвращает (строки, total); строка — dict с ключами document, project_name
+        и suggestions_*, его собирает репозиторий.
         """
         _pagination = pagination or PaginationParams(limit=50, offset=0)
         async with self._uow:
@@ -215,7 +214,7 @@ class DocumentService:
 
     async def delete_document(self, document: Document) -> None:
         """
-        HIGH-2: удаление документа.
+        Удаление документа.
 
         Порядок операций внутри транзакции:
           1. delete_document_scoped_sources — удаляем orphan-источники scope=DOCUMENT

@@ -1,10 +1,7 @@
 """
 Suggestion ORM model.
 
-C-1 (issue #37): добавлены колонки decided_by (FK -> users.id, nullable)
-      и decided_at (datetime, nullable). Эти поля обнуляются при reset_status()
-      и заполняются при update_status() / bulk_accept_all / bulk_reject_all.
-      reviewed_at оставлен для обратной совместимости (старые миграции).
+decided_by и decided_at заполняются при решении по правке и обнуляются при сбросе.
 """
 
 import uuid
@@ -42,9 +39,7 @@ class Suggestion(Base):
             "confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)",
             name="ck_suggestions_confidence_range",
         ),
-        # N-5: index=True на analysis_job_id удалён — ix_suggestions_job_status покрывает его.
         Index("ix_suggestions_job_status", "analysis_job_id", "status"),
-        # N-6: index=True на document_id удалён — ix_suggestions_document_status покрывает его.
         Index("ix_suggestions_document_status", "document_id", "status"),
         # Keyset-пагинация по задаче: ORDER BY created_at, id.
         Index("ix_suggestions_job_created_at_id", "analysis_job_id", "created_at", "id"),
@@ -60,10 +55,10 @@ class Suggestion(Base):
         UUID(as_uuid=True),
         ForeignKey("analysis_jobs.id", ondelete="CASCADE"),
         nullable=False,
-        # N-5: index=True удалён — ix_suggestions_job_status (analysis_job_id, status) покрывает всё.
+        # Отдельный индекс не нужен: его покрывает ix_suggestions_job_status.
     )
-    # R-2: денормализованный document_id — избавляет от JOIN через analysis_jobs.
-    # N-6: index=True удалён — ix_suggestions_document_status (document_id, status) покрывает всё.
+    # Денормализованный document_id избавляет от JOIN через analysis_jobs;
+    # индекс покрывает ix_suggestions_document_status.
     document_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("documents.id", ondelete="CASCADE"),
@@ -92,7 +87,6 @@ class Suggestion(Base):
     edited_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     confidence_score: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
-    # C-1: who made the decision and when
     decided_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

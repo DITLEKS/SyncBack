@@ -20,7 +20,6 @@ from app.infrastructure.db.base import Base
 from app.infrastructure.db.models.enums import UserRole
 
 if TYPE_CHECKING:
-    # ИСПРАВЛЕНО (F821): импорт только для статического анализа типов.
     from app.infrastructure.db.models.project import Project
 
 

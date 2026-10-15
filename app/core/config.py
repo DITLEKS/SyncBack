@@ -44,7 +44,6 @@ class Settings(BaseSettings):
     jwt_secret: str
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 60
-    # REVIEW-2: вынесено из магической константы 30*24*60*60 в jwt_handler.py
     jwt_refresh_token_expire_days: int = 30
 
     login_max_attempts: int = 5
@@ -155,7 +154,6 @@ class Settings(BaseSettings):
             )
         return v
 
-    # M-3: jwt_secret обязан быть не менее 32 символов.
     # Слабый секрет (например, "secret" или пустая строка) позволяет
     # тривиально форжировать токены.
     @field_validator("jwt_secret")
@@ -171,4 +169,5 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    # Обязательные поля берутся из окружения/.env, mypy этого не видит.
+    return Settings()  # type: ignore[call-arg]

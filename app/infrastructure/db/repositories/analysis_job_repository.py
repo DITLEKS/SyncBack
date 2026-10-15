@@ -17,13 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.exceptions import AnalysisJobConflictError
 from app.domain.interfaces.repositories import IAnalysisJobRepository
 from app.domain.lifecycle import AnalysisJobLifecycle
-from app.domain.value_objects import AnalysisJobStatusVO, KeysetPage
+from app.domain.value_objects import AnalysisJobStatusVO, KeysetPage, PaginationParams
 from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.enums import AnalysisJobStatus
 
 
-def _status_to_orm(vo: AnalysisJobStatusVO):
+def _status_to_orm(vo: AnalysisJobStatusVO) -> AnalysisJobStatus:
     return AnalysisJobStatus(vo.value)
 
 
@@ -86,7 +86,7 @@ class AnalysisJobRepository(IAnalysisJobRepository):
     async def list_by_document(
         self,
         document_id: uuid.UUID,
-        pagination,
+        pagination: PaginationParams,
     ) -> list[AnalysisJob]:
         stmt = (
             select(AnalysisJob)
@@ -122,16 +122,15 @@ class AnalysisJobRepository(IAnalysisJobRepository):
     ) -> AnalysisJob:
         """Фабричный метод: создаёт ORM-объект AnalysisJob внутри репозитория.
 
-        CRIT-1: репозиторий НЕ мутирует document.current_analysis_job_id.
+        Репозиторий НЕ мутирует document.current_analysis_job_id.
         Вызывающий сервис обязан сам выполнить:
             document.current_analysis_job_id = job.id
         или использовать uow.documents.set_current_job(document, job.id).
         Это соблюдает SRP: jobs-репозиторий не знает про структуру Document.
 
-        H-NEW-1: session.refresh(job) удалён — flush() достаточно.
-        Commit — ответственность вызывающего UoW.
+        refresh не нужен, достаточно flush(); commit — ответственность вызывающего UoW.
 
-        P0-1: INSERT выполняется в SAVEPOINT. Нарушение уникального индекса
+        INSERT выполняется в SAVEPOINT. Нарушение уникального индекса
         («одна активная задача на документ» или ключ идемпотентности) при
         параллельном запуске превращается в AnalysisJobConflictError, а не в
         «сырой» IntegrityError, который клиент увидел бы как 500.

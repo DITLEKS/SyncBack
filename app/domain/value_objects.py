@@ -6,13 +6,9 @@ Value-объекты доменного слоя — иммутабельные 
   - Никаких импортов из FastAPI / SQLAlchemy
   - Все поля frozen=True (или StrEnum)
 
-4STATUS: DocumentStatusVO возвращён к 4 значениям (draft/in_progress/
-    awaiting_approval/ready). ERROR и CANCELLED удалены из публичного
-    статуса документа. Техническое состояние анализа теперь хранится
-    исключительно в AnalysisJobStatusVO и отдаётся фронту через
-    AnalysisStateResponse (см. app/api/schemas/document.py).
-    Миграция 0020 переводит существующие строки error/cancelled → draft
-    и удаляет эти значения из PostgreSQL enum document_status.
+У документа четыре статуса (draft/in_progress/awaiting_approval/ready); техническое
+состояние анализа (сбой, отмена) хранится в AnalysisJobStatusVO и отдаётся фронту
+через AnalysisStateResponse (см. app/api/schemas/document.py).
 """
 
 from __future__ import annotations
@@ -32,8 +28,6 @@ class DocumentStatusVO(StrEnum):
     IN_PROGRESS = "in_progress"
     AWAITING_APPROVAL = "awaiting_approval"
     READY = "ready"
-    # ERROR и CANCELLED удалены из публичного статуса документа (4STATUS).
-    # Техническое состояние анализа хранится в AnalysisJobStatusVO.
 
 
 class SuggestionStatusVO(StrEnum):
@@ -88,9 +82,9 @@ class AuditActionVO(StrEnum):
     ACCEPT = "accept"
     REJECT = "reject"
     BULK_ACCEPT = "bulk_accept"
-    BULK_REJECT = "bulk_reject"  # M-3 (issue #37)
+    BULK_REJECT = "bulk_reject"
     FINALIZE = "finalize"  # kept for backward compat
-    FINALIZE_REVIEW = "finalize_review"  # S-3 (issue #37) — used by router
+    FINALIZE_REVIEW = "finalize_review"
     REOPEN = "reopen"
     RESET = "reset"  # отмена ранее принятого/отклонённого решения
     DOWNLOAD = "download"  # синхронизировано с enums.AuditAction

@@ -12,6 +12,7 @@ from app.api.schemas.system import (
 )
 from app.core.config import Settings, get_settings
 from app.core.dependencies import get_llm_client_instance
+from app.domain.interfaces.llm_client import LLMClient
 from app.domain.services.document_service import FORMAT_BY_EXTENSION
 from app.domain.value_objects import DocumentStatusVO
 from app.infrastructure.db.models.user import User
@@ -22,7 +23,7 @@ router = APIRouter(prefix="/system", tags=["system"])
 @router.get("/llm-health")
 async def llm_health(
     current_user: User = Depends(require_admin),
-    llm_client=Depends(get_llm_client_instance),
+    llm_client: LLMClient = Depends(get_llm_client_instance),
     settings: Settings = Depends(get_settings),
 ) -> dict:
     """Диагностика LLM-провайдера: только для администратора, раскрывает конфигурацию."""

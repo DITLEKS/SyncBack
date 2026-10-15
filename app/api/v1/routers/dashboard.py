@@ -5,8 +5,6 @@ GET  /dashboard                          — агрегаты + статисти
 GET  /documents/attention                — топ-4 документа в awaiting_approval
 GET  /documents/recent                   — 5 последних открытых
 POST /projects/{id}/documents/{id}/open  — трекинг открытия документа
-
-GET /dashboard/stats удалён — его данные вошли в GET /dashboard (OPT-D1).
 """
 
 import uuid
@@ -44,7 +42,8 @@ async def get_attention_documents(
     svc: DashboardService = Depends(get_dashboard_service),
 ) -> list[AttentionDocumentItem]:
     """Топ-4 документа со статусом awaiting_approval по кол-ву pending-правок."""
-    return await svc.get_attention_documents(current_user.id, limit=4)
+    rows = await svc.get_attention_documents(current_user.id, limit=4)
+    return [AttentionDocumentItem.model_validate(row) for row in rows]
 
 
 @router.get("/documents/recent", response_model=list[RecentDocumentItem])
@@ -53,7 +52,8 @@ async def get_recent_documents(
     svc: DashboardService = Depends(get_dashboard_service),
 ) -> list[RecentDocumentItem]:
     """5 последних документов, открытых текущим пользователем."""
-    return await svc.get_recent_documents(current_user.id, limit=5)
+    rows = await svc.get_recent_documents(current_user.id, limit=5)
+    return [RecentDocumentItem.model_validate(row) for row in rows]
 
 
 @router.post(

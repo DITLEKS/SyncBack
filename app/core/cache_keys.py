@@ -1,7 +1,6 @@
 """
-Central namespace for Redis cache key prefixes and helpers.
+Префиксы и хелперы ключей Redis в одном месте, чтобы не размножать строки-ключи.
 
-L-A: вынесены из analysis_tasks.py, чтобы избежать magic-строк в воркере.
 Импортируйте этот модуль везде, где требуется сформировать Redis-ключ.
 """
 

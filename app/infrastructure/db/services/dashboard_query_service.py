@@ -2,7 +2,7 @@
 SqlAlchemyDashboardQueryService — инфраструктурная реализация
 IDashboardQueryService. Делегирует все вызовы DashboardRepository.
 
-L-C: не импортирует IUnitOfWork и не вызывает commit()/rollback().
+Не импортирует IUnitOfWork и не вызывает commit()/rollback().
 """
 
 from __future__ import annotations

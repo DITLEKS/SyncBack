@@ -108,7 +108,7 @@ class SuggestionService:
         document: DocumentProtocol,
         suggestion_id: uuid.UUID,
     ) -> SuggestionProtocol:
-        """M-9: явно разграничивает «не найдена» vs «не та версия анализа»."""
+        """Правка текущего анализа документа; правка прежнего анализа — StaleSuggestionJobError."""
         suggestion = await self._uow.suggestions.get_by_id(suggestion_id)
         if suggestion is None:
             raise SuggestionNotFoundError(f"Правка {suggestion_id} не найдена")
@@ -194,7 +194,7 @@ class SuggestionService:
                 offset=pagination.offset,
                 status=status_filter,
             )
-        return items, total
+        return list(items), total
 
     async def get_suggestion_for_document(
         self,
@@ -220,7 +220,7 @@ class SuggestionService:
                 section_ref=s.section_ref,
                 change_type=s.change_type.value,
                 old_text=s.original_text,
-                new_text=getattr(s, "edited_text", None) or s.suggested_text,
+                new_text=s.edited_text or s.suggested_text,
             )
             for s in suggestions
         ]

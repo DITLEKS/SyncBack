@@ -5,25 +5,15 @@ DI-фабрики FastAPI.
 нет собственного UoW-метода). Конкретные репозитории НЕ инстансируются в этом
 файле напрямую — их создаёт SqlAlchemyUnitOfWork или фабрика сервиса.
 
-H2.2: фабрики по-прежнему создают concrete SQLAlchemy-репозитории,
+Фабрики создают concrete SQLAlchemy-репозитории,
 но передают их сервисам как значения, удовлетворяющие доменным портам.
 Типы аннотаций в фабриках оставлены конкретными — FastAPI DI не понимает
 Protocol для Depends, зато mypy/pyright проверят, что concrete-репозитории
 действительно реализуют порты через @runtime_checkable.
 
-CRIT-D4 (этот раунд):
-  get_dashboard_service ранее передавал uow= в DashboardService,
-  но DashboardService переключён на IDashboardQueryService (CRIT-D1).
-  Исправлено: добавлена фабрика get_dashboard_query_service,
-  которая создаёт DashboardRepository(session) — конкретную реализацию
-  IDashboardQueryService. get_dashboard_service теперь принимает
-  dashboard_qs через Depends(get_dashboard_query_service).
+JWTHandler создаётся один раз на процесс (_get_jwt_handler).
 
-H-2:
-  JWTHandler вынесен в singleton-like фабрику _get_jwt_handler(),
-  чтобы не создавать новый объект на каждый запрос.
-
-REVIEW-3 (dashboard isolation comment):
+Дашборд:
   DashboardRepository использует отдельную сессию от UoW.
   Это означает READ COMMITTED по умолчанию — uncommitted изменения
   write-транзакций НЕ будут видны dashboard-запросам. Это приемлемо
@@ -192,7 +182,7 @@ def get_document_export_service(
 # ---------------------------------------------------------------------------
 # Dashboard — read-model инжектируется напрямую, минуя UoW
 #
-# REVIEW-3: DashboardRepository получает отдельную сессию (не ту, что UoW).
+# DashboardRepository получает отдельную сессию (не ту, что UoW).
 # Это означает READ COMMITTED isolation — uncommitted изменения
 # параллельных write-транзакций НЕ видны. Для read-model это нормально
 # (eventual consistency). Если нужна видимость uncommitted данных
@@ -203,7 +193,7 @@ def get_document_export_service(
 def get_dashboard_query_service(
     session: AsyncSession = Depends(get_db_session),
 ) -> IDashboardQueryService:
-    """CRIT-D4: DashboardRepository реализует IDashboardQueryService.
+    """DashboardRepository как реализация IDashboardQueryService.
 
     Инжектируется напрямую (без UoW) — read-model не участвует в транзакциях агрегатов.
     Отдельная сессия от UoW — SELECT-запросы дашборда не мешают write-транзакциям.
@@ -214,10 +204,7 @@ def get_dashboard_query_service(
 def get_dashboard_service(
     dashboard_qs: IDashboardQueryService = Depends(get_dashboard_query_service),
 ) -> DashboardService:
-    """CRIT-D4: передаём dashboard_qs=, а не uow=.
-
-    DashboardService.__init__ ожидает IDashboardQueryService после CRIT-D1.
-    """
+    """DashboardService поверх read-model дашборда, без UoW."""
     return DashboardService(dashboard_qs=dashboard_qs)
 
 
@@ -236,7 +223,7 @@ def get_user_repository(
 def get_project_repository(
     session: AsyncSession = Depends(get_db_session),
 ) -> ProjectRepository:
-    """CRIT-NEW-1: фабрика для ProjectRepository в deps.py (get_allowed_project)."""
+    """ProjectRepository для get_allowed_project в api/deps.py."""
     return ProjectRepository(session)
 
 
@@ -250,7 +237,7 @@ def get_login_rate_limiter() -> LoginRateLimiter:
 
 
 def get_refresh_token_store() -> RefreshTokenStore:
-    """REVIEW-1: хранилище активных refresh-токенов."""
+    """Хранилище активных refresh-токенов."""
     return RefreshTokenStore(get_redis_client())
 
 

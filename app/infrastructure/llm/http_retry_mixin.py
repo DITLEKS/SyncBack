@@ -71,7 +71,8 @@ class HttpConnectionRetryMixin:
                         return response
                     if not _is_retryable_status(response.status_code):
                         raise LLMInvalidResponseError(
-                            f"LLM вернула HTTP {response.status_code}: {response.text[:200]}"
+                            f"LLM вернула HTTP {response.status_code}: {response.text[:200]}",
+                            status_code=response.status_code,
                         )
                     failure = f"LLM вернула HTTP {response.status_code}"
                     cause = httpx.HTTPStatusError(

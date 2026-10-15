@@ -11,6 +11,7 @@ POST {LLM_ENDPOINT}/chat/completions с model/messages — общий язык �
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -18,12 +19,14 @@ import httpx
 from pydantic import ValidationError
 
 from app.core.config import Settings, get_settings
-from app.domain.exceptions import LLMInvalidResponseError
+from app.domain.exceptions import LLMInvalidResponseError, LLMTimeoutError
 from app.domain.interfaces.llm_client import LLMSuggestionBatch, LLMSuggestionItem
 from app.infrastructure.llm.auth import AuthStrategy, build_auth
 from app.infrastructure.llm.http_retry_mixin import HttpConnectionRetryMixin
 from app.infrastructure.llm.prompt import build_prompt
 from app.infrastructure.llm.schemas import LLMHttpSuggestionResponse
+
+logger = logging.getLogger("syncscribe.llm.openai_compatible")
 
 _FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
 
@@ -70,7 +73,7 @@ class OpenAICompatibleClient(HttpConnectionRetryMixin):
             )
         except LLMInvalidResponseError as exc:
             # Истёкший или отозванный токен: обновляем и пробуем ровно ещё раз.
-            if not self._auth.refreshable or "HTTP 401" not in str(exc):
+            if not self._auth.refreshable or exc.status_code != 401:
                 raise
         headers = await self._auth.headers(force_refresh=True)
         return await self._post_with_retries(
@@ -141,5 +144,6 @@ class OpenAICompatibleClient(HttpConnectionRetryMixin):
             async with self._make_client(timeout=5, verify=self._verify()) as client:
                 response = await client.get(self._url("models"), headers=headers)
                 return response.is_success
-        except (httpx.HTTPError, LLMInvalidResponseError, Exception):
+        except (httpx.HTTPError, LLMInvalidResponseError, LLMTimeoutError, OSError):
+            logger.warning("Проверка доступности LLM не прошла", exc_info=True)
             return False
