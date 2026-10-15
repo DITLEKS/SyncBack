@@ -357,11 +357,11 @@ class DocumentRepository(IDocumentRepository):
         Выполняет:
             DELETE FROM documents
              WHERE id = :document_id AND project_id = :project_id
-             RETURNING storage_key, original_storage_key
+             RETURNING storage_key, original_storage_key, exported_storage_key
 
-        Возвращает dict {'storage_key': ..., 'original_storage_key': ...}
-        если строка удалена, или None если документ не найден /
-        не принадлежит проекту.
+        Возвращает dict с ключами 'storage_key', 'original_storage_key' и
+        'exported_storage_key', если строка удалена, или None, если документ не
+        найден / не принадлежит проекту.
 
         Примечание: источники scope=DOCUMENT должны быть удалены
         через delete_document_scoped_sources() ДО вызова этого метода
@@ -374,7 +374,11 @@ class DocumentRepository(IDocumentRepository):
                 Document.id == document_id,
                 Document.project_id == project_id,
             )
-            .returning(Document.storage_key, Document.original_storage_key)
+            .returning(
+                Document.storage_key,
+                Document.original_storage_key,
+                Document.exported_storage_key,
+            )
         )
         result = await self._session.execute(stmt)
         row = result.one_or_none()
@@ -384,4 +388,5 @@ class DocumentRepository(IDocumentRepository):
         return {
             "storage_key": row.storage_key,
             "original_storage_key": row.original_storage_key,
+            "exported_storage_key": row.exported_storage_key,
         }
