@@ -1,25 +1,10 @@
-"""
-P0-2: добавлен review_version в DocumentResponse для оптимистической блокировки.
-P0-6: добавлен UploadDocumentRequest — загрузка документа с явным project_id
-      (нужно для маршрута «Мои документы» → кнопка «Загрузить документ»).
-P0-#12: поле переименовано title→name в DocumentListItem, чтобы совпадало
-        с DocumentResponse.name и ORM-атрибутом Document.name.
-UI-fix: добавлено поле size_bytes в DocumentListItem (карточка документа в UI).
-R-1: добавлен AttachSourcesResponse — возвращается вместо голого DocumentResponse
-     после POST /{id}/sources; содержит document + sources, устраняя лишний
-     GET /sources на фронте.
-I-1: DocumentListItem.sources: list[SourceBadge] — источники документа
-     (document-scope) для отображения бейджей без доп-запроса.
-     None = поле не было запрошено/загружено; [] = загружено, источников нет.
-FIX-review-4: DocumentListItem.created_at → uploaded_at.
-     DocumentResponse.uploaded_at — семантически «когда загружен файл».
-     DocumentListItem использовал created_at (server_default=now), что
-     расходилось с DocumentResponse и смущало фронт. ORM Document содержит
-     оба поля; меняем на uploaded_at для консистентности API.
-4STATUS: Публичный document.status ограничен 4 значениями (draft/in_progress/
-     awaiting_approval/ready). Техническое состояние анализа (pending/processing/
-     failed/cancelled/completed) вынесено в отдельное поле analysis: AnalysisStateResponse.
-     Хелпер resolve_document_public_status_and_analysis выполняет маппинг.
+"""Схемы документов.
+
+Публичный status документа — 4 значения (draft/in_progress/awaiting_approval/ready);
+техническое состояние анализа (pending/processing/failed/cancelled/completed) отдаётся
+отдельным полем analysis: AnalysisStateResponse, маппинг — resolve_document_public_status_and_analysis.
+
+DocumentListItem.sources: None — поле не запрашивалось, [] — источников нет.
 """
 
 import uuid
@@ -66,7 +51,7 @@ class AnalysisStateResponse(BaseModel):
 
 def resolve_document_public_status_and_analysis(
     doc_status: str,
-    latest_job,
+    latest_job: Any,
 ) -> tuple[str, AnalysisStateResponse | None]:
     """Преобразует внутреннее состояние документа + последний job → публичный контракт.
 
@@ -139,7 +124,7 @@ class DocumentResponse(BaseModel):
     # Публичный статус: только 4 значения (техническое состояние → поле analysis)
     status: Literal["draft", "in_progress", "awaiting_approval", "ready"]
     current_analysis_job_id: uuid.UUID | None = None
-    # P0-2: версия для If-Match / ETag
+    # Версия для If-Match / ETag
     review_version: int = 0
     # Техническое состояние последнего analysis job (null — анализ не запускался)
     analysis: AnalysisStateResponse | None = None
@@ -175,9 +160,8 @@ class AttachSourcesRequest(BaseModel):
     source_ids: list[uuid.UUID]
 
 
-# R-1: ответ POST /{id}/sources — document + прикреплённые источники
 class AttachSourcesResponse(BaseModel):
-    """Ответ POST /documents/{id}/sources (R-1).
+    """Ответ POST /documents/{id}/sources.
 
     Возвращает обновлённые метаданные документа и полный список
     прикреплённых к нему источников, чтобы фронт не делал дополнительный
@@ -190,7 +174,7 @@ class AttachSourcesResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-# ── P0-6 ──────────────────────────────────────────────────────────────────────────
+# ── «Мои документы» ───────────────────────────────────────────────────────────────
 
 
 class DocumentListProject(BaseModel):
@@ -213,13 +197,12 @@ class DocumentListItem(BaseModel):
     # Публичный статус: только 4 значения
     status: Literal["draft", "in_progress", "awaiting_approval", "ready"]
     current_analysis_job_id: uuid.UUID | None = None
-    # FIX-review-4: uploaded_at вместо created_at — консистентно с
-    # DocumentResponse.uploaded_at и семантикой «когда загружен файл».
+    # Как и DocumentResponse.uploaded_at — когда загружен файл.
     uploaded_at: datetime
     updated_at: datetime
     project: DocumentListProject
     suggestions: SuggestionCounters
-    # I-1: бейджи источников документа (document-scope).
+    # Бейджи источников документа (document-scope).
     # None  = поле не запрашивалось (например, в лёгком листинге).
     # []    = запрашивалось, источников нет.
     # [...]  = список бейджей для иконок на карточке.
@@ -257,7 +240,7 @@ def document_list_item(
         suggestions=suggestions,
         sources=None
         if sources is None
-        else [SourceBadge(id=s.id, name=s.name, type=str(s.type)) for s in sources],
+        else [SourceBadge(id=s.id, name=s.name, type=s.type.value) for s in sources],
         analysis=analysis,
     )
 

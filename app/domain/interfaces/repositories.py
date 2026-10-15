@@ -63,16 +63,14 @@ class IDocumentRepository(ABC):
         sort_by: str = "updated_at",
         sort_dir: str = "desc",
     ) -> tuple[list[DocumentRow], int]:
-        """CRIT-1: возвращает (список документо-строк, total_count) — один round-trip.
+        """Вернуть (список документо-строк, total_count) за один round-trip.
 
         Параметры фильтрации/сортировки приведены к реализации DocumentRepository.
         total_count включён в кортеж — отдельный count_for_user не нужен.
         """
         ...
 
-    # CRIT-2: count_for_user и update удалены из интерфейса.
-    # count_for_user — дублировал total из list_all_for_user.
-    # update — не реализован: все мутации идут через специализированные методы ниже.
+    # Обобщённого update нет: все мутации идут через специализированные методы ниже.
 
     @abstractmethod
     async def create(
@@ -284,7 +282,7 @@ class ISuggestionRepository(ABC):
         offset: int,
         status: SuggestionStatusVO | None = None,
     ) -> tuple[list[Suggestion], int]:
-        """OPT-1: один SELECT с window-функцией вместо двух запросов.
+        """Страница и total одним SELECT с оконной функцией.
 
         func.count().over() вычисляется ДО применения LIMIT/OFFSET в PostgreSQL,
         поэтому возвращает полный COUNT фильтрованной выборки.
@@ -339,8 +337,7 @@ class ISuggestionRepository(ABC):
     ) -> None:
         """Атомарный UPDATE ... WHERE status = 'pending'.
 
-        Бросает SuggestionAlreadyDecidedError если строка не затронута.
-        S-2 (иссю #37): возвращает None никогда — либо исключение, либо None имплицитно.
+        Бросает SuggestionAlreadyDecidedError, если строка не затронута.
         """
         ...
 
@@ -351,8 +348,8 @@ class ISuggestionRepository(ABC):
     ) -> int:
         """Один UPDATE ... WHERE id IN (...) AND status = 'pending'.
 
-        M-1 (иссю #37): scope-фильтр исправлен — decisions.document_id
-        сравнивается с M.document_id, а не M.analysis_job_id.
+        Область ограничена документом: decisions.document_id сравнивается
+        с suggestions.document_id.
         """
         ...
 
@@ -371,7 +368,7 @@ class ISuggestionRepository(ABC):
         analysis_job_id: uuid.UUID,
         user_id: uuid.UUID,
     ) -> list[Suggestion]:
-        """C-3 (issue #37): отклонить все PENDING-правки одним UPDATE.
+        """Отклонить все PENDING-правки одним UPDATE.
 
         Зеркало bulk_accept_all — один UPDATE WHERE status=PENDING,
         затем SELECT обновлённых объектов.
@@ -383,7 +380,7 @@ class ISuggestionRepository(ABC):
         self,
         suggestion: Suggestion,
     ) -> Suggestion | None:
-        """C-2 (issue #37): сбросить решение правки обратно в PENDING.
+        """Сбросить решение правки обратно в PENDING.
 
         Атомарный UPDATE WHERE status != PENDING AND id = ?.
         Возвращает обновлённый объект или None если правка уже PENDING
@@ -400,25 +397,6 @@ class ISuggestionRepository(ABC):
         """Вернуть в PENDING принятые/отклонённые правки job (все или только ids).
 
         Возвращает id фактически сброшенных правок.
-        """
-        ...
-
-    @abstractmethod
-    async def delete_by_analysis_job(
-        self,
-        analysis_job_id: uuid.UUID,
-    ) -> int:
-        """NEW-1: bulk DELETE всех правок job одним запросом.
-
-        DELETE FROM suggestions WHERE analysis_job_id = ?.
-        Возвращает количество удалённых строк (rowcount).
-
-        Вызывается в AnalysisJobService.create_job() при повторном запуске
-        анализа (статус документа ERROR или CANCELLED — FIX-ANAL-1),
-        до создания новой job — чтобы старые правки предыдущего анализа
-        не оставались в БД.
-
-        Идемпотентен: если правок нет — возвращает 0, не бросает исключений.
         """
         ...
 

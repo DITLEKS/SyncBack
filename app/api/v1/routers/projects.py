@@ -128,7 +128,7 @@ async def get_project(
                 "Пример: ?include=documents&include=sources"
             ),
         ),
-    ] = (),
+    ] = [],  # noqa: B006 — FastAPI копирует значение по умолчанию на каждый запрос
     document_service: DocumentService = Depends(get_document_service),
     source_service: SourceService = Depends(get_source_service),
     project_service: ProjectService = Depends(get_project_service),

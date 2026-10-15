@@ -9,6 +9,7 @@ confirmation_required=true, чтобы клиент показал диалог 
 
 import logging
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.encoders import jsonable_encoder
@@ -40,7 +41,7 @@ router = APIRouter(
 )
 
 
-def _job_response(job, http_status: int = status.HTTP_201_CREATED) -> JSONResponse:
+def _job_response(job: Any, http_status: int = status.HTTP_201_CREATED) -> JSONResponse:
     return JSONResponse(
         status_code=http_status,
         content=jsonable_encoder(AnalysisJobResponse.model_validate(job)),
@@ -143,7 +144,6 @@ async def cancel_analysis_job(
 ) -> AnalysisJobResponse:
     """Отменить задачу анализа.
 
-    C-1: DELETE /{job_id} — REST-правильный способ отмены.
     Возвращает 200 + AnalysisJobResponse с status=cancelled.
     """
     try:

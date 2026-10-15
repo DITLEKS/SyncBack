@@ -30,6 +30,7 @@ from app.core.dependencies import (
     get_suggestion_service,
 )
 from app.domain.exceptions import DocumentNotFoundError, InvalidDocumentStatusError
+from app.domain.interfaces.document_parser import ParsedDocument
 from app.domain.lifecycle import DocumentLifecycle
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.domain.services.document_service import DocumentService
@@ -56,7 +57,7 @@ _STATUS_VIEW_MODE: dict[DocumentStatusVO, str] = {
 _SUGGESTIONS_MAX_LIMIT = 200
 
 
-def _build_editor_content(parsed) -> EditorContent:
+def _build_editor_content(parsed: ParsedDocument) -> EditorContent:
     return EditorContent(
         plain_text=parsed.plain_text,
         sections=[

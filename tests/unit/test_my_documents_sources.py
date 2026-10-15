@@ -25,6 +25,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.api.deps import get_current_user
 from app.core.dependencies import get_document_service, get_source_service
+from app.infrastructure.db.models.enums import SourceType
 from app.main import app
 
 # ---------------------------------------------------------------------------
@@ -82,7 +83,7 @@ def _source(name: str = "wiki", src_type: str = "url") -> SimpleNamespace:
     return SimpleNamespace(
         id=uuid.uuid4(),
         name=name,
-        type=src_type,
+        type=SourceType(src_type),
     )
 
 

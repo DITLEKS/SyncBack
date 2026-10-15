@@ -12,9 +12,6 @@
   - SQLAlchemy-модели удовлетворяют Protocol-ам структурно — никаких
     изменений в конкретных реализациях не требуется.
   - @runtime_checkable позволяет использовать isinstance() в тестах.
-
-C-4 (issue #37): добавлены decided_by и decided_at в SuggestionProtocol —
-  нужны для SuggestionResponse.model_validate(suggestion, from_attributes=True).
 """
 
 from __future__ import annotations
@@ -52,27 +49,38 @@ class SuggestionProtocol(Protocol):
     id: uuid.UUID
     analysis_job_id: uuid.UUID
     section_ref: str
-    change_type: object  # SuggestionChangeType enum — доступен через .value
     original_text: str | None
     suggested_text: str | None
+    # Текст, которым пользователь заменил suggested_text при принятии.
+    edited_text: str | None
     status: SuggestionStatusVO
-    # C-4: required by SuggestionResponse serialization
     decided_by: uuid.UUID | None
     decided_at: datetime | None
+
+    # Только чтение: у ORM-модели это инфраструктурный StrEnum, домену хватает строки.
+    @property
+    def change_type(self) -> str: ...
 
 
 @runtime_checkable
 class UserProtocol(Protocol):
     """Минимальный контракт пользователя, нужный AuthService.
 
-    REVIEW-7: добавлен, чтобы AuthService не импортировал ORM-модель User
-    из app.infrastructure.db.models.user.
+    Нужен, чтобы AuthService не импортировал ORM-модель User.
 
-    role возвращается как str (.value enum'а или plain string) —
-    AuthService передаёт его в JWTHandler.create_access_token(role=...).
+    Атрибуты только для чтения: так протоколу удовлетворяет и ORM-модель,
+    у которой role — StrEnum (подтип str). AuthService передаёт role
+    в JWTHandler.create_access_token(role=...).
     """
 
-    id: uuid.UUID
-    email: str
-    password_hash: str
-    role: str
+    @property
+    def id(self) -> uuid.UUID: ...
+
+    @property
+    def email(self) -> str: ...
+
+    @property
+    def password_hash(self) -> str: ...
+
+    @property
+    def role(self) -> str: ...

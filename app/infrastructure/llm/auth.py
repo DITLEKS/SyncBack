@@ -13,8 +13,7 @@
 работает несколькими процессами, и без общего кэша каждый из них ходит за своим токеном.
 Источники одной задачи стартуют одновременно, и OAuth-сервер отвечал на такую пачку 429.
 Запрос токена повторяется по тем же правилам, что и запрос к модели (429 и 5xx,
-экспоненциальная задержка, Retry-After важнее) — раньше это было единственное звено
-цепочки без повторов, и один 429 ронял весь источник.
+экспоненциальная задержка, Retry-After важнее): без этого один 429 ронял бы весь источник.
 """
 
 from __future__ import annotations
@@ -213,7 +212,8 @@ class GigaChatOAuth:
                 if response.status_code != 429 and response.status_code < 500:
                     raise LLMInvalidResponseError(
                         f"OAuth-сервер LLM отклонил ключ авторизации: HTTP {response.status_code}: "
-                        f"{response.text[:200]}"
+                        f"{response.text[:200]}",
+                        status_code=response.status_code,
                     )
                 failure = f"OAuth-сервер LLM вернул HTTP {response.status_code}"
                 cause = httpx.HTTPStatusError(failure, request=response.request, response=response)

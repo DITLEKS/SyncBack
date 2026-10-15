@@ -5,11 +5,11 @@ Chord: process_source_for_analysis_job для каждого источника 
 (воркер должен работать с пулом prefork, см. celery_app.py), поэтому все
 подключения (БД, Redis) создаются внутри запуска и закрываются при выходе.
 
-P0-2: обработка источника идемпотентна по (job_id, source_id): правки и отметка
+Обработка источника идемпотентна по (job_id, source_id): правки и отметка
 «completed» пишутся в одной транзакции, повторная доставка не вызывает LLM или
 не дублирует правки.
 
-P0-2b: перед вызовом LLM источник захватывается (claim: processing + lease), чтобы
+Перед вызовом LLM источник захватывается (claim: processing + lease), чтобы
 конкурентный воркер не платил за второй запрос. Проигравший получает статус busy
 и повторяет задачу через Celery; таймаут LLM повторяется с backoff. Ожидание занятого
 источника и повторы LLM считаются раздельно (busy_attempts / llm_attempts в kwargs
@@ -22,7 +22,7 @@ import asyncio
 import functools
 import logging
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -38,10 +38,12 @@ from app.domain.exceptions import (
     LLMTimeoutError,
 )
 from app.domain.interfaces.event_publisher import IEventPublisher
-from app.domain.interfaces.source_connector import SourceKind, SourceRef
+from app.domain.interfaces.llm_client import LLMClient
+from app.domain.interfaces.source_connector import SourceConnector, SourceKind, SourceRef
 from app.domain.lifecycle import AnalysisJobLifecycle, DocumentLifecycle
 from app.domain.services.document_events import DocumentEventOutbox
 from app.domain.value_objects import AnalysisJobStatusVO, SuggestionStatusVO
+from app.infrastructure.db.models.source import Source
 from app.infrastructure.db.session import isolated_uow
 from app.infrastructure.events.publishers import RedisEventPublisher
 from app.infrastructure.llm.factory import get_llm_client
@@ -57,7 +59,7 @@ logger = logging.getLogger("syncscribe.workers.analysis")
 _PARSED_DOC_KEY_PREFIX = "parsed_doc:"
 _PARSED_DOC_TTL_SECONDS = 3600
 
-# P0-2b: lease захвата источника; должен быть больше жёсткого лимита времени задачи
+# Lease захвата источника; должен быть больше жёсткого лимита времени задачи
 # (_TASK_TIME_LIMIT_SECONDS), иначе источник могут перехватить у ещё живого воркера.
 _SOURCE_LEASE_SECONDS = 600
 # Лимиты времени заданы на уровне задачи обработки источника, а не глобально в celery_app:
@@ -81,7 +83,7 @@ if _SOURCE_LEASE_SECONDS <= _TASK_TIME_LIMIT_SECONDS:  # pragma: no cover - ин
 uow_factory = isolated_uow
 
 
-def _run_async(coro):
+def _run_async[T](coro: Coroutine[Any, Any, T]) -> T:
     return asyncio.run(coro)
 
 
@@ -110,7 +112,7 @@ def _get_url_connector() -> UrlConnector:
     return UrlConnector()
 
 
-def _get_connector_for(source_kind: SourceKind):
+def _get_connector_for(source_kind: SourceKind) -> SourceConnector:
     if source_kind == SourceKind.FILE:
         return _get_manual_connector()
     if source_kind == SourceKind.URL:
@@ -119,7 +121,7 @@ def _get_connector_for(source_kind: SourceKind):
 
 
 @functools.cache
-def _get_llm_client():
+def _get_llm_client() -> LLMClient:
     return get_llm_client()
 
 
@@ -139,7 +141,7 @@ async def _redis() -> AsyncIterator[Redis]:
         await client.aclose()
 
 
-def _build_source_ref(source) -> SourceRef:
+def _build_source_ref(source: Source) -> SourceRef:
     kind_map = {"file": SourceKind.FILE, "url": SourceKind.URL}
     source_kind = kind_map.get(source.type.value)
     if source_kind is None:
@@ -162,7 +164,8 @@ def _build_source_ref(source) -> SourceRef:
 async def _get_cached_plain_text(job_id: uuid.UUID) -> str | None:
     try:
         async with _redis() as redis:
-            return await redis.get(f"{_PARSED_DOC_KEY_PREFIX}{job_id}")
+            cached: str | None = await redis.get(f"{_PARSED_DOC_KEY_PREFIX}{job_id}")
+            return cached
     except Exception:
         logger.warning("Redis недоступен, документ будет распарсен заново", exc_info=True)
         return None
@@ -266,10 +269,10 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
         if document is None:
             return _failed(source_id, "DOCUMENT_NOT_FOUND", "Документ не найден")
 
-        # P0-2: повторная доставка уже завершённого источника — без LLM и записи правок.
+        # Повторная доставка уже завершённого источника — без LLM и записи правок.
         run = await uow.job_sources.ensure(job_uuid, source_uuid)
         already_done = await uow.job_sources.get_completed_count(job_uuid, source_uuid)
-        # P0-2b: захват источника до вызова LLM; commit делает метку видимой другим воркерам.
+        # Захват источника до вызова LLM; commit делает метку видимой другим воркерам.
         claimed = False
         if already_done is None:
             claimed = await uow.job_sources.claim(job_uuid, source_uuid, _SOURCE_LEASE_SECONDS)
@@ -324,7 +327,7 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
             await uow.job_sources.release(job_uuid, source_uuid)
             await uow.commit()
             return {"source_id": source_id, "status": "cancelled"}
-        # P0-2: первый победивший вызов пишет правки и отметку completed одной
+        # Первый победивший вызов пишет правки и отметку completed одной
         # транзакцией; дубль (повторная доставка/конкурентный воркер) ничего не пишет.
         won = await uow.job_sources.mark_completed(job_uuid, source_uuid, len(suggestions))
         if not won:
@@ -450,7 +453,7 @@ def _retry_later(
     time_limit=_TASK_TIME_LIMIT_SECONDS,
 )
 def process_source_for_analysis_job(
-    self,
+    self: Task,
     job_id: str,
     source_id: str,
     busy_attempts: int = 0,
@@ -462,7 +465,7 @@ def process_source_for_analysis_job(
     источника не расходует бюджет повторов LLM (и наоборот). Первичный вызов из chord
     передаёт только (job_id, source_id).
     """
-    result = _run_async(_process_source(job_id, source_id))
+    result: dict[str, Any] = _run_async(_process_source(job_id, source_id))
     status = result.get("status")
 
     if status == "busy":
@@ -504,5 +507,5 @@ def process_source_for_analysis_job(
 
 
 @celery_app.task(name="finalize_analysis_job", bind=True)
-def finalize_analysis_job(self, results: list[dict[str, Any]], job_id: str) -> None:
+def finalize_analysis_job(self: Task, results: list[dict[str, Any]], job_id: str) -> None:
     _run_async(_finalize(results, job_id))

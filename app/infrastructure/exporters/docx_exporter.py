@@ -13,14 +13,16 @@
 """
 
 import io
+from typing import Any
 
 from docx import Document as DocxDocument
+from docx.text.paragraph import Paragraph
 
 from app.domain.interfaces.document_exporter import AppliedChange
 from app.domain.text_normalization import normalize_text
 
 
-def _set_paragraph_text(paragraph, new_text: str) -> None:
+def _set_paragraph_text(paragraph: Paragraph, new_text: str) -> None:
     for run in paragraph.runs:
         run.text = ""
     if paragraph.runs:
@@ -29,14 +31,14 @@ def _set_paragraph_text(paragraph, new_text: str) -> None:
         paragraph.add_run(new_text)
 
 
-def _insert_paragraph_after(paragraph, text: str):
+def _insert_paragraph_after(paragraph: Paragraph, text: str) -> Paragraph:
     # python-docx умеет только insert_paragraph_before; переставляем созданный элемент за якорь.
     new_paragraph = paragraph.insert_paragraph_before(text)
     paragraph._p.addnext(new_paragraph._p)
     return new_paragraph
 
 
-def _place_addition(document, change: AppliedChange) -> None:
+def _place_addition(document: Any, change: AppliedChange) -> None:
     anchor = normalize_text(change.old_text or "").strip()
     if not anchor:
         return

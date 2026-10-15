@@ -163,8 +163,9 @@ async def test_gigachat_refreshes_token_on_401_and_retries_once(
 
 async def test_bearer_401_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _install(monkeypatch, lambda r: httpx.Response(401, text="bad key"))
-    with pytest.raises(LLMInvalidResponseError, match="HTTP 401"):
+    with pytest.raises(LLMInvalidResponseError, match="HTTP 401") as exc_info:
         await OpenAICompatibleClient(settings()).generate_suggestions("doc", "src", "md")
+    assert exc_info.value.status_code == 401
     assert len(calls) == 1
 
 

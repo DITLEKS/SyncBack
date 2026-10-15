@@ -31,8 +31,8 @@ class DocumentOpen(Base):
         primary_key=True,
         nullable=False,
     )
-    # N-8: onupdate=func.now() удалён — не работает для pg_insert ON CONFLICT DO UPDATE.
-    # Значение last_opened_at передаётся явно в DashboardRepository.upsert_open().
+    # onupdate=func.now() не срабатывает для INSERT … ON CONFLICT DO UPDATE,
+    # поэтому last_opened_at передаётся явно в DashboardRepository.upsert_open().
     last_opened_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True),
         nullable=False,

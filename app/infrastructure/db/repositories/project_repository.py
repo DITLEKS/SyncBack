@@ -128,7 +128,7 @@ class ProjectRepository(IProjectRepository):
         }
 
     async def collect_storage_keys(self, project_id: uuid.UUID) -> list[str]:
-        """Собирает все ключи хранилища проекта без дубликатов (P0-3).
+        """Собирает все ключи хранилища проекта без дубликатов.
 
         Для документов: storage_key, original_storage_key и exported_storage_key;
         для источников: storage_key. Порядок сохраняется для репродуцируемости.

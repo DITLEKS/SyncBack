@@ -6,19 +6,8 @@ get_allowed_project — единая точка принятия решения 
 но весь остальной код обращается именно к этой функции, а не сравнивает id напрямую —
 это то место, которое поменяется, когда появится таблица project_members и роли внутри проекта.
 
-CRIT-NEW-1:
-  - Убраны прямые импорты ProjectRepository / UserRepository (инфраструктурные конкреции).
-  - Тип аннотаций заменён на IProjectRepository / IUserRepository (порты).
-  - get_project_repository добавлен в core/dependencies.py.
-
-CRIT-D2 (этот раунд):
-  - Убран прямой импорт UserRepository из инфраструктурного слоя.
-  - get_current_user теперь принимает IUserRepository через Depends(get_user_repository).
-  - Тип параметра — абстрактный порт, не конкретная реализация.
-
-H-2:
-  - JWTHandler инжектируется через Depends(get_jwt_handler), а не создаётся
-    заново на каждый запрос.
+Репозитории приходят через порты IProjectRepository / IUserRepository из
+core/dependencies.py, JWTHandler — через Depends(get_jwt_handler), один на процесс.
 """
 
 import uuid
@@ -28,11 +17,11 @@ from fastapi.security import OAuth2PasswordBearer
 
 from app.core.dependencies import get_jwt_handler, get_project_repository, get_user_repository
 from app.domain.exceptions import InvalidTokenError
+from app.domain.interfaces.entities import UserProtocol
 from app.domain.interfaces.repositories import IProjectRepository, IUserRepository
 from app.domain.interfaces.security import ITokenIssuer
 from app.infrastructure.db.models.enums import UserRole
 from app.infrastructure.db.models.project import Project
-from app.infrastructure.db.models.user import User
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
@@ -41,7 +30,7 @@ async def get_current_user(
     token: str = Depends(oauth2_scheme),
     user_repository: IUserRepository = Depends(get_user_repository),
     jwt_handler: ITokenIssuer = Depends(get_jwt_handler),
-) -> User:
+) -> UserProtocol:
     try:
         payload = jwt_handler.decode_access_token(token)
     except InvalidTokenError as exc:
@@ -55,7 +44,7 @@ async def get_current_user(
     return user
 
 
-def require_admin(current_user: User = Depends(get_current_user)) -> User:
+def require_admin(current_user: UserProtocol = Depends(get_current_user)) -> UserProtocol:
     if current_user.role != UserRole.ADMIN:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Требуются права администратора"
@@ -65,7 +54,7 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
 
 async def get_allowed_project(
     project_id: uuid.UUID,
-    current_user: User = Depends(get_current_user),
+    current_user: UserProtocol = Depends(get_current_user),
     project_repository: IProjectRepository = Depends(get_project_repository),
 ) -> Project:
     project = await project_repository.get_by_id(project_id)

@@ -106,7 +106,7 @@ class ProjectService:
                 name=name,
                 description=description,
                 color=normalize_project_color(color) if color is not None else None,
-                icon=icon.strip() if icon is not None else None,
+                icon=_icon_update(icon),
             )
             await self._uow.commit()
         return updated
@@ -120,7 +120,7 @@ class ProjectService:
 
     async def delete_project(self, project: Project) -> None:
         """
-        Удаление проекта (P0-3): сначала БД, потом хранилище.
+        Удаление проекта: сначала БД, потом хранилище.
         1. Собираем все ключи хранилища проекта.
         2. Удаляем запись и фиксируем транзакцию — ON DELETE CASCADE убирает
            дочерние строки. При ошибке БД файлы остаются на месте.
@@ -143,3 +143,10 @@ class ProjectService:
                     project_id,
                     exc_info=True,
                 )
+
+
+def _icon_update(icon: str | None) -> str | None:
+    """Значение иконки для частичного обновления: None — не менять, "" — сбросить."""
+    if icon is None:
+        return None
+    return normalize_project_icon(icon) or ""

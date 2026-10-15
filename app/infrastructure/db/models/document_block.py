@@ -40,19 +40,16 @@ class DocumentBlock(Base):
         UUID(as_uuid=True),
         ForeignKey("documents.id", ondelete="CASCADE"),
         nullable=False,
-        # N-4: index=True удалён — ix_document_blocks_doc_position уже покрывает document_id.
+        # Отдельный индекс не нужен: ix_document_blocks_doc_position начинается с document_id.
     )
     # Стабильный строковый идентификатор блока (например, "h2-3", "p-12").
     # Именно на него ссылаются suggestions.block_id.
     block_ref: Mapped[str] = mapped_column(String(255), nullable=False)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     block_type: Mapped[BlockType] = mapped_column(
-        # N-3 CRITICAL FIX: было "for e in e" (опечатка) → "for m in e".
-        # Без фикса SQLAlchemy передавал имена членов enum (HEADING, PARAGRAPH…)
-        # вместо значений (heading, paragraph…) → InvalidTextRepresentationError при INSERT.
+        # values_callable: в PostgreSQL enum лежат значения (heading), а не имена (HEADING).
         SAEnum(BlockType, name="block_type_enum", values_callable=lambda e: [m.value for m in e]),
         nullable=False,
     )
-    # R-3: raw_markdown удалён — дублировал content для markdown-документов.
     content: Mapped[str] = mapped_column(Text, nullable=False)
     heading_level: Mapped[int | None] = mapped_column(Integer, nullable=True)

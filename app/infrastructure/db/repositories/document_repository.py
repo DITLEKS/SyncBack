@@ -4,10 +4,10 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, Result, and_, delete, func, select, tuple_, update
+from sqlalchemy import ColumnElement, CursorResult, and_, delete, func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.interfaces.repositories import IDocumentRepository
+from app.domain.interfaces.repositories import DocumentRow, IDocumentRepository
 from app.domain.value_objects import (
     DocumentFormatVO,
     DocumentStatusVO,
@@ -25,7 +25,7 @@ from app.infrastructure.db.models.suggestion import Suggestion
 _SORT_COLUMNS = frozenset({"created_at", "updated_at", "name"})
 
 
-def _status_to_orm(vo: DocumentStatusVO):
+def _status_to_orm(vo: DocumentStatusVO) -> DocumentStatus:
     return DocumentStatus(vo.value)
 
 
@@ -111,7 +111,7 @@ class DocumentRepository(IDocumentRepository):
     ) -> list[uuid.UUID]:
         if not statuses:
             return []
-        result: Result[tuple[uuid.UUID]] = await self._session.execute(
+        result = await self._session.execute(
             select(Document.id)
             .where(
                 Document.project_id == project_id,
@@ -149,7 +149,7 @@ class DocumentRepository(IDocumentRepository):
         search: str | None = None,
         sort_by: str = "updated_at",
         sort_dir: str = "desc",
-    ) -> tuple[list[dict[str, Any]], int]:
+    ) -> tuple[list[DocumentRow], int]:
         """Документы всех проектов пользователя со счётчиками правок текущего анализа.
 
         Один запрос: агрегаты правок считаются в подзапросе по (document_id,
@@ -159,7 +159,7 @@ class DocumentRepository(IDocumentRepository):
         if sort_by not in _SORT_COLUMNS:
             sort_by = "updated_at"
 
-        def _count_with_status(status_value: SuggestionStatus):
+        def _count_with_status(status_value: SuggestionStatus) -> ColumnElement[int]:
             return func.count(Suggestion.id).filter(Suggestion.status == status_value)
 
         counts = (
@@ -230,7 +230,7 @@ class DocumentRepository(IDocumentRepository):
             )
             return [], total or 0
 
-        items: list[dict[str, Any]] = [
+        items: list[DocumentRow] = [
             {
                 "document": row[0],
                 "project_name": row.project_name,
@@ -241,7 +241,7 @@ class DocumentRepository(IDocumentRepository):
             }
             for row in rows
         ]
-        return items, rows[0].total_count
+        return items, int(rows[0].total_count)
 
     async def update_status(
         self,

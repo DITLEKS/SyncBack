@@ -181,23 +181,20 @@ async def get_source_content(
         source = await source_service.get_source(project.id, source_id)
     except _SOURCE_ERRORS as exc:
         raise _to_http(exc) from exc
-    base = {
-        "id": source.id,
-        "name": source.name,
-        "type": source.type,
-        "url": source.url,
-        "created_at": source.created_at,
-    }
+    base = SourceContentResponse(
+        id=source.id,
+        name=source.name,
+        type=source.type.value,
+        url=source.url,
+        created_at=source.created_at,
+        preview_available=False,
+    )
     if not source.storage_key:
-        return SourceContentResponse(
-            **base,
-            preview_available=False,
-            reason="Источник-ссылка открывается по адресу",
-        )
+        return base.model_copy(update={"reason": "Источник-ссылка открывается по адресу"})
     try:
         text = await source_service.get_source_text(source)
     except UnsupportedFormatError as exc:
-        return SourceContentResponse(**base, preview_available=False, reason=str(exc))
+        return base.model_copy(update={"reason": str(exc)})
     except OSError as exc:
         logger.error(
             "Storage error while fetching source content",
@@ -210,12 +207,10 @@ async def get_source_content(
         ) from exc
     except Exception:
         logger.exception("Источник не разобран для просмотра", extra={"source_id": str(source_id)})
-        return SourceContentResponse(
-            **base,
-            preview_available=False,
-            reason="Файл не удалось прочитать как текст — скачайте его",
+        return base.model_copy(
+            update={"reason": "Файл не удалось прочитать как текст — скачайте его"}
         )
-    return SourceContentResponse(**base, plain_text=text, preview_available=True)
+    return base.model_copy(update={"plain_text": text, "preview_available": True})
 
 
 @router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT)

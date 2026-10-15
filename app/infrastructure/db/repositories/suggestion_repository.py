@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, case, delete, func, literal, null, select, update
+from sqlalchemy import CursorResult, case, func, literal, null, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import SuggestionAlreadyDecidedError
@@ -23,11 +23,11 @@ from app.infrastructure.db.models.enums import SuggestionStatus
 from app.infrastructure.db.models.suggestion import Suggestion
 
 
-def _status_to_orm(vo: SuggestionStatusVO):
+def _status_to_orm(vo: SuggestionStatusVO) -> SuggestionStatus:
     return SuggestionStatus(vo.value)
 
 
-def _status_from_orm(orm_val) -> SuggestionStatusVO:
+def _status_from_orm(orm_val: SuggestionStatus) -> SuggestionStatusVO:
     return SuggestionStatusVO(orm_val.value)
 
 
@@ -67,7 +67,7 @@ class SuggestionRepository(ISuggestionRepository):
         offset: int,
         status: SuggestionStatusVO | None = None,
     ) -> tuple[list[Suggestion], int]:
-        """OPT-1: один SELECT с window-функцией вместо двух запросов.
+        """Страница и total одним SELECT с оконной функцией.
 
         func.count().over() вычисляется ДО применения LIMIT/OFFSET в PostgreSQL,
         поэтому возвращает полный COUNT строк фильтрованной выборки.
@@ -218,9 +218,8 @@ class SuggestionRepository(ISuggestionRepository):
         """
         Один UPDATE ... WHERE id IN (...) AND status = 'pending'.
 
-        M-1 (issue #37): scope-фильтр исправлен — decisions.document_id
-        сравнивается с денормализованной колонкой M.document_id, а не
-        с M.analysis_job_id (что было семантически неверно).
+        Область ограничена документом: decisions.document_id сравнивается
+        с денормализованной колонкой suggestions.document_id.
 
         edited_text пишется только тем решениям, где он передан; остальным — NULL,
         чтобы не осталось старой правки от предыдущего решения.
@@ -305,7 +304,7 @@ class SuggestionRepository(ISuggestionRepository):
         analysis_job_id: uuid.UUID,
         user_id: uuid.UUID,
     ) -> list[Suggestion]:
-        """C-3 (issue #37): отклонить все PENDING-правки одним UPDATE.
+        """Отклонить все PENDING-правки одним UPDATE.
 
         Зеркало bulk_accept_all — один UPDATE WHERE status=PENDING,
         затем SELECT обновлённых объектов из identity map / БД.
@@ -364,24 +363,6 @@ class SuggestionRepository(ISuggestionRepository):
             return None
         await self._session.refresh(suggestion)
         return suggestion
-
-    async def delete_by_analysis_job(
-        self,
-        analysis_job_id: uuid.UUID,
-    ) -> int:
-        """NEW-1: bulk DELETE всех правок job одним запросом.
-
-        DELETE FROM suggestions WHERE analysis_job_id = ?.
-        Возвращает rowcount — количество удалённых строк.
-
-        Идемпотентен: если правок нет — возвращает 0, не бросает исключений.
-        Вызывается в AnalysisJobService.create_job() при повторном запуске
-        анализа (статус документа ERROR или CANCELLED), до создания новой job.
-        """
-        stmt = delete(Suggestion).where(Suggestion.analysis_job_id == analysis_job_id)
-        result = cast(CursorResult[Any], await self._session.execute(stmt))
-        await self._session.flush()
-        return result.rowcount
 
     async def reset_to_pending(
         self,

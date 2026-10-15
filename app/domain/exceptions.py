@@ -150,8 +150,7 @@ class SuggestionNotFoundError(DomainError):
 class StaleSuggestionJobError(SuggestionNotFoundError):
     """Правка существует, но принадлежит устаревшему analysis job.
 
-    M-9: явно разграничивает «не найдена» vs «не та версия анализа».
-    Клиент должен перезагрузить список правок — документ был
+    Отличает «правки нет» от «правка из прежнего анализа»: клиент должен перезагрузить список правок — документ был
     переанализирован с тех пор, как клиент получил suggestion_id.
     Возвращает HTTP 404 (наследует SuggestionNotFoundError).
     """
@@ -227,9 +226,7 @@ class AccountTemporarilyLockedError(DomainError):
 
 
 class SourceLockError(DomainError):
-    """Изменение источников запрещено, пока документ находится
-    в статусе IN_PROGRESS или AWAITING_APPROVAL.
-    """
+    """Изменение источников запрещено, пока документ анализируется (IN_PROGRESS)."""
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +239,15 @@ class LLMTimeoutError(DomainError):
 
 
 class LLMInvalidResponseError(DomainError):
-    pass
+    """LLM отклонила запрос или вернула ответ, который нельзя разобрать.
+
+    status_code — HTTP-код ответа, если ошибка пришла от сервера; None — ответ
+    получен, но не прошёл разбор.
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class LLMInputTooLargeError(DomainError):

@@ -1,7 +1,7 @@
 """
 IDashboardQueryService — порт read-model для дашборда.
 
-L-C: DashboardRepository — это query-модель, а не агрегатный репозиторий.
+DashboardRepository — это query-модель, а не агрегатный репозиторий.
 Unit of Work управляет агрегатами; read-model’ы инжектируются
 напрямую через FastAPI Depends.
 """

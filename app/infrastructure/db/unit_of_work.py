@@ -8,12 +8,9 @@ SQLAlchemy-реализация Unit of Work.
   - Никогда не вызывайте session.commit() внутри репозиториев.
   - Никогда не вызывайте uow.commit() более одного раза за операцию
     (исключение — Celery-задачи с промежуточными чекпойнтами).
-  - H-4: refresh() доступен через IUnitOfWork.refresh() — не обращайсь к uow._session напрямую.
-  - HIGH-A: self.users добавлен, чтобы избежать AttributeError при uow.users.
-  - H-NEW-2: self.dashboard удалён из SqlAlchemyUnitOfWork.
-    DashboardRepository — read-model, не агрегат; инжектируется как IDashboardQueryService
-    через FastAPI Depends(get_dashboard_service) (DashboardService получает UoW,
-    но не DashboardRepository в IUnitOfWork).
+  - refresh() доступен через IUnitOfWork.refresh() — не обращайтесь к uow._session напрямую.
+  - DashboardRepository — read-model, а не агрегат, поэтому в UoW его нет;
+    он инжектируется как IDashboardQueryService (см. core/dependencies.py).
 """
 
 from __future__ import annotations
@@ -56,10 +53,8 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         # Extended repositories
         self.projects = ProjectRepository(session)
         self.sources = SourceRepository(session)
-        # P0-2: состояние обработки источников внутри job
         self.job_sources = AnalysisJobSourceRepository(session)
 
-        # Auth repositories (HIGH-A: добавлен, чтобы uow.users не давал AttributeError)
         self.users = UserRepository(session)
 
     async def __aenter__(self) -> SqlAlchemyUnitOfWork:
@@ -82,5 +77,5 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         await self._session.rollback()
 
     async def refresh(self, obj: Any, attribute_names: list[str] | None = None) -> None:
-        """H-4: обновить ORM-объект из БД, не обращаясь к _session напрямую."""
+        """Обновить ORM-объект из БД, не обращаясь к _session напрямую."""
         await self._session.refresh(obj, attribute_names=attribute_names)

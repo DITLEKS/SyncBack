@@ -10,6 +10,7 @@
 
 import uuid
 from datetime import datetime
+from enum import Enum
 from typing import Literal, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -40,8 +41,8 @@ class NoteCreateRequest(_ScopedSourceRequest):
 
 
 def _enum_value(v: object) -> str:
-    if hasattr(v, "value"):
-        return v.value  # type: ignore[return-value]
+    if isinstance(v, Enum):
+        return str(v.value)
     return str(v)
 
 

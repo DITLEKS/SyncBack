@@ -1,19 +1,15 @@
 """
 Document ORM model.
 
-FIX-review-2: добавлена колонка current_analysis_job_id (nullable UUID FK → analysis_jobs.id).
-    DocumentResponse и DocumentListItem объявляли это поле, но ORM-колонки не было →
-    model_validate(document) всегда возвращал None даже при наличии активного job.
-    Колонка nullable=True, ondelete=SET NULL — при удалении job ссылка обнуляется.
-    Требует миграции: ALTER TABLE documents ADD COLUMN current_analysis_job_id UUID
-    REFERENCES analysis_jobs(id) ON DELETE SET NULL;
+current_analysis_job_id — ссылка на последний запущенный анализ (ON DELETE SET NULL).
 """
 
 import uuid
+from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     CheckConstraint,
-    Column,
     DateTime,
     Enum,
     ForeignKey,
@@ -24,10 +20,15 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.models.enums import DocumentFormat, DocumentStatus
+
+if TYPE_CHECKING:
+    from app.infrastructure.db.models.analysis_job import AnalysisJob
+    from app.infrastructure.db.models.project import Project
+    from app.infrastructure.db.models.source import Source
 
 
 class Document(Base):
@@ -50,15 +51,15 @@ class Document(Base):
         ),
     )
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    project_id = Column(
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("projects.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
-    name = Column(String(512), nullable=False)
-    format = Column(
+    name: Mapped[str] = mapped_column(String(512), nullable=False)
+    format: Mapped[DocumentFormat] = mapped_column(
         Enum(
             DocumentFormat,
             name="document_format",
@@ -66,12 +67,10 @@ class Document(Base):
         ),
         nullable=False,
     )
-    storage_key = Column(String(1024), nullable=False)
-    size_bytes = Column(Integer, nullable=False)
-    # C-2: uploaded_at актуально — колонка не дропалась ни в одной миграции;
-    # используется в DashboardRepository.get_attention_documents.
-    uploaded_at = Column(DateTime(timezone=True), nullable=False)
-    status = Column(
+    storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[DocumentStatus] = mapped_column(
         Enum(
             DocumentStatus,
             name="document_status",
@@ -81,42 +80,41 @@ class Document(Base):
         default=DocumentStatus.DRAFT,
         server_default=DocumentStatus.DRAFT.value,
     )
-    review_version = Column(Integer, nullable=False, default=0, server_default="0")
-    # FIX-review-2: current_analysis_job_id — денормализованная ссылка на текущий
-    # (последний запущенный) job. Обнуляется автоматически при удалении job (SET NULL).
-    # Заполняется в analysis_job_service при создании нового job (UPDATE documents SET
-    # current_analysis_job_id = :job_id WHERE id = :doc_id).
-    current_analysis_job_id = Column(
+    review_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    # Денормализованная ссылка на текущий (последний запущенный) анализ; ставится
+    # при создании задачи в AnalysisJobService.
+    current_analysis_job_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("analysis_jobs.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
-    # C-1: добавлено поле original_storage_key — колонка существует в БД
-    # с миграции 0011. Без ORM-объявления RETURNING storage_key, original_storage_key
-    # в delete_by_id падал с AttributeError, а снапшот в хранилище никогда не удалялся.
-    original_storage_key = Column(String(1024), nullable=True)
-    # N-2: exported_storage_key — используется в DocumentRepository.update_exported_key().
-    exported_storage_key = Column(String(1024), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(
+    original_storage_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    exported_storage_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
     )
 
-    project = relationship("Project", back_populates="documents")
-    sources = relationship("Source", secondary="document_sources", back_populates="documents")
-    analysis_jobs = relationship(
+    project: Mapped["Project"] = relationship("Project", back_populates="documents")
+    sources: Mapped[list["Source"]] = relationship(
+        "Source", secondary="document_sources", back_populates="documents"
+    )
+    analysis_jobs: Mapped[list["AnalysisJob"]] = relationship(
         "AnalysisJob",
         back_populates="document",
         foreign_keys="AnalysisJob.document_id",
         cascade="all, delete-orphan",
     )
-    # FIX-review-2: relationship к текущему (активному) job без cascade.
-    # foreign_keys явно указан чтобы разрешить ambiguity (два FK на analysis_jobs).
-    current_analysis_job = relationship(
+    # Без cascade; foreign_keys указан явно, чтобы разрешить ambiguity (два FK на analysis_jobs).
+    current_analysis_job: Mapped["AnalysisJob | None"] = relationship(
         "AnalysisJob",
         foreign_keys=[current_analysis_job_id],
         primaryjoin="Document.current_analysis_job_id == AnalysisJob.id",

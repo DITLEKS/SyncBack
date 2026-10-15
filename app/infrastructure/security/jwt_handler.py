@@ -1,12 +1,8 @@
 """
 Выпуск и проверка JWT access/refresh-токенов.
 
-REVIEW-1: create_refresh_token теперь включает claim `jti` (uuid4) —
-  уникальный идентификатор токена для хранения и отзыва в Redis.
-  Метод возвращает кортеж (token, expires_in, jti).
-
-REVIEW-2: expires_in для refresh-токена берётся из
-  settings.jwt_refresh_token_expire_days (вместо захардкоженного 30*24*60*60).
+Refresh-токен несёт claim jti (uuid4) — по нему токен хранится и отзывается в Redis;
+create_refresh_token возвращает (token, expires_in, jti).
 """
 
 import uuid
@@ -44,7 +40,6 @@ class JWTHandler:
         """
         now = datetime.now(UTC)
         jti = str(uuid.uuid4())
-        # REVIEW-2: константа вынесена в config.jwt_refresh_token_expire_days
         expires_in = self._settings.jwt_refresh_token_expire_days * 24 * 60 * 60
         payload = {
             "sub": str(user_id),

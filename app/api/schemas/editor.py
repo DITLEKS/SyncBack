@@ -1,9 +1,5 @@
 """
 Схемы ответов для editor-роутера.
-
-C-3: CancelAllSuggestionsResponse добавлена для DELETE /editor/suggestions.
-FIX-review-1: EditorSectionResponse → DocumentSectionResponse (правильное имя класса
-    в document.py; EditorSectionResponse никогда не существовал → ImportError при старте).
 """
 
 import uuid
@@ -30,7 +26,6 @@ class EditorDocumentMeta(BaseModel):
 
 class EditorContent(BaseModel):
     plain_text: str
-    # FIX-review-1: тип изменён с EditorSectionResponse на DocumentSectionResponse.
     sections: list[DocumentSectionResponse] = []
 
 
