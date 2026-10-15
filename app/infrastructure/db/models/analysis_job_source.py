@@ -2,6 +2,9 @@
 
 Уникальность (job_id, source_id) защищает от повторной записи правок при
 повторной доставке Celery-задачи (acks_late / reject_on_worker_lost).
+
+P0-2b: статус processing + locked_at (lease) защищают от двойного вызова LLM
+при конкурентной обработке одного источника.
 """
 
 import uuid
@@ -14,6 +17,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.infrastructure.db.base import Base
 
 SOURCE_RUN_PENDING = "pending"
+SOURCE_RUN_PROCESSING = "processing"
 SOURCE_RUN_COMPLETED = "completed"
 
 
@@ -39,3 +43,4 @@ class AnalysisJobSource(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

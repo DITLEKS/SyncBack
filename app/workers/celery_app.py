@@ -31,6 +31,11 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
+# P0-2b: lease захвата источника (analysis_tasks._SOURCE_LEASE_SECONDS = 600) должен быть
+# больше жёсткого лимита задачи, иначе источник могут перехватить у живого воркера.
+_TASK_SOFT_TIME_LIMIT_SECONDS = 540
+_TASK_TIME_LIMIT_SECONDS = 570
+
 celery_app = Celery(
     "syncscribe",
     broker=settings.redis_url,
@@ -49,4 +54,6 @@ celery_app.conf.update(
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,
     result_expires=86400,
+    task_soft_time_limit=_TASK_SOFT_TIME_LIMIT_SECONDS,
+    task_time_limit=_TASK_TIME_LIMIT_SECONDS,
 )
