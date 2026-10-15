@@ -120,25 +120,26 @@ class ProjectService:
 
     async def delete_project(self, project: Project) -> None:
         """
-        Каскадное удаление:
-        1. Собираем storage_key всех файлов проекта.
-        2. Удаляем их из хранилища (best-effort).
-        3. Удаляем запись — ON DELETE CASCADE убирает дочерние строки.
+        Удаление проекта (P0-3): сначала БД, потом хранилище.
+        1. Собираем все ключи хранилища проекта.
+        2. Удаляем запись и фиксируем транзакцию — ON DELETE CASCADE убирает
+           дочерние строки. При ошибке БД файлы остаются на месте.
+        3. Удаляем объекты из хранилища (best-effort): при сбое остаются
+           осиротевшие файлы без потери данных пользователя; ошибка логируется.
         """
+        project_id = project.id
         async with self._uow:
-            storage_keys = await self._uow.projects.collect_storage_keys(project.id)
+            storage_keys = await self._uow.projects.collect_storage_keys(project_id)
+            await self._uow.projects.delete(project)
+            await self._uow.commit()
 
         for key in storage_keys:
             try:
                 await self._storage.delete(key)
             except Exception:  # noqa: BLE001
                 logger.warning(
-                    "Не удалось удалить файл %s при удалении проекта %s",
+                    "Не удалось удалить файл %s после удаления проекта %s (осиротевший объект)",
                     key,
-                    project.id,
+                    project_id,
                     exc_info=True,
                 )
-
-        async with self._uow:
-            await self._uow.projects.delete(project)
-            await self._uow.commit()
