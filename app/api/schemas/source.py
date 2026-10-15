@@ -2,6 +2,10 @@
 
 Два типа источников: file (загружается через multipart /sources/file) и url.
 Текстовые заметки (/sources/note) сохраняются как файл и возвращаются с type=file.
+
+В ответах есть url и created_at: фронтенд показывает дату загрузки и открывает url-источник
+по адресу без отдельного запроса; файловые источники скачиваются через /download и читаются
+через /content.
 """
 
 import uuid
@@ -47,6 +51,7 @@ class SourceResponse(BaseModel):
     name: str
     type: Literal["url", "file"]
     scope: Literal["project", "document"]
+    url: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -55,12 +60,41 @@ class SourceResponse(BaseModel):
 
 
 class SourceBadge(BaseModel):
-    """Минимум для бейджа источника на карточке документа."""
+    """Минимум для строки источника на карточке документа: название, тип, адрес, дата."""
 
     id: uuid.UUID
     name: str
     type: Literal["url", "file"]
+    url: str | None = None
+    created_at: datetime | None = None
 
     model_config = {"from_attributes": True}
+
+    _normalise_type = field_validator("type", mode="before")(_enum_value)
+
+
+class SourceDownloadResponse(BaseModel):
+    download_url: str
+    expires_in: int | None = Field(
+        default=None,
+        description="Срок жизни ссылки в секундах; None для url-источника — это его постоянный адрес",
+    )
+
+
+class SourceContentResponse(BaseModel):
+    """Содержимое источника для просмотра.
+
+    preview_available=False — текста нет: url-источник открывается по адресу, файл
+    неподдерживаемого формата можно только скачать; причина — в reason.
+    """
+
+    id: uuid.UUID
+    name: str
+    type: Literal["url", "file"]
+    url: str | None = None
+    created_at: datetime
+    plain_text: str | None = None
+    preview_available: bool
+    reason: str | None = None
 
     _normalise_type = field_validator("type", mode="before")(_enum_value)

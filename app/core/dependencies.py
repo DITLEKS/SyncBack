@@ -175,6 +175,8 @@ def get_source_service(
         uow=uow,
         file_storage=_get_file_storage(),
         upload_limits=UploadLimits.from_megabytes(settings.max_upload_size_mb),
+        parser_registry=_get_parser_registry(),
+        download_url_ttl_seconds=settings.s3_presigned_url_expire_seconds,
     )
 
 
