@@ -1,4 +1,4 @@
-"""P0-2b: два конкурентных воркера на уровне _process_source (PostgreSQL).
+"""Два конкурентных воркера на уровне _process_source (PostgreSQL).
 
 Реальные S3, Redis и LLM не используются: загрузка текста документа, коннектор
 источника и LLM-клиент подменяются заглушками, UoW строится над pg_sessionmaker.
@@ -13,11 +13,11 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.domain.exceptions import LLMTimeoutError
@@ -104,6 +104,24 @@ class FakeLLM:
         return _batch()
 
 
+class SequencedLLM:
+    """Заглушка LLM, у которой каждый вызов ждёт свой gate: воркеры отпускаются по одному."""
+
+    def __init__(self, calls: int) -> None:
+        self.started = [asyncio.Event() for _ in range(calls)]
+        self.gates = [asyncio.Event() for _ in range(calls)]
+        self.calls = 0
+
+    async def generate_suggestions(
+        self, document_text: str, source_text: str, document_format: str
+    ) -> LLMSuggestionBatch:
+        index = self.calls
+        self.calls += 1
+        self.started[index].set()
+        await self.gates[index].wait()
+        return _batch()
+
+
 class FakeConnector:
     async def fetch(self, source_ref) -> str:
         return SOURCE_TEXT
@@ -144,7 +162,7 @@ async def scenario(pg_sessionmaker: async_sessionmaker[AsyncSession]) -> Scenari
 @pytest.fixture
 def worker_env(
     monkeypatch: pytest.MonkeyPatch, pg_sessionmaker: async_sessionmaker[AsyncSession]
-) -> Callable[[FakeLLM], None]:
+) -> Callable[[FakeLLM | SequencedLLM], None]:
     """Подменяет инфраструктуру analysis_tasks: БД через pg_sessionmaker, без S3/Redis/LLM."""
 
     @asynccontextmanager
@@ -159,7 +177,7 @@ def worker_env(
     monkeypatch.setattr(analysis_tasks, "_load_document_text", _load_document_text)
     monkeypatch.setattr(analysis_tasks, "_get_connector_for", lambda source_kind: FakeConnector())
 
-    def install(llm: FakeLLM) -> None:
+    def install(llm: FakeLLM | SequencedLLM) -> None:
         monkeypatch.setattr(analysis_tasks, "_get_llm_client", lambda: llm)
 
     return install
@@ -200,7 +218,7 @@ async def _suggestions_count(
 async def test_two_workers_call_llm_once(
     pg_sessionmaker: async_sessionmaker[AsyncSession],
     scenario: Scenario,
-    worker_env: Callable[[FakeLLM], None],
+    worker_env: Callable[[FakeLLM | SequencedLLM], None],
 ) -> None:
     gate = asyncio.Event()
     started = asyncio.Event()
@@ -241,7 +259,7 @@ async def test_two_workers_call_llm_once(
 async def test_llm_timeout_releases_source_for_immediate_retry(
     pg_sessionmaker: async_sessionmaker[AsyncSession],
     scenario: Scenario,
-    worker_env: Callable[[FakeLLM], None],
+    worker_env: Callable[[FakeLLM | SequencedLLM], None],
 ) -> None:
     llm = FakeLLM(errors=(LLMTimeoutError("LLM не ответил вовремя"),))
     worker_env(llm)
@@ -266,3 +284,63 @@ async def test_llm_timeout_releases_source_for_immediate_retry(
     row = await _row(pg_sessionmaker, scenario)
     assert row.status == SOURCE_RUN_COMPLETED
     assert row.locked_at is None
+
+
+async def _expire_lease(sessionmaker: async_sessionmaker[AsyncSession], scenario: Scenario) -> None:
+    async with sessionmaker() as session:
+        await session.execute(
+            update(AnalysisJobSource)
+            .where(
+                AnalysisJobSource.job_id == scenario.job_id,
+                AnalysisJobSource.source_id == scenario.source_id,
+            )
+            .values(
+                locked_at=datetime.now(timezone.utc)
+                - timedelta(seconds=analysis_tasks._SOURCE_LEASE_SECONDS + 60)
+            )
+        )
+        await session.commit()
+
+
+async def test_worker_with_expired_lease_does_not_store_result(
+    pg_sessionmaker: async_sessionmaker[AsyncSession],
+    scenario: Scenario,
+    worker_env: Callable[[FakeLLM | SequencedLLM], None],
+) -> None:
+    """A завис в LLM, lease истёк, B перехватил: результат A отброшен, правки пишет B."""
+    llm = SequencedLLM(calls=2)
+    worker_env(llm)
+    source_id = str(scenario.source_id)
+
+    stale = asyncio.create_task(_run(scenario))
+    await asyncio.wait_for(llm.started[0].wait(), WAIT_SECONDS)
+    stale_token = (await _row(pg_sessionmaker, scenario)).lock_token
+    await _expire_lease(pg_sessionmaker, scenario)
+
+    owner = asyncio.create_task(_run(scenario))
+    await asyncio.wait_for(llm.started[1].wait(), WAIT_SECONDS)
+    owner_token = (await _row(pg_sessionmaker, scenario)).lock_token
+    assert owner_token is not None
+    assert owner_token != stale_token
+
+    # A отвечает первым, но захват уже не его: ни правок, ни снятия чужого захвата.
+    llm.gates[0].set()
+    stale_result = await asyncio.wait_for(stale, WAIT_SECONDS)
+    assert stale_result == {"source_id": source_id, "status": "busy"}
+    assert await _suggestions_count(pg_sessionmaker, scenario) == 0
+    row = await _row(pg_sessionmaker, scenario)
+    assert row.status == SOURCE_RUN_PROCESSING
+    assert row.lock_token == owner_token
+
+    llm.gates[1].set()
+    owner_result = await asyncio.wait_for(owner, WAIT_SECONDS)
+    assert owner_result == {"source_id": source_id, "status": "ok", "count": 2}
+
+    # Повтор задачи A после busy видит completed и не зовёт LLM.
+    retried = await _run(scenario)
+    assert retried == {"source_id": source_id, "status": "ok", "count": 2}
+    assert llm.calls == 2
+    assert await _suggestions_count(pg_sessionmaker, scenario) == 2
+    row = await _row(pg_sessionmaker, scenario)
+    assert row.status == SOURCE_RUN_COMPLETED
+    assert row.lock_token is None

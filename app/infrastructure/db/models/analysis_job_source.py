@@ -4,7 +4,9 @@
 повторной доставке Celery-задачи (acks_late / reject_on_worker_lost).
 
 Статус processing + locked_at (lease) защищают от двойного вызова LLM
-при конкурентной обработке одного источника.
+при конкурентной обработке одного источника. lock_token — токен текущего
+владельца захвата: воркер, чей lease истёк и источник перехватили, не может
+ни записать результат, ни снять чужой захват.
 """
 
 import uuid
@@ -44,3 +46,4 @@ class AnalysisJobSource(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lock_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)

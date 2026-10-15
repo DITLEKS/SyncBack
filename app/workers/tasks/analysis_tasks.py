@@ -9,8 +9,9 @@ Chord: process_source_for_analysis_job для каждого источника 
 «completed» пишутся в одной транзакции, повторная доставка не вызывает LLM или
 не дублирует правки.
 
-Перед вызовом LLM источник захватывается (claim: processing + lease), чтобы
-конкурентный воркер не платил за второй запрос. Проигравший получает статус busy
+Перед вызовом LLM источник захватывается (claim: processing + lease + токен
+владельца), чтобы конкурентный воркер не платил за второй запрос, а воркер,
+у которого источник перехватили по истечении lease, не мог записать результат. Проигравший получает статус busy
 и повторяет задачу через Celery; таймаут LLM повторяется с backoff. Ожидание занятого
 источника и повторы LLM считаются раздельно (busy_attempts / llm_attempts в kwargs
 задачи), а не общим self.request.retries.
@@ -234,11 +235,11 @@ def _retryable(source_id: str, error_code: str, error_message: str) -> dict[str,
     }
 
 
-async def _release_source(job_uuid: uuid.UUID, source_uuid: uuid.UUID) -> None:
-    """Снять захват (processing → pending), чтобы повтор не ждал истечения lease."""
+async def _release_source(job_uuid: uuid.UUID, source_uuid: uuid.UUID, token: uuid.UUID) -> None:
+    """Снять свой захват (processing → pending), чтобы повтор не ждал истечения lease."""
     try:
         async with uow_factory() as uow:
-            await uow.job_sources.release(job_uuid, source_uuid)
+            await uow.job_sources.release(job_uuid, source_uuid, token)
             await uow.commit()
     except Exception:
         logger.warning(
@@ -273,9 +274,9 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
         run = await uow.job_sources.ensure(job_uuid, source_uuid)
         already_done = await uow.job_sources.get_completed_count(job_uuid, source_uuid)
         # Захват источника до вызова LLM; commit делает метку видимой другим воркерам.
-        claimed = False
+        token: uuid.UUID | None = None
         if already_done is None:
-            claimed = await uow.job_sources.claim(job_uuid, source_uuid, _SOURCE_LEASE_SECONDS)
+            token = await uow.job_sources.claim(job_uuid, source_uuid, _SOURCE_LEASE_SECONDS)
         await uow.commit()
         if already_done is not None:
             logger.info(
@@ -283,7 +284,7 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
                 extra={"job_id": job_id, "source_id": source_id, "run_id": str(run.id)},
             )
             return {"source_id": source_id, "status": "ok", "count": already_done}
-        if not claimed:
+        if token is None:
             logger.info(
                 "process_source: источник захвачен другим воркером",
                 extra={"job_id": job_id, "source_id": source_id, "run_id": str(run.id)},
@@ -306,7 +307,7 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
             "Ошибка генерации правок для источника",
             extra={"job_id": job_id, "source_id": source_id},
         )
-        await _release_source(job_uuid, source_uuid)
+        await _release_source(job_uuid, source_uuid, token)
         error_code = _generation_error_code(exc)
         if isinstance(exc, LLMTimeoutError):
             return _retryable(source_id, error_code, str(exc))
@@ -324,16 +325,23 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
         job = await uow.jobs.get_by_id(job_uuid)
         # Пока шла генерация, задачу могли отменить — тогда правки не сохраняем.
         if job is None or not AnalysisJobLifecycle.is_active(job.status):
-            await uow.job_sources.release(job_uuid, source_uuid)
+            await uow.job_sources.release(job_uuid, source_uuid, token)
             await uow.commit()
             return {"source_id": source_id, "status": "cancelled"}
-        # Первый победивший вызов пишет правки и отметку completed одной
-        # транзакцией; дубль (повторная доставка/конкурентный воркер) ничего не пишет.
-        won = await uow.job_sources.mark_completed(job_uuid, source_uuid, len(suggestions))
+        # Владелец захвата пишет правки и отметку completed одной транзакцией.
+        won = await uow.job_sources.mark_completed(job_uuid, source_uuid, token, len(suggestions))
         if not won:
             await uow.rollback()
             stored = await uow.job_sources.get_completed_count(job_uuid, source_uuid)
-            return {"source_id": source_id, "status": "ok", "count": stored or 0}
+            if stored is not None:
+                return {"source_id": source_id, "status": "ok", "count": stored}
+            # Lease истёк, источник перехватил другой воркер: результат запишет он,
+            # а повтор этой задачи увидит completed.
+            logger.warning(
+                "process_source: захват источника перехвачен, результат отброшен",
+                extra={"job_id": job_id, "source_id": source_id},
+            )
+            return {"source_id": source_id, "status": "busy"}
         await uow.suggestions.bulk_create(suggestions)
         await uow.commit()
 

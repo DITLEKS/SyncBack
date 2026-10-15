@@ -41,14 +41,17 @@ class AnalysisJobSourceRepository:
             raise RuntimeError("analysis_job_sources: запись не создана")
         return row
 
-    async def claim(self, job_id: uuid.UUID, source_id: uuid.UUID, lease_seconds: int) -> bool:
+    async def claim(
+        self, job_id: uuid.UUID, source_id: uuid.UUID, lease_seconds: int
+    ) -> uuid.UUID | None:
         """Атомарно захватить источник перед вызовом LLM.
 
-        True — источник был pending либо в processing с просроченным lease и
-        теперь принадлежит этому воркеру; False — его держит другой воркер или
-        он уже completed. Конкурентный UPDATE ждёт блокировку строки и после
-        коммита первого перепроверяет условие.
+        Возвращает токен владельца, если источник был pending либо в processing
+        с просроченным lease; None — его держит другой воркер или он уже completed.
+        Токен нужно передавать в release и mark_completed. Конкурентный UPDATE ждёт
+        блокировку строки и после коммита первого перепроверяет условие.
         """
+        token = uuid.uuid4()
         now = datetime.now(UTC)
         expired_before = now - timedelta(seconds=lease_seconds)
         result = await self._session.execute(
@@ -64,44 +67,56 @@ class AnalysisJobSourceRepository:
                     ),
                 ),
             )
-            .values(status=SOURCE_RUN_PROCESSING, locked_at=now)
+            .values(status=SOURCE_RUN_PROCESSING, locked_at=now, lock_token=token)
         )
-        return cast(CursorResult[Any], result).rowcount == 1
+        return token if cast(CursorResult[Any], result).rowcount == 1 else None
 
-    async def release(self, job_id: uuid.UUID, source_id: uuid.UUID) -> None:
-        """Вернуть источник в pending после сбоя или отмены, чтобы повтор не ждал lease."""
+    async def release(self, job_id: uuid.UUID, source_id: uuid.UUID, token: uuid.UUID) -> None:
+        """Вернуть источник в pending после сбоя или отмены, чтобы повтор не ждал lease.
+
+        Захват снимается, только если он всё ещё принадлежит владельцу token:
+        перехваченный другим воркером источник не трогается.
+        """
         await self._session.execute(
             update(AnalysisJobSource)
             .where(
                 AnalysisJobSource.job_id == job_id,
                 AnalysisJobSource.source_id == source_id,
                 AnalysisJobSource.status == SOURCE_RUN_PROCESSING,
+                AnalysisJobSource.lock_token == token,
             )
-            .values(status=SOURCE_RUN_PENDING, locked_at=None)
+            .values(status=SOURCE_RUN_PENDING, locked_at=None, lock_token=None)
         )
 
     async def mark_completed(
-        self, job_id: uuid.UUID, source_id: uuid.UUID, suggestions_count: int
+        self,
+        job_id: uuid.UUID,
+        source_id: uuid.UUID,
+        token: uuid.UUID,
+        suggestions_count: int,
     ) -> bool:
-        """Атомарно пометить источник завершённым.
+        """Атомарно пометить источник завершённым от имени владельца захвата.
 
-        True — этот вызов был первым и должен записать правки в той же
-        транзакции; False — источник уже завершён (дубль доставки
-        или конкурентный воркер). Конкурентный UPDATE ждёт блокировку
-        строки и после коммита первого перепроверяет условие.
+        True — захват всё ещё принадлежит token, вызывающий должен записать
+        правки в той же транзакции; False — источник уже completed (дубль
+        доставки) или перехвачен другим воркером после истечения lease.
+        Конкурентный UPDATE ждёт блокировку строки и после коммита первого
+        перепроверяет условие.
         """
         result = await self._session.execute(
             update(AnalysisJobSource)
             .where(
                 AnalysisJobSource.job_id == job_id,
                 AnalysisJobSource.source_id == source_id,
-                AnalysisJobSource.status != SOURCE_RUN_COMPLETED,
+                AnalysisJobSource.status == SOURCE_RUN_PROCESSING,
+                AnalysisJobSource.lock_token == token,
             )
             .values(
                 status=SOURCE_RUN_COMPLETED,
                 suggestions_count=suggestions_count,
                 finished_at=datetime.now(UTC),
                 locked_at=None,
+                lock_token=None,
             )
         )
         return cast(CursorResult[Any], result).rowcount == 1
