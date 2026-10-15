@@ -11,11 +11,13 @@ import logging
 import uuid
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 from app.domain.exceptions import (
     AnalysisAlreadyRunningError,
     AnalysisConfirmationRequiredError,
+    AnalysisJobAlreadyExistsError,
+    AnalysisJobConflictError,
     AnalysisJobNotCancellableError,
     AnalysisJobNotFoundError,
     DocumentNotFoundError,
@@ -113,7 +115,30 @@ class AnalysisJobService:
 
         Повторный анализ готового документа без force → AnalysisConfirmationRequiredError:
         проверка идёт в той же транзакции, что и создание задачи.
+
+        P0-1: предварительные проверки не атомарны, поэтому окончательным арбитром
+        служат уникальные индексы БД. Проигравший гонку запрос получает
+        AnalysisAlreadyRunningError (конкурирующий запуск) или
+        AnalysisJobAlreadyExistsError (тот же Idempotency-Key), а не 500.
         """
+        try:
+            return await self._create_job_once(
+                project_id, document_id, idempotency_key, force=force
+            )
+        except AnalysisJobConflictError as exc:
+            # Транзакция уже откачена; событие о переводе документа в draft
+            # не должно уйти подписчикам.
+            self._outbox.discard()
+            await self._raise_create_conflict(document_id, idempotency_key, exc)
+
+    async def _create_job_once(
+        self,
+        project_id: uuid.UUID,
+        document_id: uuid.UUID,
+        idempotency_key: str | None,
+        *,
+        force: bool,
+    ) -> AnalysisJob:
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
             if document is None or document.project_id != project_id:
@@ -153,6 +178,21 @@ class AnalysisJobService:
             await self._uow.documents.set_current_job(document, job.id)
             await self._commit()
         return job
+
+    async def _raise_create_conflict(
+        self,
+        document_id: uuid.UUID,
+        idempotency_key: str | None,
+        cause: AnalysisJobConflictError,
+    ) -> NoReturn:
+        """Разобрать проигранную гонку в новой транзакции и бросить доменную ошибку."""
+        existing: AnalysisJob | None = None
+        if idempotency_key is not None:
+            async with self._uow:
+                existing = await self._uow.jobs.get_by_idempotency_key(document_id, idempotency_key)
+        if existing is not None:
+            raise AnalysisJobAlreadyExistsError(existing) from cause
+        raise AnalysisAlreadyRunningError("Для документа уже выполняется анализ") from cause
 
     async def dispatch_job(self, job: AnalysisJob) -> AnalysisJob:
         """Отправить задачу в очередь и вернуть её актуальное состояние.

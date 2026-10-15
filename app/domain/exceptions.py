@@ -102,6 +102,31 @@ class AnalysisAlreadyRunningError(DomainError):
     """
 
 
+class AnalysisJobConflictError(DomainError):
+    """Вставка задачи нарушила уникальность в БД: параллельный запуск анализа.
+
+    Бросается репозиторием; сервис превращает её в AnalysisAlreadyRunningError
+    или AnalysisJobAlreadyExistsError. by_idempotency_key=True означает, что
+    Idempotency-Key уже занят параллельным запросом, False — что у документа
+    уже есть активная задача.
+    """
+
+    def __init__(self, message: str, *, by_idempotency_key: bool = False) -> None:
+        super().__init__(message)
+        self.by_idempotency_key = by_idempotency_key
+
+
+class AnalysisJobAlreadyExistsError(DomainError):
+    """Идемпотентный повтор: задачу с этим Idempotency-Key уже создал параллельный запрос.
+
+    Сигнализирует роутеру вернуть HTTP 200 с уже существующей задачей.
+    """
+
+    def __init__(self, job: object) -> None:
+        super().__init__("Задача анализа с этим Idempotency-Key уже создана")
+        self.job = job
+
+
 class AnalysisConfirmationRequiredError(DomainError):
     """Повторный анализ готового документа сбросит результаты ревью: нужен force."""
 
