@@ -1,5 +1,5 @@
 """Маппер: якорь добавления из insert_after или первого абзаца раздела, нормализация
-modify→delete, отброс многоабзацных фрагментов для docx и причины отброса в тексте лога."""
+modify→delete и modify→add, отброс многоабзацных фрагментов для docx и причины отброса в тексте лога."""
 
 import logging
 import uuid
@@ -50,7 +50,7 @@ def _map(
     )
 
 
-# ── якорь добавления ───────────────────────────────────────────────────────────────────────────────
+# ── якорь добавления ───────────────────────────────────────────────────────────────────────────────────
 
 
 def test_add_with_insert_after_is_kept_and_anchor_stored_in_original_text() -> None:
@@ -100,7 +100,7 @@ def test_anchor_is_matched_after_strip() -> None:
     assert len(_map(_item("add", "", insert_after="  Оплата картой.\n"))) == 1
 
 
-# ── infer_anchor ─────────────────────────────────────────────────────────────────────────────────
+# ── infer_anchor ────────────────────────────────────────────────────────────────────────────────────────
 
 
 def test_infer_anchor_handles_markdown_and_plain_headings() -> None:
@@ -116,7 +116,7 @@ def test_infer_anchor_falls_back_to_heading_and_none() -> None:
     assert infer_anchor(DOCUMENT, "") is None
 
 
-# ── modify / delete ──────────────────────────────────────────────────────────────────────────────
+# ── modify / delete ────────────────────────────────────────────────────────────────────────────────────
 
 
 def test_modify_with_empty_new_text_becomes_delete() -> None:
@@ -143,7 +143,47 @@ def test_unknown_change_type_is_still_dropped() -> None:
     assert [s.change_type for s in result] == [ChangeType.ADD]
 
 
-# ── логи ────────────────────────────────────────────────────────────────────────────────────────
+# ── modify с дописыванием → add ───────────────────────────────────────────────────────────────────────────────
+
+
+def test_modify_that_appends_text_becomes_add_after_old_text() -> None:
+    result = _map(_item("modify", "Оплата картой.", "Оплата картой. Возможна оплата по счёту."))
+    assert len(result) == 1
+    assert result[0].change_type is ChangeType.ADD
+    assert result[0].original_text == "Оплата картой."
+    assert result[0].suggested_text == "Возможна оплата по счёту."
+
+
+def test_appending_modify_spanning_paragraphs_is_rescued_for_docx() -> None:
+    old = "Срок ответа — 10 дней.\nОплата картой."
+    result = _map(_item("modify", old, old + "\nНовое предложение."), document_format="docx")
+    assert len(result) == 1
+    assert result[0].change_type is ChangeType.ADD
+    assert result[0].original_text == "Оплата картой."
+    assert result[0].suggested_text == "Новое предложение."
+
+
+def test_modify_with_real_replacement_stays_modify() -> None:
+    result = _map(_item("modify", "Оплата картой.", "Оплата картой или по счёту."))
+    assert result[0].change_type is ChangeType.MODIFY
+    assert result[0].suggested_text == "Оплата картой или по счёту."
+
+
+def test_modify_identical_to_old_text_is_not_converted() -> None:
+    result = _map(_item("modify", "Оплата картой.", "Оплата картой."))
+    assert result[0].change_type is ChangeType.MODIFY
+
+
+def test_appended_modifies_are_counted_in_log(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        _map(_item("modify", "Оплата картой.", "Оплата картой. Ещё."))
+    assert any(
+        "Для 1 правок modify с дописанным текстом тип изменён на add" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+# ── логи ──────────────────────────────────────────────────────────────────────────────────────────────
 
 
 def test_skip_reasons_and_items_are_in_log_message(caplog: pytest.LogCaptureFixture) -> None:

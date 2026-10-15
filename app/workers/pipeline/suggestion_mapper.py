@@ -3,6 +3,10 @@
 Модель оформляет правки не всегда так, как просит промпт, поэтому перед сохранением
 ответ нормализуется:
 - modify с пустым new_text — это delete;
+- modify, где new_text начинается с old_text, — это добавление: модель «дописала»
+  предложение, повторив абзац. Такая правка становится add с якорем в последнем абзаце
+  old_text и new_text без повторённой части — иначе для docx она была бы отброшена
+  как многоабзацная, а для md/txt заменила бы абзац сама собой;
 - якорь добавления берётся из insert_after (или old_text для старых ответов); если его нет,
   а раздел section_ref есть в документе, якорём становится первый абзац раздела, и это
   явно отмечается в rationale — ревьюер видит, что место выбрано автоматически;
@@ -52,14 +56,31 @@ def infer_anchor(document_text: str, section_ref: str) -> str | None:
     return None
 
 
+def _last_paragraph(text: str) -> str:
+    paragraphs = [line.strip() for line in text.split("\n") if line.strip()]
+    return paragraphs[-1] if paragraphs else ""
+
+
 def _normalize(item: LLMSuggestionItem) -> LLMSuggestionItem:
-    """modify без нового текста — это удаление: модель часто оформляет delete именно так."""
-    if (
-        item.change_type == "modify"
-        and (item.old_text or "").strip()
-        and not (item.new_text or "").strip()
-    ):
+    """Привести modify к тому, чем он является на самом деле.
+
+    modify без нового текста — удаление: модель часто оформляет delete именно так.
+    modify, где новый текст начинается со старого, — добавление хвоста после old_text.
+    """
+    if item.change_type != "modify":
+        return item
+    old = (item.old_text or "").strip()
+    new = (item.new_text or "").strip()
+    if old and not new:
         return replace(item, change_type="delete", new_text=None)
+    if old and len(new) > len(old) and new.startswith(old):
+        return replace(
+            item,
+            change_type="add",
+            old_text="",
+            new_text=new[len(old) :].strip(),
+            insert_after=_last_paragraph(old),
+        )
     return item
 
 
@@ -166,8 +187,12 @@ def map_to_suggestions(
     suggestions: list[Suggestion] = []
     skipped_items: list[tuple[str, LLMSuggestionItem]] = []
     inferred_count = 0
+    appended_count = 0
     for raw_item in batch.items:
-        item, inferred = _resolve_anchor(_normalize(raw_item), document_text)
+        normalized = _normalize(raw_item)
+        if raw_item.change_type == "modify" and normalized.change_type == "add":
+            appended_count += 1
+        item, inferred = _resolve_anchor(normalized, document_text)
         reason = _skip_reason(item, document_text, single_paragraph=single_paragraph)
         if reason is not None:
             skipped_items.append((reason, item))
@@ -189,11 +214,18 @@ def map_to_suggestions(
                 confidence_score=item.confidence_score,
             )
         )
+    log_context = {"analysis_job_id": str(analysis_job_id), "document_id": str(document_id)}
+    if appended_count:
+        logger.info(
+            "Для %d правок modify с дописанным текстом тип изменён на add",
+            appended_count,
+            extra=log_context,
+        )
     if inferred_count:
         logger.info(
             "Для %d добавлений якорь выбран автоматически (первый абзац раздела)",
             inferred_count,
-            extra={"analysis_job_id": str(analysis_job_id), "document_id": str(document_id)},
+            extra=log_context,
         )
     if skipped_items:
         _log_skipped(
