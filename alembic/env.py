@@ -35,9 +35,17 @@ def _database_url() -> str:
     if url:
         return url
     # Локальный запуск без экспорта переменной: берём значение из .env, как делает приложение.
+    from pydantic import ValidationError  # noqa: PLC0415
+
     from app.core.config import get_settings  # noqa: PLC0415
 
-    return get_settings().database_url
+    try:
+        return get_settings().database_url
+    except ValidationError as exc:
+        # Без этого пустой DATABASE_URL выглядит как пачка ошибок валидации чужих настроек.
+        raise RuntimeError(
+            "DATABASE_URL не задан: экспортируйте переменную окружения или пропишите её в .env"
+        ) from exc
 
 
 config.set_main_option("sqlalchemy.url", _database_url())

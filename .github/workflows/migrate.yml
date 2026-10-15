@@ -23,6 +23,7 @@ jobs:
   migrate:
     name: alembic upgrade head
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: production          # GitHub Environment — здесь хранятся secrets
 
     steps:
@@ -40,18 +41,27 @@ jobs:
 
       # Secrets задаются в Settings → Environments → production.
       # alembic/env.py читает только DATABASE_URL.
-      - name: Write .env from secrets
+      - name: Check DATABASE_URL secret
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          cat > .env <<EOF
-          DATABASE_URL=${{ secrets.DATABASE_URL }}
-          EOF
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::Secret DATABASE_URL не задан в environment production"
+            exit 1
+          fi
 
       - name: Show pending migrations (dry-run info)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: alembic history --indicate-current
         continue-on-error: true     # не падаем, если БД ещё недоступна на этом шаге
 
       - name: Run migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: alembic upgrade head
 
       - name: Verify current revision
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: alembic current

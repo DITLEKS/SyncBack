@@ -25,7 +25,6 @@ from app.domain.exceptions import (
     SuggestionNotFoundError,
     SuggestionResetNotAllowedError,
 )
-from app.domain.interfaces.document_exporter import AppliedChange
 from app.domain.interfaces.entities import DocumentProtocol, SuggestionProtocol
 from app.domain.interfaces.event_publisher import IEventPublisher
 from app.domain.interfaces.unit_of_work import IUnitOfWork
@@ -205,25 +204,6 @@ class SuggestionService:
         async with self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             return await self._get_suggestion_for_document(document, suggestion_id)
-
-    async def get_accepted_changes(self, document_id: uuid.UUID) -> list[AppliedChange]:
-        async with self._uow:
-            document = await self._uow.documents.get_by_id(document_id)
-            if document is None or document.current_analysis_job_id is None:
-                return []
-            suggestions = await self._uow.suggestions.list_by_analysis_job_and_status(
-                document.current_analysis_job_id, SuggestionStatusVO.ACCEPTED
-            )
-        # Ручная правка пользователя (edited_text) важнее текста модели.
-        return [
-            AppliedChange(
-                section_ref=s.section_ref,
-                change_type=s.change_type.value,
-                old_text=s.original_text,
-                new_text=s.edited_text or s.suggested_text,
-            )
-            for s in suggestions
-        ]
 
     async def count_by_document_and_status(
         self,
