@@ -57,6 +57,11 @@ def _extension_to_format(suffix: str) -> DocumentFormatVO:
     return fmt
 
 
+def _document_storage_keys(*keys: str | None) -> list[str]:
+    """Ключи файлов документа без пустых значений и дубликатов, в исходном порядке."""
+    return list(dict.fromkeys(key for key in keys if key))
+
+
 class DocumentService:
     def __init__(
         self,
@@ -194,6 +199,20 @@ class DocumentService:
     # File operations
     # ------------------------------------------------------------------
 
+    async def _delete_storage_objects(
+        self, keys: list[str], document_id: uuid.UUID, message: str
+    ) -> None:
+        """Best-effort удаление файлов после commit: сбой логируется и не прерывает остальные."""
+        for key in keys:
+            try:
+                await self._storage.delete(key)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    message,
+                    exc_info=True,
+                    extra={"storage_key": key, "document_id": str(document_id)},
+                )
+
     async def delete_document(self, document: Document) -> None:
         """
         HIGH-2: удаление документа.
@@ -204,29 +223,29 @@ class DocumentService:
           2. delete(document) — удаляем саму запись документа;
              FK-каскад по document_sources срабатывает здесь.
           3. commit() — единственный коммит на операцию.
-        После коммита — best-effort удаление файлов из хранилища.
+        После коммита — best-effort удаление всех файлов документа
+        (storage_key, original_storage_key, exported_storage_key).
 
         Используется когда ORM-объект уже загружен.
         Для удаления только по ID без предварительного SELECT — см. delete_document_by_id.
         """
-        storage_key = document.storage_key
-        original_key: str | None = getattr(document, "original_storage_key", None)
+        document_id = document.id
+        keys_to_delete = _document_storage_keys(
+            document.storage_key,
+            getattr(document, "original_storage_key", None),
+            getattr(document, "exported_storage_key", None),
+        )
 
         async with self._uow:
-            await self._uow.documents.delete_document_scoped_sources(document.id)
+            await self._uow.documents.delete_document_scoped_sources(document_id)
             await self._uow.documents.delete(document)
             await self._uow.commit()
 
-        keys_to_delete = {k for k in [storage_key, original_key] if k}
-        for key in keys_to_delete:
-            try:
-                await self._storage.delete(key)
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "Не удалось удалить файл из хранилища после удаления документа",
-                    exc_info=True,
-                    extra={"storage_key": key, "document_id": str(document.id)},
-                )
+        await self._delete_storage_objects(
+            keys_to_delete,
+            document_id,
+            "Не удалось удалить файл из хранилища после удаления документа",
+        )
 
     async def delete_document_by_id(
         self,
@@ -238,10 +257,11 @@ class DocumentService:
         Порядок операций внутри транзакции:
           1. delete_document_scoped_sources — удаляем orphan-источники scope=DOCUMENT
              ДО flush документа, пока document_sources ещё существуют (подзапрос их читает).
-          2. delete_by_id — DELETE FROM documents RETURNING storage_key.
+          2. delete_by_id — DELETE FROM documents RETURNING ключи файлов.
              FK-каскад по document_sources срабатывает здесь.
           3. commit() — единственный коммит на операцию.
-        После коммита — best-effort удаление файлов из хранилища.
+        После коммита — best-effort удаление файлов из хранилища
+        (storage_key, original_storage_key, exported_storage_key).
 
         DocumentNotFoundError — документа нет в проекте;
         InvalidDocumentStatusError — документ сейчас анализируется.
@@ -265,20 +285,18 @@ class DocumentService:
                 raise DocumentNotFoundError(
                     f"Документ {document_id} не найден в проекте {project_id}"
                 )
-            storage_key: str = deleted["storage_key"]
-            original_key: str | None = deleted.get("original_storage_key")
+            keys_to_delete = _document_storage_keys(
+                deleted.get("storage_key"),
+                deleted.get("original_storage_key"),
+                deleted.get("exported_storage_key"),
+            )
             await self._uow.commit()
 
-        keys_to_delete = {k for k in [storage_key, original_key] if k}
-        for key in keys_to_delete:
-            try:
-                await self._storage.delete(key)
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "Не удалось удалить файл из хранилища (delete_by_id)",
-                    exc_info=True,
-                    extra={"storage_key": key, "document_id": str(document_id)},
-                )
+        await self._delete_storage_objects(
+            keys_to_delete,
+            document_id,
+            "Не удалось удалить файл из хранилища (delete_by_id)",
+        )
 
     async def get_download_url(self, document: Document) -> tuple[str, int]:
         expires_in = self._download_url_ttl_seconds
@@ -290,8 +308,8 @@ class DocumentService:
     async def get_original_file(self, document: Document) -> bytes:
         """Байты исходного файла для просмотра в браузере (режим «Оригинал»).
 
-        Выбор ключа тот же, что у get_original_content: original_storage_key, если он
-        когда-нибудь начнёт отличаться от storage_key.
+        Выбор ключа тот же, что у get_original_content: original_storage_key, если он когда-нибудь
+        начнёт отличаться от storage_key.
         """
         original_key: str | None = getattr(document, "original_storage_key", None)
         return await self._storage.download(original_key or document.storage_key)

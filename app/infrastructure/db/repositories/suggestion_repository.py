@@ -71,7 +71,8 @@ class SuggestionRepository(ISuggestionRepository):
 
         func.count().over() вычисляется ДО применения LIMIT/OFFSET в PostgreSQL,
         поэтому возвращает полный COUNT строк фильтрованной выборки.
-        Поведение покрыто тестом test_list_with_total_window_count.
+        Если страница пуста (offset за пределами выборки), оконный счётчик недоступен,
+        поэтому total читается отдельным COUNT с теми же фильтрами.
         """
         where_clauses = [Suggestion.analysis_job_id == analysis_job_id]
         if status is not None:
@@ -88,7 +89,10 @@ class SuggestionRepository(ISuggestionRepository):
         ).all()
 
         if not rows:
-            return [], 0
+            total = await self._session.scalar(
+                select(func.count()).select_from(Suggestion).where(*where_clauses)
+            )
+            return [], total or 0
         items = [r[0] for r in rows]
         total = rows[0][1]
         return items, total
