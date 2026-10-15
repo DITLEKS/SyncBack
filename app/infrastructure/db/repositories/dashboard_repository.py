@@ -5,9 +5,14 @@ DashboardRepository — SQL-агрегаты для GET /dashboard.
   get_stats              — единый COUNT(*) FILTER (базовая статистика)
   get_trends             — SELECT из dashboard_snapshots за N дней
   upsert_snapshot        — ON CONFLICT DO UPDATE для фонового джоба
-  get_attention_documents— Топ-N AWAITING_APPROVAL по pending_suggestions DESC
-  get_recent_documents   — 5 последних открытых + счётчики правок
+  get_attention_documents— Топ-N AWAITING_APPROVAL по pending-правкам текущего анализа
+  get_recent_documents   — 5 последних открытых + счётчики правок текущего анализа
   upsert_open            — ON CONFLICT DO UPDATE last_opened_at
+
+Правки предыдущих запусков анализа остаются в БД, поэтому счётчики считаются только
+по правкам с analysis_job_id = documents.current_analysis_job_id — так же, как в «Моих
+документах» (DocumentRepository.list_all_for_user). Без этого фильтра повторные запуски
+суммируются и дашборд показывает, например, 11/30 при 4 правках в редакторе.
 
 Сессия репозитория создаётся напрямую через get_db_session, вне UoW: никто снаружи
 не делает commit, поэтому пишущие методы (upsert_*) фиксируют транзакцию сами.
@@ -18,7 +23,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, date, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,7 +40,7 @@ class DashboardRepository(IDashboardQueryService):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    # ── базовая статистика ──────────────────────────────────────────────────────────
+    # ── базовая статистика ──────────────────────────────────────────────────────────────
 
     async def get_stats(self, owner_id: uuid.UUID) -> dict:
         # Считаем по колонкам подзапроса. Ссылка на Document.status здесь добавила бы
@@ -57,7 +62,7 @@ class DashboardRepository(IDashboardQueryService):
         row = (await self._session.execute(q)).one()
         return {"total": row.total, "awaiting": row.awaiting, "ready": row.ready}
 
-    # ── снэпшоты / тренды ─────────────────────────────────────────────────────────
+    # ── снэпшоты / тренды ─────────────────────────────────────────────────────────────
 
     async def get_trends(self, owner_id: uuid.UUID, days: int = 7) -> list[dict]:
         """SELECT снэпшоты за последние `days` дней (today-days+1 … today)."""
@@ -137,7 +142,13 @@ class DashboardRepository(IDashboardQueryService):
                 .label("pending_suggestions"),
             )
             .join(Project, Document.project_id == Project.id)
-            .outerjoin(Suggestion, Suggestion.document_id == Document.id)
+            .outerjoin(
+                Suggestion,
+                and_(
+                    Suggestion.document_id == Document.id,
+                    Suggestion.analysis_job_id == Document.current_analysis_job_id,
+                ),
+            )
             .where(
                 Project.owner_id == owner_id,
                 Document.status == DocumentStatus.AWAITING_APPROVAL,
@@ -195,7 +206,13 @@ class DashboardRepository(IDashboardQueryService):
             )
             .join(DocumentOpen, DocumentOpen.document_id == Document.id)
             .join(Project, Document.project_id == Project.id)
-            .outerjoin(Suggestion, Suggestion.document_id == Document.id)
+            .outerjoin(
+                Suggestion,
+                and_(
+                    Suggestion.document_id == Document.id,
+                    Suggestion.analysis_job_id == Document.current_analysis_job_id,
+                ),
+            )
             .where(DocumentOpen.user_id == user_id)
             .group_by(
                 Document.id,
