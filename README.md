@@ -6,8 +6,26 @@ SyncScribe помогает держать техническую докумен
 
 Этот репозиторий содержит бэкенд: HTTP API, фоновый воркер анализа, работу с языковой моделью, разбор и сборку документов. Веб-клиент живёт в отдельном репозитории и работает с этим API.
 
+## Стек
+
+| Область | Технологии |
+|---|---|
+| Язык | Python 3.12 |
+| HTTP API | FastAPI, Pydantic v2, pydantic-settings; Gunicorn с воркерами Uvicorn |
+| База данных | PostgreSQL 16 (расширение `pg_trgm` для поиска), SQLAlchemy 2 в асинхронном режиме с asyncpg, миграции Alembic |
+| Фоновые задачи | Celery, Redis 7 как брокер и хранилище результатов |
+| События в реальном времени | Server-Sent Events через Redis Pub/Sub |
+| Файловое хранилище | Любое S3-совместимое хранилище; в поставке — SeaweedFS 4.48, клиент minio-py |
+| Языковая модель | Любой OpenAI-совместимый API (локальный или облачный), HTTP-клиент httpx |
+| Документы | python-docx для `.docx`; Markdown и простой текст без сторонних библиотек; BeautifulSoup для HTML-страниц источников |
+| Аутентификация | JWT (PyJWT, HS256), пароли в bcrypt, refresh-токены в Redis |
+| Ограничение частоты запросов | slowapi |
+| Тесты и качество кода | pytest, pytest-asyncio, pytest-cov, fakeredis, aiosqlite; ruff, mypy |
+| Инфраструктура | Docker, Docker Compose, GitHub Actions |
+
 ## Содержание
 
+- [Стек](#стек)
 - [Как это работает](#как-это-работает)
 - [Работа с языковой моделью](#работа-с-языковой-моделью)
 - [Работа с текстом и правками](#работа-с-текстом-и-правками)
@@ -315,8 +333,6 @@ app/
 - Зависимости направлены внутрь: `domain` не импортирует FastAPI, SQLAlchemy, Redis и `infrastructure`. Внешние системы подключаются через порты в `app/domain/interfaces` (`IUnitOfWork`, репозитории, `FileStorage`, `AnalysisQueue`, `LLMClient`, `IEventPublisher` и другие).
 - Сервисы работают с сущностями через протоколы (`DocumentProtocol`, `SuggestionProtocol`); ORM-модели остаются в инфраструктуре.
 - Границы слоёв проверяются в CI скриптами `scripts/check_layer_imports.py` (запрещённые импорты) и `scripts/check_layer_contracts.py` (вызовы несуществующих методов портов и неизвестные аргументы).
-
-Стек: Python 3.12, FastAPI и Pydantic v2, Gunicorn с воркерами Uvicorn, PostgreSQL 16, SQLAlchemy 2 (async, asyncpg) и Alembic, Celery и Redis, SeaweedFS через S3 (клиент minio-py как универсальный S3-клиент), httpx, python-docx, BeautifulSoup, PyJWT и bcrypt, slowapi.
 
 ## API
 
