@@ -67,9 +67,7 @@ async def job_state(pg_sessionmaker: async_sessionmaker[AsyncSession]) -> JobSta
 
 async def _claim(sessionmaker: async_sessionmaker[AsyncSession], state: JobState) -> bool:
     async with sessionmaker() as session:
-        won = await AnalysisJobSourceRepository(session).claim(
-            state.job_id, state.source_id, LEASE
-        )
+        won = await AnalysisJobSourceRepository(session).claim(state.job_id, state.source_id, LEASE)
         await session.commit()
         return won
 
