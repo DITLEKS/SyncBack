@@ -19,8 +19,6 @@ from app.infrastructure.llm.auth import GigaChatOAuth, NoAuth
 from app.infrastructure.llm.http_retry_mixin import HttpConnectionRetryMixin
 from app.infrastructure.llm.openai_compatible_client import OpenAICompatibleClient
 
-pytestmark = pytest.mark.asyncio
-
 SECRETS = {
     "dsn_password": "db-password-never-log",
     "api_key": "api-key-never-log",
@@ -74,6 +72,28 @@ _BASE_SETTINGS = {
 }
 
 
+def _settings(monkeypatch: pytest.MonkeyPatch, **override: str) -> Settings:
+    env = {**_BASE_SETTINGS, **override}
+    optional = [
+        "LLM_PROVIDER",
+        "LLM_ENDPOINT",
+        "LLM_MODEL",
+        "LLM_AUTH",
+        "LLM_API_KEY",
+        "MINIO_ENDPOINT",
+        "MINIO_BUCKET",
+        "MINIO_ROOT_USER",
+        "MINIO_ROOT_PASSWORD",
+        "MINIO_ACCESS_KEY",
+        "MINIO_SECRET_KEY",
+    ]
+    for key in set(env) | set(optional):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    return Settings(_env_file=None)
+
+
 @pytest.mark.parametrize(
     "override",
     [
@@ -89,21 +109,22 @@ _BASE_SETTINGS = {
         },
     ],
 )
-def test_deployed_environments_reject_placeholder_credentials(override: dict[str, str]) -> None:
+def test_deployed_environments_reject_placeholder_credentials(
+    monkeypatch: pytest.MonkeyPatch, override: dict[str, str]
+) -> None:
     with pytest.raises(ValidationError, match="placeholder/стандартные"):
-        Settings(_env_file=None, **({**_BASE_SETTINGS, **override}))  # type: ignore[arg-type]
+        _settings(monkeypatch, **override)
 
 
-def test_local_environment_keeps_example_credentials_usable() -> None:
-    settings = Settings(
-        _env_file=None,
-        **{
-            **_BASE_SETTINGS,
-            "ENV": "local",
-            "DATABASE_URL": "postgresql+asyncpg://syncscribe:syncscribe@db/app",
-            "S3_SECRET_KEY": "change-me-s3-app-secret",
-            "JWT_SECRET": "change-me-change-me-change-me-change-me-0000",
-        },
+def test_local_environment_keeps_example_credentials_usable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(
+        monkeypatch,
+        ENV="local",
+        DATABASE_URL="postgresql+asyncpg://syncscribe:syncscribe@db/app",
+        S3_SECRET_KEY="change-me-s3-app-secret",
+        JWT_SECRET="change-me-change-me-change-me-change-me-0000",
     )
     assert settings.env == "local"
 
@@ -116,6 +137,7 @@ class _RejectedClient(HttpConnectionRetryMixin):
         )
 
 
+@pytest.mark.asyncio
 async def test_llm_http_error_does_not_include_provider_body() -> None:
     marker = "provider-body-never-log"
     with pytest.raises(LLMInvalidResponseError) as exc_info:
@@ -129,6 +151,7 @@ async def test_llm_http_error_does_not_include_provider_body() -> None:
     assert marker not in str(exc_info.value)
 
 
+@pytest.mark.asyncio
 async def test_oauth_error_does_not_include_provider_body() -> None:
     marker = "oauth-body-never-log"
 
@@ -160,11 +183,10 @@ class _InvalidSchemaClient(OpenAICompatibleClient):
                 ]
             }
         )
-        return httpx.Response(
-            200, json={"choices": [{"message": {"content": content}}]}
-        )
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
 
 
+@pytest.mark.asyncio
 async def test_pydantic_input_is_not_in_llm_exception_or_cause() -> None:
     settings = cast(
         Settings,
