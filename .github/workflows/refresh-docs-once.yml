@@ -52,7 +52,7 @@ jobs:
           set +a
           alembic upgrade head
           python -c "import json; from app.main import app; print(json.dumps(app.openapi(), ensure_ascii=False, indent=2))" > docs/openapi.json
-          pg_dump --schema-only --no-owner --no-privileges syncscribe > /tmp/schema.dump.sql
+          PGPASSWORD=syncscribe pg_dump --host=localhost --port=5432 --username=syncscribe --dbname=syncscribe --schema-only --no-owner --no-privileges > /tmp/schema.dump.sql
           {
             echo '-- Схема БД SyncScribe после alembic upgrade head (ревизия 0032).'
             echo '-- Получено командой: pg_dump --schema-only --no-owner --no-privileges.'
