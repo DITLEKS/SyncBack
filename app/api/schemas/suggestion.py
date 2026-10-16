@@ -25,8 +25,7 @@ class SuggestionResponse(BaseModel):
     id: uuid.UUID
     document_id: uuid.UUID
     analysis_job_id: uuid.UUID
-    source_id: uuid.UUID | None = None
-    source: SuggestionSourceResponse | None = None
+    sources: list[SuggestionSourceResponse] = Field(default_factory=list)
     section_ref: str | None = None
     change_type: Literal["add", "modify", "delete"]
     original_text: str | None = None

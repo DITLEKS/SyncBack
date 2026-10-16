@@ -48,7 +48,6 @@ class Suggestion(Base):
             "decided_by",
             postgresql_where=sa.text("decided_by IS NOT NULL"),
         ),
-        Index("ix_suggestions_source_id", "source_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -57,9 +56,6 @@ class Suggestion(Base):
     )
     document_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
-    )
-    source_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("sources.id", ondelete="SET NULL"), nullable=True
     )
     section_ref: Mapped[str] = mapped_column(String(500), nullable=False)
     block_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -86,4 +82,4 @@ class Suggestion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     analysis_job: Mapped["AnalysisJob"] = relationship(back_populates="suggestions")
-    source: Mapped["Source | None"] = relationship(lazy="joined")
+    sources: Mapped[list["Source"]] = relationship(secondary="suggestion_sources", lazy="selectin")
