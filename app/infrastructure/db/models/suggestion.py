@@ -28,6 +28,7 @@ from app.infrastructure.db.models.enums import ChangeType, SuggestionStatus
 
 if TYPE_CHECKING:
     from app.infrastructure.db.models.analysis_job import AnalysisJob
+    from app.infrastructure.db.models.source import Source
 
 _values = lambda e: [m.value for m in e]  # noqa: E731
 
@@ -96,3 +97,4 @@ class Suggestion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     analysis_job: Mapped["AnalysisJob"] = relationship(back_populates="suggestions")
+    sources: Mapped[list["Source"]] = relationship(secondary="suggestion_sources", lazy="selectin")
