@@ -4913,6 +4913,14 @@
             "title": "Confidence Score",
             "description": "Уверенность модели, 0–1"
           },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SuggestionSourceResponse"
+            },
+            "type": "array",
+            "title": "Sources",
+            "description": "Источники истины, на основании которых создана правка"
+          },
           "block_id": {
             "anyOf": [
               {
@@ -4997,6 +5005,52 @@
         ],
         "title": "SuggestionResponse",
         "description": "Правка анализа в том виде, в каком её показывает редактор."
+      },
+      "SuggestionSourceResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "project_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Project Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "url",
+              "file"
+            ],
+            "title": "Type"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "project_id",
+          "name",
+          "type"
+        ],
+        "title": "SuggestionSourceResponse",
+        "description": "Краткие данные источника, на котором основана правка."
       },
       "TokenResponse": {
         "properties": {

@@ -1,6 +1,6 @@
 # Схема базы данных SyncScribe
 
-Описание соответствует схеме после применения всех миграций Alembic (ревизия `0031`). Данные собраны из каталога PostgreSQL на чистой базе после `alembic upgrade head`. Полный DDL — в [`schema.sql`](schema.sql).
+Описание соответствует схеме после применения всех миграций Alembic (ревизия `0032`). Данные собраны из каталога PostgreSQL на чистой базе после `alembic upgrade head`. Полный DDL — в [`schema.sql`](schema.sql).
 
 Источник истины — миграции в `alembic/versions`. После новой миграции оба файла нужно обновить (см. [раздел в конце](#как-обновить)).
 
@@ -18,6 +18,8 @@ erDiagram
     analysis_jobs ||--o{ analysis_job_sources : "по источникам"
     analysis_jobs ||--o{ suggestions : "предлагает"
     documents ||--o{ suggestions : ""
+    suggestions ||--o{ suggestion_sources : "основана на"
+    sources ||--o{ suggestion_sources : "подтверждает"
     users |o--o{ suggestions : "решает"
     suggestions |o--o{ audit_logs : ""
     documents |o--o{ audit_logs : ""
@@ -51,6 +53,18 @@ erDiagram
 
 ## Таблицы
 
+### suggestion_sources
+
+Связь «многие ко многим» между правками и источниками истины, на основании которых они созданы. Новые правки связываются с обрабатываемым источником в той же транзакции, что и сама правка. Составной первичный ключ не допускает повторной связи.
+
+| Колонка | Тип | NULL | По умолчанию | Описание |
+|---|---|---|---|---|
+| `suggestion_id` | `uuid` | нет |  | PK → `suggestions` (CASCADE) |
+| `source_id` | `uuid` | нет |  | PK → `sources` (CASCADE) |
+
+Индексы:
+
+- `ix_suggestion_sources_source_id` (btree): `(source_id)`
 ### users
 
 Пользователи. Приложение использует роли `admin` и `user`.
@@ -340,6 +354,7 @@ erDiagram
 - На документ допускается одна активная задача анализа: частичный уникальный индекс `uq_analysis_jobs_one_active_per_document` по `document_id` для статусов `pending`, `dispatched`, `processing`.
 - Повторный запуск с тем же `Idempotency-Key` находит уже созданную задачу: уникальность `(document_id, idempotency_key)`.
 - Источник обрабатывается в запуске не больше одного раза: уникальность `(job_id, source_id)` в `analysis_job_sources`.
+- Связь правки с одним источником записывается не больше одного раза: составной PK `(suggestion_id, source_id)` в `suggestion_sources`; удаление правки или источника каскадно удаляет связь.
 - У файлового источника обязателен ключ в хранилище, у ссылки — адрес: `ck_sources_type_field_consistency`.
 - Запись аудита о скачивании и финализации ссылается на документ, запись о решении — на правку: `ck_audit_logs_target`.
 - Удаление пользователя, проекта или документа каскадно удаляет зависимые данные. Если удалён пользователь, принимавший решения по чужим документам (например, администратор), его решения и записи аудита остаются с пустым автором (`SET NULL`).
