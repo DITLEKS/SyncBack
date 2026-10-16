@@ -65,7 +65,9 @@ def _resolve_anchor(item: LLMSuggestionItem, document_text: str) -> tuple[LLMSug
     return replace(item, old_text=inferred, insert_after=None), inferred is not None
 
 
-def _skip_reason(item: LLMSuggestionItem, document_text: str, *, single_paragraph: bool) -> str | None:
+def _skip_reason(
+    item: LLMSuggestionItem, document_text: str, *, single_paragraph: bool
+) -> str | None:
     if item.change_type not in _CHANGE_TYPE_MAP:
         return "unknown_change_type"
     if item.change_type == "add":
@@ -85,15 +87,39 @@ def _with_inferred_note(rationale: str | None, section_ref: str) -> str:
     return f"{rationale.rstrip()} {note}" if rationale and rationale.strip() else note
 
 
-def _log_skipped(batch: LLMSuggestionBatch, skipped_items: list[tuple[str, LLMSuggestionItem]], *, kept: int, analysis_job_id: uuid.UUID, document_id: uuid.UUID) -> None:
+def _log_skipped(
+    batch: LLMSuggestionBatch,
+    skipped_items: list[tuple[str, LLMSuggestionItem]],
+    *,
+    kept: int,
+    analysis_job_id: uuid.UUID,
+    document_id: uuid.UUID,
+) -> None:
     skipped: dict[str, int] = {}
     for reason, _ in skipped_items:
         skipped[reason] = skipped.get(reason, 0) + 1
-    context = {"analysis_job_id": str(analysis_job_id), "document_id": str(document_id), "skipped": skipped, "kept": kept}
+    context = {
+        "analysis_job_id": str(analysis_job_id),
+        "document_id": str(document_id),
+        "skipped": skipped,
+        "kept": kept,
+    }
     details = ", ".join(f"{reason}={count}" for reason, count in sorted(skipped.items()))
-    logger.warning("Часть правок LLM отброшена как невалидные: %s (сохранено %d из %d)", details, kept, len(batch.items), extra=context)
+    logger.warning(
+        "Часть правок LLM отброшена как невалидные: %s (сохранено %d из %d)",
+        details,
+        kept,
+        len(batch.items),
+        extra=context,
+    )
     if kept == 0:
-        logger.warning("Все %d правок LLM отброшены (job=%s, document=%s)", len(batch.items), analysis_job_id, document_id, extra=context)
+        logger.warning(
+            "Все %d правок LLM отброшены (job=%s, document=%s)",
+            len(batch.items),
+            analysis_job_id,
+            document_id,
+            extra=context,
+        )
 
 
 def map_to_suggestions(
@@ -139,9 +165,23 @@ def map_to_suggestions(
         )
     log_context = {"analysis_job_id": str(analysis_job_id), "document_id": str(document_id)}
     if appended_count:
-        logger.info("Для %d правок modify с дописанным текстом тип изменён на add", appended_count, extra=log_context)
+        logger.info(
+            "Для %d правок modify с дописанным текстом тип изменён на add",
+            appended_count,
+            extra=log_context,
+        )
     if inferred_count:
-        logger.info("Для %d добавлений якорь выбран автоматически (первый абзац раздела)", inferred_count, extra=log_context)
+        logger.info(
+            "Для %d добавлений якорь выбран автоматически (первый абзац раздела)",
+            inferred_count,
+            extra=log_context,
+        )
     if skipped_items:
-        _log_skipped(batch, skipped_items, kept=len(suggestions), analysis_job_id=analysis_job_id, document_id=document_id)
+        _log_skipped(
+            batch,
+            skipped_items,
+            kept=len(suggestions),
+            analysis_job_id=analysis_job_id,
+            document_id=document_id,
+        )
     return suggestions
