@@ -1,5 +1,6 @@
 """Маппер: якорь добавления из insert_after или первого абзаца раздела, нормализация
-modify→delete и modify→add, отброс многоабзацных фрагментов для docx и причины отброса в тексте лога."""
+modify→delete и modify→add, валидация исходного фрагмента, отброс многоабзацных
+фрагментов для docx и причины отброса в тексте лога."""
 
 import logging
 import uuid
@@ -125,8 +126,23 @@ def test_modify_with_empty_new_text_becomes_delete() -> None:
     assert all(s.suggested_text is None for s in result)
 
 
-def test_modify_and_delete_are_not_filtered_by_anchor_rule() -> None:
-    result = _map(_item("modify", "Нет в документе"), _item("delete", None, None))
+@pytest.mark.parametrize("change_type", ["modify", "delete"])
+def test_modify_and_delete_without_old_text_are_dropped(change_type: str) -> None:
+    assert _map(_item(change_type, None, None), _item(change_type, "   ", None)) == []
+
+
+@pytest.mark.parametrize("change_type", ["modify", "delete"])
+def test_modify_and_delete_with_old_text_missing_from_document_are_dropped(
+    change_type: str,
+) -> None:
+    assert _map(_item(change_type, "Нет в документе", None)) == []
+
+
+def test_modify_and_delete_with_existing_old_text_are_kept() -> None:
+    result = _map(
+        _item("modify", "Срок ответа — 10 дней.", "Срок ответа — 5 дней."),
+        _item("delete", "Оплата картой.", None),
+    )
     assert [s.change_type for s in result] == [ChangeType.MODIFY, ChangeType.DELETE]
 
 
@@ -203,6 +219,25 @@ def test_skip_reasons_are_in_log_message_without_user_text(
     assert "сохранено 1 из 3" in summary
     assert not any("такого текста нет" in m for m in messages)
     assert not any("Сырой ответ" in m for m in messages)
+
+
+def test_missing_original_text_reasons_are_logged_without_user_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    missing = "Секретный фрагмент, которого нет в документе"
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        result = _map(
+            _item("modify", missing, "Замена"),
+            _item("delete", None, None),
+            _item("modify", "Оплата картой.", "Оплата по счёту."),
+        )
+    assert len(result) == 1
+    messages = [record.getMessage() for record in caplog.records]
+    summary = next(m for m in messages if m.startswith("Часть правок LLM отброшена"))
+    assert "old_text_missing=1" in summary
+    assert "old_text_not_in_document=1" in summary
+    assert "сохранено 1 из 3" in summary
+    assert not any(missing in message for message in messages)
 
 
 def test_raw_response_is_never_logged_when_everything_is_dropped(

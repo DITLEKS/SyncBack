@@ -10,6 +10,8 @@
 - якорь добавления берётся из insert_after (или old_text для старых ответов); если его нет,
   а раздел section_ref есть в документе, якорем становится первый абзац раздела, и это
   явно отмечается в rationale — ревьюер видит, что место выбрано автоматически;
+- modify/delete сохраняются только с непустым old_text, который дословно присутствует
+  в документе: иначе экспорт всё равно не сможет применить такую правку;
 - для docx фрагмент с переводом строки отбрасывается: экспорт ищет old_text внутри
   одного абзаца и такую правку всё равно не применит.
 Якорь добавления сохраняется в original_text — так его ждут экспортёры и фронтенд.
@@ -102,15 +104,19 @@ def _skip_reason(
     """Почему правку нельзя сохранить; None — если можно."""
     if item.change_type not in _CHANGE_TYPE_MAP:
         return "unknown_change_type"
+    old_text = (item.old_text or "").strip()
     if item.change_type == "add":
-        anchor = (item.old_text or "").strip()
-        if not anchor:
+        if not old_text:
             return "add_without_anchor"
-        if anchor not in document_text:
+        if old_text not in document_text:
             return "add_anchor_not_in_document"
         return None
-    if single_paragraph and "\n" in (item.old_text or "").strip():
+    if not old_text:
+        return "old_text_missing"
+    if single_paragraph and "\n" in old_text:
         return "old_text_spans_paragraphs"
+    if old_text not in document_text:
+        return "old_text_not_in_document"
     return None
 
 
