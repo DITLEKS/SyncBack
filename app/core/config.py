@@ -144,9 +144,7 @@ class Settings(BaseSettings):
 
         if unsafe_fields:
             names = ", ".join(unsafe_fields)
-            raise ValueError(
-                f"ENV={self.env}: замените placeholder/стандартные значения: {names}"
-            )
+            raise ValueError(f"ENV={self.env}: замените placeholder/стандартные значения: {names}")
         return self
 
     log_level: str = "INFO"
