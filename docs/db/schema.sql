@@ -1,4 +1,4 @@
--- Схема БД SyncScribe после alembic upgrade head (ревизия 0031).
+-- Схема БД SyncScribe после alembic upgrade head (ревизия 0032).
 -- Получено командой: pg_dump --schema-only --no-owner --no-privileges.
 -- Источник истины — миграции в alembic/versions; файл обновляется вместе с ними.
 
@@ -6,12 +6,14 @@
 -- PostgreSQL database dump
 --
 
+\restrict e6anAg2TyyN2EKtmAgRMwYapTeVTfdeFdDMwgZ6h9g4FQfeK3QDNBLanrvyBS3Y
 
+-- Dumped from database version 16.15
+-- Dumped by pg_dump version 16.15 (Ubuntu 16.15-1.pgdg24.04+2)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
-SET transaction_timeout = 0;
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
@@ -283,7 +285,7 @@ CREATE TABLE public.document_sources (
 CREATE TABLE public.documents (
     id uuid NOT NULL,
     project_id uuid NOT NULL,
-    name character varying(512) CONSTRAINT documents_title_not_null NOT NULL,
+    name character varying(512) NOT NULL,
     format public.document_format NOT NULL,
     storage_key character varying(1024) NOT NULL,
     status public.document_status DEFAULT 'draft'::public.document_status NOT NULL,
@@ -326,10 +328,20 @@ CREATE TABLE public.sources (
     type public.source_type NOT NULL,
     storage_key character varying(1024),
     url character varying(2048),
-    created_at timestamp with time zone DEFAULT now() CONSTRAINT sources_uploaded_at_not_null NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
     scope public.source_scope DEFAULT 'project'::public.source_scope NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT ck_sources_type_field_consistency CHECK ((((type = 'file'::public.source_type) AND (storage_key IS NOT NULL)) OR ((type = 'url'::public.source_type) AND (url IS NOT NULL))))
+);
+
+
+--
+-- Name: suggestion_sources; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.suggestion_sources (
+    suggestion_id uuid NOT NULL,
+    source_id uuid NOT NULL
 );
 
 
@@ -458,6 +470,14 @@ ALTER TABLE ONLY public.projects
 
 ALTER TABLE ONLY public.sources
     ADD CONSTRAINT sources_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: suggestion_sources suggestion_sources_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.suggestion_sources
+    ADD CONSTRAINT suggestion_sources_pkey PRIMARY KEY (suggestion_id, source_id);
 
 
 --
@@ -611,6 +631,13 @@ CREATE INDEX ix_sources_project_id ON public.sources USING btree (project_id);
 --
 
 CREATE INDEX ix_sources_scope ON public.sources USING btree (scope);
+
+
+--
+-- Name: ix_suggestion_sources_source_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_suggestion_sources_source_id ON public.suggestion_sources USING btree (source_id);
 
 
 --
@@ -783,6 +810,22 @@ ALTER TABLE ONLY public.sources
 
 
 --
+-- Name: suggestion_sources suggestion_sources_source_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.suggestion_sources
+    ADD CONSTRAINT suggestion_sources_source_id_fkey FOREIGN KEY (source_id) REFERENCES public.sources(id) ON DELETE CASCADE;
+
+
+--
+-- Name: suggestion_sources suggestion_sources_suggestion_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.suggestion_sources
+    ADD CONSTRAINT suggestion_sources_suggestion_id_fkey FOREIGN KEY (suggestion_id) REFERENCES public.suggestions(id) ON DELETE CASCADE;
+
+
+--
 -- Name: suggestions suggestions_analysis_job_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -810,4 +853,5 @@ ALTER TABLE ONLY public.suggestions
 -- PostgreSQL database dump complete
 --
 
+\unrestrict e6anAg2TyyN2EKtmAgRMwYapTeVTfdeFdDMwgZ6h9g4FQfeK3QDNBLanrvyBS3Y
 
