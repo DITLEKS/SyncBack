@@ -11,6 +11,7 @@ class SuggestionSourceResponse(BaseModel):
     """Источник, на основании которого была создана правка."""
 
     id: uuid.UUID
+    project_id: uuid.UUID
     name: str
     type: Literal["url", "file"]
     url: str | None = None
