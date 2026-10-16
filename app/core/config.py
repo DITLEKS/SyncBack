@@ -1,12 +1,45 @@
-"""
-Единая точка чтения конфигурации приложения.
-"""
+"""Единая точка чтения конфигурации приложения."""
 
 from functools import lru_cache
 from typing import Annotated, Literal
+from urllib.parse import unquote, urlsplit
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+_WEAK_SECRET_VALUES = {
+    "admin",
+    "change-me",
+    "changeme",
+    "default",
+    "minioadmin",
+    "password",
+    "postgres",
+    "root",
+    "secret",
+    "syncscribe",
+    "test",
+}
+_WEAK_SECRET_PREFIXES = (
+    "change-me",
+    "changeme",
+    "replace-me",
+    "replace_with",
+    "your-",
+    "your_",
+    "<",
+)
+
+
+def _is_placeholder_secret(value: str | None) -> bool:
+    if value is None:
+        return False
+    normalized = value.strip().lower()
+    return (
+        normalized in _WEAK_SECRET_VALUES
+        or normalized.startswith(_WEAK_SECRET_PREFIXES)
+        or normalized.endswith("...")
+    )
 
 
 class Settings(BaseSettings):
@@ -16,13 +49,9 @@ class Settings(BaseSettings):
     debug: bool = False
 
     database_url: str
-
     redis_url: str
-
     redis_sse_channel: str = "syncscribe:sse"
 
-    # S3-совместимое хранилище (SeaweedFS). Приложению нужен сервисный пользователь
-    # с правами только на свой бакет. Имена MINIO_* принимаются как устаревшие алиасы.
     s3_endpoint: str = Field(validation_alias=AliasChoices("S3_ENDPOINT", "MINIO_ENDPOINT"))
     s3_access_key: str = Field(
         validation_alias=AliasChoices("S3_ACCESS_KEY", "MINIO_ACCESS_KEY", "MINIO_ROOT_USER")
@@ -49,46 +78,30 @@ class Settings(BaseSettings):
     login_max_attempts: int = 5
     login_lockout_seconds: int = 300
 
-    # Пул соединений API-процесса. Пул на каждый процесс gunicorn, поэтому
-    # суммарное число соединений = workers × (pool_size + max_overflow);
-    # оно должно укладываться в max_connections PostgreSQL.
     db_pool_size: int = 5
     db_max_overflow: int = 10
     db_pool_timeout_seconds: int = 30
     db_pool_recycle_seconds: int = 1800
 
-    # Хранилище счётчиков slowapi. memory:// считает лимиты отдельно в каждом
-    # процессе gunicorn, поэтому вне локальной разработки нужен Redis
-    # (например, redis://redis:6379/1 — отдельная база от очереди и SSE).
     rate_limit_storage_uri: str = "memory://"
-
     max_upload_size_mb: int = 50
 
     @property
     def max_upload_size_bytes(self) -> int:
         return self.max_upload_size_mb * 1024 * 1024
 
-    # ── LLM ───────────────────────────────────────────────────────────────────────────────────────
-    # Один клиент на всех провайдеров: OpenAI-совместимый POST {LLM_ENDPOINT}/chat/completions.
-    # Его понимают локальные движки (Ollama, vLLM, LM Studio), внешние API и GigaChat;
-    # разница между ними — только адрес, модель и способ авторизации.
-    # remote_http и onprem — устаревшие алиасы openai_compatible, оставлены для старых .env.
     llm_provider: Literal["stub", "openai_compatible", "remote_http", "onprem"] = "stub"
-    # Базовый URL API без пути метода, например http://ollama:11434/v1.
     llm_endpoint: str = ""
     llm_model: str = ""
-    # bearer: готовый API-ключ; oauth_gigachat: «ключ авторизации» (Basic), обмениваемый на токен.
     llm_api_key: str = ""
     llm_auth: Literal["none", "bearer", "oauth_gigachat"] = "bearer"
     llm_oauth_url: str = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
     llm_oauth_scope: str = "GIGACHAT_API_PERS"
-    # Путь к PEM с корневыми сертификатами (для GigaChat — сертификаты Минцифры); пусто — системные.
     llm_ca_bundle: str = ""
     llm_verify_ssl: bool = True
     llm_temperature: float = 0.1
     llm_timeout_seconds: int = 60
     llm_max_retries: int = 3
-    # Документ + источник в символах; запас под контекст модели и ответ.
     llm_max_input_chars: int = 200_000
 
     @model_validator(mode="after")
@@ -105,17 +118,43 @@ class Settings(BaseSettings):
             raise ValueError(f"LLM_API_KEY обязателен для LLM_AUTH={self.llm_auth}")
         return self
 
+    @model_validator(mode="after")
+    def _forbid_deployment_placeholders(self) -> "Settings":
+        """Внешние окружения не должны запускаться с примерами из .env.example."""
+        if self.env == "local":
+            return self
+
+        unsafe_fields: list[str] = []
+        try:
+            database_password = unquote(urlsplit(self.database_url).password or "")
+        except ValueError:
+            database_password = ""
+        if _is_placeholder_secret(database_password):
+            unsafe_fields.append("DATABASE_URL password")
+        if _is_placeholder_secret(self.jwt_secret):
+            unsafe_fields.append("JWT_SECRET")
+        if _is_placeholder_secret(self.s3_secret_key):
+            unsafe_fields.append("S3_SECRET_KEY")
+        if (
+            self.llm_provider != "stub"
+            and self.llm_auth != "none"
+            and _is_placeholder_secret(self.llm_api_key)
+        ):
+            unsafe_fields.append("LLM_API_KEY")
+
+        if unsafe_fields:
+            names = ", ".join(unsafe_fields)
+            raise ValueError(f"ENV={self.env}: замените placeholder/стандартные значения: {names}")
+        return self
+
     log_level: str = "INFO"
     log_format: Literal["json", "text"] = "json"
 
-    # NoDecode: pydantic-settings иначе пытается разобрать значение как JSON
-    # и падает на обычной строке «a,b» ещё до валидатора.
     cors_allowed_origins: Annotated[list[str], NoDecode]
 
     @field_validator("cors_allowed_origins", mode="before")
     @classmethod
     def _parse_cors_origins(cls, v: object) -> list[str]:
-        """Принимает строку с origin через запятую или готовый список."""
         if isinstance(v, str):
             v = [origin.strip() for origin in v.split(",") if origin.strip()]
         if not isinstance(v, list):
@@ -125,9 +164,6 @@ class Settings(BaseSettings):
     @field_validator("cors_allowed_origins")
     @classmethod
     def _forbid_wildcard_origin(cls, v: list[str]) -> list[str]:
-        # CORS включён с allow_credentials=True; в этом режиме «*» заставляет
-        # Starlette отражать любой Origin, и cookie-сессии становятся доступны
-        # произвольному сайту.
         if "*" in v:
             raise ValueError(
                 "cors_allowed_origins не может содержать «*»: укажите явные origin фронтенда"
@@ -136,8 +172,6 @@ class Settings(BaseSettings):
             raise ValueError("cors_allowed_origins не может быть пустым")
         return v
 
-    # Адреса reverse proxy, чьим заголовкам X-Forwarded-For/-Proto можно верить.
-    # Пусто — заголовки игнорируются, клиентом считается прямое соединение.
     trusted_proxy_hosts: Annotated[list[str], NoDecode] = []
 
     @field_validator("trusted_proxy_hosts", mode="before")
@@ -154,8 +188,6 @@ class Settings(BaseSettings):
             )
         return v
 
-    # Слабый секрет (например, "secret" или пустая строка) позволяет
-    # тривиально форжировать токены.
     @field_validator("jwt_secret")
     @classmethod
     def _validate_jwt_secret(cls, v: str) -> str:
@@ -169,5 +201,4 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    # Обязательные поля берутся из окружения/.env, mypy этого не видит.
     return Settings()  # type: ignore[call-arg]

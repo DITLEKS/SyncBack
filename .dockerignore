@@ -1,4 +1,5 @@
 .env
+.env.*
 .git
 .gitignore
 __pycache__
@@ -11,3 +12,18 @@ tests
 .vscode
 .idea
 output
+
+# Секреты и локальные доверенные сертификаты передаются только во время запуска.
+certs
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+credentials*.json
+credentials*.yml
+credentials*.yaml
+secrets*.json
+secrets*.yml
+secrets*.yaml
