@@ -1,22 +1,4 @@
-"""Перевод ответа LLM в ORM-правки анализа.
-
-Модель оформляет правки не всегда так, как просит промпт, поэтому перед сохранением
-ответ нормализуется:
-- modify с пустым new_text — это delete;
-- modify, где new_text начинается с old_text, — это добавление: модель «дописала»
-  предложение, повторив абзац. Такая правка становится add с якорем в последнем абзаце
-  old_text и new_text без повторённой части — иначе для docx она была бы отброшена
-  как многоабзацная, а для md/txt заменила абзац сама собой;
-- якорь добавления берётся из insert_after (или old_text для старых ответов); если его нет,
-  а раздел section_ref есть в документе, якорем становится первый абзац раздела, и это
-  явно отмечается в rationale — ревьюер видит, что место выбрано автоматически;
-- для docx фрагмент с переводом строки отбрасывается: экспорт ищет old_text внутри
-  одного абзаца и такую правку всё равно не применит.
-Якорь добавления сохраняется в original_text — так его ждут экспортёры и фронтенд.
-
-Логи не содержат текста документа и ответа модели: только идентификаторы, счётчики и
-причины отброса, чтобы данные пользователя не попадали в внешнюю систему логирования.
-"""
+"""Перевод ответа LLM в ORM-правки анализа."""
 
 import logging
 import uuid
@@ -27,22 +9,15 @@ from app.infrastructure.db.models.enums import ChangeType, SuggestionStatus
 from app.infrastructure.db.models.suggestion import Suggestion
 
 logger = logging.getLogger("syncscribe.workers.suggestion_mapper")
-
 _CHANGE_TYPE_MAP = {"add": ChangeType.ADD, "modify": ChangeType.MODIFY, "delete": ChangeType.DELETE}
 _SINGLE_PARAGRAPH_FORMATS = frozenset({"docx", "doc"})
 
 
 def _heading_text(line: str) -> str:
-    """Текст заголовка без markdown-решёток и выделения: '## **Auth**' → 'Auth'."""
     return line.strip().lstrip("#").strip().strip("*").strip()
 
 
 def infer_anchor(document_text: str, section_ref: str) -> str | None:
-    """Якорь для добавления без якоря: первый абзац раздела section_ref.
-
-    Если раздел есть, но абзацев после заголовка нет — сам заголовок.
-    None, если заголовка с таким текстом в документе нет.
-    """
     wanted = _heading_text(section_ref or "")
     if not wanted:
         return None
@@ -63,11 +38,6 @@ def _last_paragraph(text: str) -> str:
 
 
 def _normalize(item: LLMSuggestionItem) -> LLMSuggestionItem:
-    """Привести modify к тому, чем он является на самом деле.
-
-    modify без нового текста — удаление: модель часто оформляет delete именно так.
-    modify, где новый текст начинается со старого, — добавление хвоста после old_text.
-    """
     if item.change_type != "modify":
         return item
     old = (item.old_text or "").strip()
@@ -86,7 +56,6 @@ def _normalize(item: LLMSuggestionItem) -> LLMSuggestionItem:
 
 
 def _resolve_anchor(item: LLMSuggestionItem, document_text: str) -> tuple[LLMSuggestionItem, bool]:
-    """Для add положить якорь в old_text; второй элемент — выбран ли он автоматически."""
     if item.change_type != "add":
         return item, False
     anchor = (item.insert_after or item.old_text or "").strip()
@@ -96,10 +65,7 @@ def _resolve_anchor(item: LLMSuggestionItem, document_text: str) -> tuple[LLMSug
     return replace(item, old_text=inferred, insert_after=None), inferred is not None
 
 
-def _skip_reason(
-    item: LLMSuggestionItem, document_text: str, *, single_paragraph: bool
-) -> str | None:
-    """Почему правку нельзя сохранить; None — если можно."""
+def _skip_reason(item: LLMSuggestionItem, document_text: str, *, single_paragraph: bool) -> str | None:
     if item.change_type not in _CHANGE_TYPE_MAP:
         return "unknown_change_type"
     if item.change_type == "add":
@@ -116,50 +82,18 @@ def _skip_reason(
 
 def _with_inferred_note(rationale: str | None, section_ref: str) -> str:
     note = f"Место вставки выбрано автоматически: после первого абзаца раздела «{section_ref}»."
-    if rationale and rationale.strip():
-        return f"{rationale.rstrip()} {note}"
-    return note
+    return f"{rationale.rstrip()} {note}" if rationale and rationale.strip() else note
 
 
-def _log_skipped(
-    batch: LLMSuggestionBatch,
-    skipped_items: list[tuple[str, LLMSuggestionItem]],
-    *,
-    kept: int,
-    analysis_job_id: uuid.UUID,
-    document_id: uuid.UUID,
-) -> None:
-    """Агрегированная диагностика отброшенных правок без текста документа и ответа модели.
-
-    Причины отброса — в тексте сообщения: консольный форматтер воркера не печатает extra.
-    Тексты old_text/new_text, section_ref и сырой ответ модели в логи не попадают:
-    они могут содержать фрагменты пользовательского документа или источников.
-    """
+def _log_skipped(batch: LLMSuggestionBatch, skipped_items: list[tuple[str, LLMSuggestionItem]], *, kept: int, analysis_job_id: uuid.UUID, document_id: uuid.UUID) -> None:
     skipped: dict[str, int] = {}
     for reason, _ in skipped_items:
         skipped[reason] = skipped.get(reason, 0) + 1
-    context = {
-        "analysis_job_id": str(analysis_job_id),
-        "document_id": str(document_id),
-        "skipped": skipped,
-        "kept": kept,
-    }
+    context = {"analysis_job_id": str(analysis_job_id), "document_id": str(document_id), "skipped": skipped, "kept": kept}
     details = ", ".join(f"{reason}={count}" for reason, count in sorted(skipped.items()))
-    logger.warning(
-        "Часть правок LLM отброшена как невалидные: %s (сохранено %d из %d)",
-        details,
-        kept,
-        len(batch.items),
-        extra=context,
-    )
+    logger.warning("Часть правок LLM отброшена как невалидные: %s (сохранено %d из %d)", details, kept, len(batch.items), extra=context)
     if kept == 0:
-        logger.warning(
-            "Все %d правок LLM отброшены (job=%s, document=%s)",
-            len(batch.items),
-            analysis_job_id,
-            document_id,
-            extra=context,
-        )
+        logger.warning("Все %d правок LLM отброшены (job=%s, document=%s)", len(batch.items), analysis_job_id, document_id, extra=context)
 
 
 def map_to_suggestions(
@@ -167,11 +101,10 @@ def map_to_suggestions(
     analysis_job_id: uuid.UUID,
     document_id: uuid.UUID,
     *,
+    source_id: uuid.UUID | None = None,
     document_text: str,
     document_format: str = "",
 ) -> list[Suggestion]:
-    """Невалидные элементы пропускаются с предупреждением в логе: лучше потерять одну правку,
-    чем уронить обработку источника целиком."""
     single_paragraph = document_format.lower() in _SINGLE_PARAGRAPH_FORMATS
     suggestions: list[Suggestion] = []
     skipped_items: list[tuple[str, LLMSuggestionItem]] = []
@@ -194,6 +127,7 @@ def map_to_suggestions(
             Suggestion(
                 analysis_job_id=analysis_job_id,
                 document_id=document_id,
+                source_id=source_id,
                 section_ref=item.section_ref,
                 change_type=_CHANGE_TYPE_MAP[item.change_type],
                 status=SuggestionStatus.PENDING,
@@ -205,23 +139,9 @@ def map_to_suggestions(
         )
     log_context = {"analysis_job_id": str(analysis_job_id), "document_id": str(document_id)}
     if appended_count:
-        logger.info(
-            "Для %d правок modify с дописанным текстом тип изменён на add",
-            appended_count,
-            extra=log_context,
-        )
+        logger.info("Для %d правок modify с дописанным текстом тип изменён на add", appended_count, extra=log_context)
     if inferred_count:
-        logger.info(
-            "Для %d добавлений якорь выбран автоматически (первый абзац раздела)",
-            inferred_count,
-            extra=log_context,
-        )
+        logger.info("Для %d добавлений якорь выбран автоматически (первый абзац раздела)", inferred_count, extra=log_context)
     if skipped_items:
-        _log_skipped(
-            batch,
-            skipped_items,
-            kept=len(suggestions),
-            analysis_job_id=analysis_job_id,
-            document_id=document_id,
-        )
+        _log_skipped(batch, skipped_items, kept=len(suggestions), analysis_job_id=analysis_job_id, document_id=document_id)
     return suggestions
