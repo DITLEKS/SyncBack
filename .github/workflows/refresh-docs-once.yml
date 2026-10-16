@@ -1,0 +1,137 @@
+name: Refresh documentation once
+
+on:
+  push:
+    branches: [docs/update-provenance-validation]
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: syncscribe
+          POSTGRES_PASSWORD: syncscribe
+          POSTGRES_DB: syncscribe
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U syncscribe"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: docs/update-provenance-validation
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Prepare environment
+        run: |
+          cp .env.example .env
+          sed -i 's/POSTGRES_HOST=postgres/POSTGRES_HOST=localhost/' .env
+          sed -i 's#DATABASE_URL=postgresql+asyncpg://syncscribe:syncscribe@postgres:5432/syncscribe#DATABASE_URL=postgresql+asyncpg://syncscribe:syncscribe@localhost:5432/syncscribe#' .env
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Generate OpenAPI and database DDL
+        run: |
+          set -a
+          . ./.env
+          set +a
+          alembic upgrade head
+          python -c "import json; from app.main import app; print(json.dumps(app.openapi(), ensure_ascii=False, indent=2))" > docs/openapi.json
+          pg_dump --schema-only --no-owner --no-privileges syncscribe > /tmp/schema.dump.sql
+          {
+            echo '-- Схема БД SyncScribe после alembic upgrade head (ревизия 0032).'
+            echo '-- Получено командой: pg_dump --schema-only --no-owner --no-privileges.'
+            echo '-- Источник истины — миграции в alembic/versions; файл обновляется вместе с ними.'
+            echo
+            cat /tmp/schema.dump.sql
+          } > docs/db/schema.sql
+
+      - name: Update narrative documentation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path("README.md")
+          text = p.read_text()
+          text = text.replace(
+              "- якорь добавления берётся из `insert_after`, затем из `old_text`. Если якоря нет, а раздел `section_ref` найден в документе, якорем становится первый абзац раздела, и в обоснование добавляется пометка «Место вставки выбрано автоматически…» — пользователь видит, что место выбрала не модель.\n",
+              "- якорь добавления берётся из `insert_after`, затем из `old_text`. Если якоря нет, а раздел `section_ref` найден в документе, якорем становится первый абзац раздела, и в обоснование добавляется пометка «Место вставки выбрано автоматически…» — пользователь видит, что место выбрала не модель;\n- `modify` и `delete` сохраняются только с непустым `old_text`, который дословно присутствует в тексте документа: иначе экспорт не сможет применить правку.\n",
+          )
+          text = text.replace(
+              "- якоря добавления нет в тексте документа;\n- для `.docx` фрагмент `old_text` охватывает несколько абзацев",
+              "- якоря добавления нет в тексте документа;\n- у `modify` или `delete` отсутствует `old_text` либо этот фрагмент не найден в документе;\n- для `.docx` фрагмент `old_text` охватывает несколько абзацев",
+          )
+          text = text.replace(
+              "Одна плохая правка не роняет обработку источника: она пропускается, остальные сохраняются. В логи попадают только счётчики и причины отбросов, без текста документа и ответа модели.\n",
+              "Одна плохая правка не роняет обработку источника: она пропускается, остальные сохраняются. В warning-лог попадают агрегированные причины (`old_text_missing`, `old_text_not_in_document` и другие), `analysis_job_id`, `document_id` и счётчики — без текста документа и ответа модели. Каждая сохранённая правка связывается с источником, на основании которого она создана; API возвращает краткие сведения в поле `sources`, чтобы клиент мог показать название и открыть предпросмотр источника.\n",
+          )
+          text = text.replace(
+              "- `suggestions` — правки, `audit_logs` — журнал решений и скачиваний;",
+              "- `suggestions` — правки, `suggestion_sources` — их связи с источниками истины, `audit_logs` — журнал решений и скачиваний;",
+          )
+          p.write_text(text)
+
+          p = Path("docs/db/SCHEMA.md")
+          text = p.read_text().replace("ревизия `0031`", "ревизия `0032`", 1)
+          text = text.replace(
+              '    analysis_jobs ||--o{ suggestions : "предлагает"\n    documents ||--o{ suggestions : ""',
+              '    analysis_jobs ||--o{ suggestions : "предлагает"\n    documents ||--o{ suggestions : ""\n    suggestions ||--o{ suggestion_sources : "основана на"\n    sources ||--o{ suggestion_sources : "подтверждает"',
+          )
+          section = '''### suggestion_sources
+
+          Связь «многие ко многим» между правками и источниками истины, на основании которых они созданы. Новые правки связываются с обрабатываемым источником в той же транзакции, что и сама правка. Составной первичный ключ не допускает повторной связи.
+
+          | Колонка | Тип | NULL | По умолчанию | Описание |
+          |---|---|---|---|---|
+          | `suggestion_id` | `uuid` | нет |  | PK → `suggestions` (CASCADE) |
+          | `source_id` | `uuid` | нет |  | PK → `sources` (CASCADE) |
+
+          Индексы:
+
+          - `ix_suggestion_sources_source_id` (btree): `(source_id)`
+
+          '''
+          section = "\n".join(line.removeprefix("          ") for line in section.splitlines())
+          text = text.replace("### users\n", section + "### users\n", 1)
+          text = text.replace(
+              "- Источник обрабатывается в запуске не больше одного раза: уникальность `(job_id, source_id)` в `analysis_job_sources`.\n",
+              "- Источник обрабатывается в запуске не больше одного раза: уникальность `(job_id, source_id)` в `analysis_job_sources`.\n- Связь правки с одним источником записывается не больше одного раза: составной PK `(suggestion_id, source_id)` в `suggestion_sources`; удаление правки или источника каскадно удаляет связь.\n",
+          )
+          p.write_text(text)
+          PY
+
+      - name: Verify generated documentation
+        run: |
+          set -a
+          . ./.env
+          set +a
+          python -m json.tool docs/openapi.json >/dev/null
+          grep -q '"SuggestionSourceResponse"' docs/openapi.json
+          grep -q 'CREATE TABLE public.suggestion_sources' docs/db/schema.sql
+          grep -q 'ревизия `0032`' docs/db/SCHEMA.md
+          pytest -q tests/unit/test_suggestion_mapper.py tests/unit/test_suggestion_sources.py
+          git diff --check
+
+      - name: Commit documentation
+        run: |
+          git rm .github/workflows/refresh-docs-once.yml
+          git add README.md docs/openapi.json docs/db/SCHEMA.md docs/db/schema.sql
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m "docs: refresh API and database references"
+          git push origin HEAD:docs/update-provenance-validation
