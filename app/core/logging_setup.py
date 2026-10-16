@@ -1,15 +1,9 @@
-"""
-Структурированное JSON-логирование с correlation id (request_id/task_id) через contextvars.
-
-Путь в репозитории: app/core/logging_setup.py
-
-Чувствительные поля маскируются рекурсивно: по совпадению ключа на любом уровне
-вложенности dict/list в extra=..., а не только на верхнем уровне.
-"""
+"""Структурированное логирование с correlation id и защитой чувствительных данных."""
 
 import contextvars
 import json
 import logging
+import re
 import sys
 import time
 from typing import Any
@@ -21,32 +15,62 @@ request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 task_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("task_id", default=None)
 
-_SENSITIVE_KEYS = {
-    "password",
-    "password_hash",
-    "token",
-    "authorization",
-    "jwt_secret",
-    "api_key",
-    "access_token",
-    "refresh_token",
-    "secret",
-}
 _REDACTED = "***REDACTED***"
+_SENSITIVE_KEY_PARTS = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "credentials",
+    "database_url",
+    "dsn",
+    "password",
+    "private_key",
+    "secret",
+    "token",
+}
+_STANDARD_LOG_RECORD_KEYS = set(logging.makeLogRecord({}).__dict__) | {"asctime", "message"}
+
+# Строковые сообщения и traceback могут содержать DSN или заголовки, даже если
+# вызывающий код не использовал structured extra. Значения заменяются до вывода.
+_DSN_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/@\s]*)(?::([^@\s]*))?@")
+_AUTH_RE = re.compile(r"(?i)\b(authorization\s*[:=]\s*)(?:bearer|basic)\s+[^\s,;]+")
+_BEARER_RE = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+")
+_COOKIE_RE = re.compile(r"(?i)\b((?:set-)?cookie\s*[:=]\s*)[^\r\n]+")
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)(\b[a-z0-9_.-]*(?:password|passwd|secret|api[_-]?key|token|authorization|"
+    r"(?:set[_-]?)?cookie|dsn|database[_-]?url|credentials?|private[_-]?key)"
+    r"[a-z0-9_.-]*\b\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+)
+
+
+def _is_sensitive_key(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+    compact = normalized.replace("_", "")
+    for part in _SENSITIVE_KEY_PARTS:
+        if part in normalized or part.replace("_", "") in compact:
+            return True
+    return False
+
+
+def _redact_text(value: str) -> str:
+    value = _DSN_RE.sub(lambda match: f"{match.group(1)}***:***@", value)
+    value = _AUTH_RE.sub(lambda match: f"{match.group(1)}{_REDACTED}", value)
+    value = _BEARER_RE.sub(lambda match: f"{match.group(1)} {_REDACTED}", value)
+    value = _COOKIE_RE.sub(lambda match: f"{match.group(1)}{_REDACTED}", value)
+    return _SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}{_REDACTED}", value)
 
 
 def _redact(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            key: (
-                _REDACTED
-                if isinstance(key, str) and key.lower() in _SENSITIVE_KEYS
-                else _redact(val)
-            )
+            key: _REDACTED if isinstance(key, str) and _is_sensitive_key(key) else _redact(val)
             for key, val in value.items()
         }
     if isinstance(value, (list, tuple)):
         return [_redact(item) for item in value]
+    if isinstance(value, str):
+        return _redact_text(value)
     return value
 
 
@@ -56,7 +80,7 @@ class CorrelationJsonFormatter(logging.Formatter):
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(record.created)),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": _redact_text(record.getMessage()),
         }
 
         request_id = request_id_var.get()
@@ -67,17 +91,12 @@ class CorrelationJsonFormatter(logging.Formatter):
             payload["task_id"] = task_id
 
         for key, value in record.__dict__.items():
-            if key.startswith("_") or key in logging.LogRecord.__dict__:
+            if key.startswith("_") or key in _STANDARD_LOG_RECORD_KEYS or key in payload:
                 continue
-            if key in payload:
-                continue
-            if key.lower() in _SENSITIVE_KEYS:
-                payload[key] = _REDACTED
-                continue
-            payload[key] = _redact(value)
+            payload[key] = _REDACTED if _is_sensitive_key(key) else _redact(value)
 
         if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
+            payload["exception"] = _redact_text(self.formatException(record.exc_info))
 
         return json.dumps(payload, ensure_ascii=False, default=str)
 
@@ -86,9 +105,13 @@ class PlainCorrelationFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         request_id = request_id_var.get() or "-"
         task_id = task_id_var.get() or "-"
-        base = f"{self.formatTime(record)} [{record.levelname}] req={request_id} task={task_id} {record.name}: {record.getMessage()}"
+        message = _redact_text(record.getMessage())
+        base = (
+            f"{self.formatTime(record)} [{record.levelname}] req={request_id} "
+            f"task={task_id} {record.name}: {message}"
+        )
         if record.exc_info:
-            base += "\n" + self.formatException(record.exc_info)
+            base += "\n" + _redact_text(self.formatException(record.exc_info))
         return base
 
 

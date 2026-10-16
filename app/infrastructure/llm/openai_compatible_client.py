@@ -1,13 +1,4 @@
-"""Универсальный LLMClient для OpenAI-совместимых API.
-
-POST {LLM_ENDPOINT}/chat/completions с model/messages — общий язык локальных движков
-(Ollama, vLLM, LM Studio, llama.cpp), внешних сервисов и GigaChat. Смена провайдера — смена
-настроек (адрес, модель, стратегия авторизации из auth.py), а не кода.
-
-Ответ модели — текст в choices[0].message.content; модели любят оборачивать JSON
-в ```json-ограждения и добавлять пояснения, поэтому объект вырезается от первой «{»
-до последней «}» и только затем валидируется схемой.
-"""
+"""Универсальный клиент OpenAI-совместимых LLM API."""
 
 from __future__ import annotations
 
@@ -27,12 +18,10 @@ from app.infrastructure.llm.prompt import build_prompt
 from app.infrastructure.llm.schemas import LLMHttpSuggestionResponse
 
 logger = logging.getLogger("syncscribe.llm.openai_compatible")
-
 _FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
 
 
 def extract_json_object(text: str) -> str:
-    """Вырезать JSON-объект из ответа модели: без markdown-ограждений и текста вокруг."""
     cleaned = _FENCE_RE.sub("", text.strip()).strip()
     start = cleaned.find("{")
     end = cleaned.rfind("}")
@@ -41,12 +30,22 @@ def extract_json_object(text: str) -> str:
     return cleaned[start : end + 1]
 
 
+def _validation_error_summary(exc: ValidationError) -> str:
+    """Только пути и типы ошибок: input/context могут содержать текст документа."""
+    details: list[str] = []
+    errors = exc.errors(include_url=False, include_context=False, include_input=False)
+    for error in errors[:10]:
+        location = ".".join(str(part) for part in error.get("loc", ())) or "<root>"
+        details.append(f"{location} ({error.get('type', 'invalid')})")
+    if len(errors) > 10:
+        details.append(f"ещё {len(errors) - 10}")
+    return ", ".join(details) or "неизвестная ошибка схемы"
+
+
 class OpenAICompatibleClient(HttpConnectionRetryMixin):
     def __init__(self, settings: Settings | None = None, auth: AuthStrategy | None = None):
         self._settings = settings or get_settings()
         self._auth = auth or build_auth(self._settings, self._new_client)
-
-    # ── транспорт ───────────────────────────────────────────────────────────────────
 
     def _verify(self) -> bool | str:
         if not self._settings.llm_verify_ssl:
@@ -72,7 +71,6 @@ class OpenAICompatibleClient(HttpConnectionRetryMixin):
                 verify=self._verify(),
             )
         except LLMInvalidResponseError as exc:
-            # Истёкший или отозванный токен: обновляем и пробуем ровно ещё раз.
             if not self._auth.refreshable or exc.status_code != 401:
                 raise
         headers = await self._auth.headers(force_refresh=True)
@@ -84,8 +82,6 @@ class OpenAICompatibleClient(HttpConnectionRetryMixin):
             max_retries=self._settings.llm_max_retries,
             verify=self._verify(),
         )
-
-    # ── LLMClient ──────────────────────────────────────────────────────────────────
 
     async def generate_suggestions(
         self, document_text: str, source_text: str, document_format: str
@@ -107,9 +103,10 @@ class OpenAICompatibleClient(HttpConnectionRetryMixin):
         try:
             parsed = LLMHttpSuggestionResponse.model_validate_json(extract_json_object(content))
         except ValidationError as exc:
+            summary = _validation_error_summary(exc)
             raise LLMInvalidResponseError(
-                f"LLM вернула ответ, не соответствующий ожидаемой схеме: {exc}"
-            ) from exc
+                f"LLM вернула ответ, не соответствующий ожидаемой схеме: {summary}"
+            ) from None
         items = [
             LLMSuggestionItem(
                 section_ref=item.section_ref,
@@ -138,7 +135,6 @@ class OpenAICompatibleClient(HttpConnectionRetryMixin):
         return content
 
     async def health_check(self) -> bool:
-        """GET {LLM_ENDPOINT}/models — есть у всех OpenAI-совместимых API; заодно проверяет авторизацию."""
         try:
             headers = await self._auth.headers()
             async with self._make_client(timeout=5, verify=self._verify()) as client:

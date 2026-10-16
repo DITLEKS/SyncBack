@@ -1,4 +1,24 @@
 .env
+.env.*
+!.env.example
+
+# Локальные сертификаты и закрытые ключи не должны попадать в Git.
+certs/*
+!certs/.gitkeep
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# Файлы с учётными данными.
+credentials*.json
+credentials*.yml
+credentials*.yaml
+secrets*.json
+secrets*.yml
+secrets*.yaml
 
 # Python
 __pycache__/
