@@ -33,3 +33,18 @@ def test_mapper_assigns_source_id_to_each_suggestion() -> None:
 
     assert len(suggestions) == 1
     assert suggestions[0].source_id == source_id
+
+
+def test_suggestion_source_response_includes_project_id() -> None:
+    from app.api.schemas.suggestion import SuggestionSourceResponse
+
+    project_id = uuid.uuid4()
+    payload = SuggestionSourceResponse(
+        id=uuid.uuid4(),
+        project_id=project_id,
+        name="Регламент безопасности",
+        type="url",
+        url="https://example.com/security-policy",
+    ).model_dump(mode="json")
+
+    assert payload["project_id"] == str(project_id)
