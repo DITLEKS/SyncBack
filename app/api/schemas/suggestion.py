@@ -7,6 +7,18 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 
+class SuggestionSourceResponse(BaseModel):
+    """Краткие данные источника, на котором основана правка."""
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    name: str
+    type: Literal["url", "file"]
+    url: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
 class SuggestionResponse(BaseModel):
     """Правка анализа в том виде, в каком её показывает редактор."""
 
@@ -26,6 +38,10 @@ class SuggestionResponse(BaseModel):
     )
     rationale: str | None = Field(default=None, description="Обоснование правки от модели")
     confidence_score: float | None = Field(default=None, description="Уверенность модели, 0–1")
+    sources: list[SuggestionSourceResponse] = Field(
+        default_factory=list,
+        description="Источники истины, на основании которых создана правка",
+    )
     block_id: str | None = None
     start_offset: int | None = Field(
         default=None, description="Начало фрагмента в тексте документа, если известно"

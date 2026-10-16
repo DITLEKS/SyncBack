@@ -60,37 +60,23 @@ logger = logging.getLogger("syncscribe.workers.analysis")
 _PARSED_DOC_KEY_PREFIX = "parsed_doc:"
 _PARSED_DOC_TTL_SECONDS = 3600
 
-# Lease захвата источника; должен быть больше жёсткого лимита времени задачи
-# (_TASK_TIME_LIMIT_SECONDS), иначе источник могут перехватить у ещё живого воркера.
 _SOURCE_LEASE_SECONDS = 600
-# Лимиты времени заданы на уровне задачи обработки источника, а не глобально в celery_app:
-# finalize_analysis_job и будущие задачи не должны наследовать ограничения LLM-пайплайна.
 _TASK_SOFT_TIME_LIMIT_SECONDS = 540
 _TASK_TIME_LIMIT_SECONDS = 570
-# Проигравший захват ждёт победителя: 20 повторов по 30 с ≈ lease.
 _BUSY_RETRY_COUNTDOWN_SECONDS = 30
 _BUSY_RETRY_LIMIT = 20
-# Таймаут LLM повторяется не более трёх раз, затем источник считается failed.
 _LLM_RETRY_LIMIT = 3
 _LLM_RETRY_BACKOFF_SECONDS = 30
-# Счётчики busy и LLM независимы и передаются через kwargs повтора; max_retries Celery —
-# лишь общий потолок, который при соблюдении обоих лимитов не достигается.
 _TASK_MAX_RETRIES = _BUSY_RETRY_LIMIT + _LLM_RETRY_LIMIT
 
-if _SOURCE_LEASE_SECONDS <= _TASK_TIME_LIMIT_SECONDS:  # pragma: no cover - инвариант конфигурации
+if _SOURCE_LEASE_SECONDS <= _TASK_TIME_LIMIT_SECONDS:  # pragma: no cover
     raise RuntimeError("_SOURCE_LEASE_SECONDS должен быть больше _TASK_TIME_LIMIT_SECONDS")
 
-# Точка подмены в тестах: фабрика UoW над изолированным подключением.
 uow_factory = isolated_uow
 
 
 def _run_async[T](coro: Coroutine[Any, Any, T]) -> T:
     return asyncio.run(coro)
-
-
-# ---------------------------------------------------------------------------
-# Инфраструктура воркера (per-process)
-# ---------------------------------------------------------------------------
 
 
 @functools.cache
@@ -133,8 +119,6 @@ def _event_publisher() -> IEventPublisher:
 
 @asynccontextmanager
 async def _redis() -> AsyncIterator[Redis]:
-    """Клиент Redis на время одного asyncio.run: общий клиент нельзя переиспользовать
-    между event loop, которые создаёт каждая задача."""
     client: Redis = Redis.from_url(get_settings().redis_url, decode_responses=True)
     try:
         yield client
@@ -155,11 +139,6 @@ def _build_source_ref(source: Source) -> SourceRef:
         url=source.url,
         uploaded_at=source.created_at,
     )
-
-
-# ---------------------------------------------------------------------------
-# Кэш распарсенного текста документа (общий для всех источников одного job)
-# ---------------------------------------------------------------------------
 
 
 async def _get_cached_plain_text(job_id: uuid.UUID) -> str | None:
@@ -197,11 +176,6 @@ async def _load_document_text(job_id: uuid.UUID, storage_key: str) -> str:
     return plain_text
 
 
-# ---------------------------------------------------------------------------
-# Обработка одного источника
-# ---------------------------------------------------------------------------
-
-
 _GENERATION_ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
     (LLMInputTooLargeError, "LLM_INPUT_TOO_LARGE"),
     (LLMTimeoutError, "LLM_UNAVAILABLE"),
@@ -236,7 +210,6 @@ def _retryable(source_id: str, error_code: str, error_message: str) -> dict[str,
 
 
 async def _release_source(job_uuid: uuid.UUID, source_uuid: uuid.UUID, token: uuid.UUID) -> None:
-    """Снять свой захват (processing → pending), чтобы повтор не ждал истечения lease."""
     try:
         async with uow_factory() as uow:
             await uow.job_sources.release(job_uuid, source_uuid, token)
@@ -257,8 +230,6 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
         if job is None:
             logger.error("process_source: job не найден", extra={"job_id": job_id})
             return _failed(source_id, "JOB_NOT_FOUND", "Задача анализа не найдена")
-        # Первый источник переводит задачу из очереди в обработку; если задачу
-        # уже завершили (например, отменили), работать не над чем.
         if not await uow.jobs.mark_processing_if_active(job_uuid):
             return {"source_id": source_id, "status": "cancelled"}
         await uow.commit()
@@ -270,10 +241,8 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
         if document is None:
             return _failed(source_id, "DOCUMENT_NOT_FOUND", "Документ не найден")
 
-        # Повторная доставка уже завершённого источника — без LLM и записи правок.
         run = await uow.job_sources.ensure(job_uuid, source_uuid)
         already_done = await uow.job_sources.get_completed_count(job_uuid, source_uuid)
-        # Захват источника до вызова LLM; commit делает метку видимой другим воркерам.
         token: uuid.UUID | None = None
         if already_done is None:
             token = await uow.job_sources.claim(job_uuid, source_uuid, _SOURCE_LEASE_SECONDS)
@@ -323,34 +292,31 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
 
     async with uow_factory() as uow:
         job = await uow.jobs.get_by_id(job_uuid)
-        # Пока шла генерация, задачу могли отменить — тогда правки не сохраняем.
         if job is None or not AnalysisJobLifecycle.is_active(job.status):
             await uow.job_sources.release(job_uuid, source_uuid, token)
             await uow.commit()
             return {"source_id": source_id, "status": "cancelled"}
-        # Владелец захвата пишет правки и отметку completed одной транзакцией.
         won = await uow.job_sources.mark_completed(job_uuid, source_uuid, token, len(suggestions))
         if not won:
             await uow.rollback()
             stored = await uow.job_sources.get_completed_count(job_uuid, source_uuid)
             if stored is not None:
                 return {"source_id": source_id, "status": "ok", "count": stored}
-            # Lease истёк, источник перехватил другой воркер: результат запишет он,
-            # а повтор этой задачи увидит completed.
             logger.warning(
                 "process_source: захват источника перехвачен, результат отброшен",
                 extra={"job_id": job_id, "source_id": source_id},
             )
             return {"source_id": source_id, "status": "busy"}
+        provenance_source = await uow.sources.get_by_id(source_uuid)
+        if provenance_source is None:
+            await uow.rollback()
+            return _failed(source_id, "SOURCE_NOT_FOUND", "Источник не найден")
+        for suggestion in suggestions:
+            suggestion.sources = [provenance_source]
         await uow.suggestions.bulk_create(suggestions)
         await uow.commit()
 
     return {"source_id": source_id, "status": "ok", "count": len(suggestions)}
-
-
-# ---------------------------------------------------------------------------
-# Финализация
-# ---------------------------------------------------------------------------
 
 
 async def _finalize(results: list[dict[str, Any]], job_id: str) -> None:
@@ -364,7 +330,6 @@ async def _finalize(results: list[dict[str, Any]], job_id: str) -> None:
             logger.error("finalize: job не найден", extra={"job_id": job_id})
             return
         if AnalysisJobLifecycle.is_terminal(job.status):
-            # Задачу уже завершили (например, отменили через API) — результат воркера не важнее.
             logger.info(
                 "finalize: задача уже завершена",
                 extra={"job_id": job_id, "status": job.status.value},
@@ -417,11 +382,6 @@ def _join_errors(failed: list[dict[str, Any]]) -> str:
     )[:2000]
 
 
-# ---------------------------------------------------------------------------
-# Celery tasks
-# ---------------------------------------------------------------------------
-
-
 def _retry_later(
     task: Task,
     job_id: str,
@@ -432,12 +392,6 @@ def _retry_later(
     llm_attempts: int,
     fallback: dict[str, Any],
 ) -> dict[str, Any]:
-    """Перепоставить задачу с обновлёнными счётчиками повторов.
-
-    args=() обязателен: иначе Celery возьмёт исходные позиционные аргументы запроса и
-    добавит к ним kwargs — job_id окажется передан дважды. Исчерпание общего потолка
-    max_retries превращается в итоговый результат fallback, а не в исключение.
-    """
     try:
         raise task.retry(
             args=(),
@@ -467,17 +421,10 @@ def process_source_for_analysis_job(
     busy_attempts: int = 0,
     llm_attempts: int = 0,
 ) -> dict[str, Any]:
-    """Обработать один источник; busy и таймаут LLM повторяются независимыми счётчиками.
-
-    busy_attempts/llm_attempts передаются через kwargs повтора, поэтому ожидание занятого
-    источника не расходует бюджет повторов LLM (и наоборот). Первичный вызов из chord
-    передаёт только (job_id, source_id).
-    """
     result: dict[str, Any] = _run_async(_process_source(job_id, source_id))
     status = result.get("status")
 
     if status == "busy":
-        # Источник держит другой воркер: ждём его результата, не отдавая busy в chord.
         busy_failed = _failed(
             source_id, "SOURCE_BUSY", "Источник занят другим воркером дольше допустимого"
         )
