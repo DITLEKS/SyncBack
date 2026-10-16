@@ -1,7 +1,4 @@
-"""
-Регистрация ORM-моделей — импортируется в alembic/env.py и app.core.dependencies
-для того, чтобы Base.metadata содержала все таблицы.
-"""
+"""Register all SQLAlchemy models for Alembic metadata."""
 
 from app.infrastructure.db.models.analysis_job import AnalysisJob  # noqa: F401
 from app.infrastructure.db.models.analysis_job_source import AnalysisJobSource  # noqa: F401

@@ -1,50 +1,63 @@
-"""Проверка сохранения ссылки правки на использованный источник."""
+"""Unit tests for suggestion source references."""
 
 import uuid
+from datetime import UTC, datetime
 
-from app.domain.interfaces.llm_client import LLMSuggestionBatch, LLMSuggestionItem
-from app.workers.pipeline.suggestion_mapper import map_to_suggestions
+import pytest
+
+from app.api.schemas.suggestion import SuggestionResponse
+from app.infrastructure.db.models.source import Source
+from app.infrastructure.db.models.suggestion import Suggestion
 
 
-def test_mapper_assigns_source_id_to_each_suggestion() -> None:
-    source_id = uuid.uuid4()
-    batch = LLMSuggestionBatch(
-        items=[
-            LLMSuggestionItem(
-                section_ref="Сроки",
-                change_type="modify",
-                old_text="10 дней",
-                new_text="14 дней",
-                rationale="Источник требует 14 дней.",
-                confidence_score=0.95,
-            )
-        ],
-        raw_response="{}",
+def test_suggestion_response_serializes_multiple_sources() -> None:
+    suggestion = Suggestion(
+        id=uuid.uuid4(), document_id=uuid.uuid4(), analysis_job_id=uuid.uuid4(), seq=1,
+        section_ref="Общие положения", change_type="replace", original_text="Старый текст",
+        suggested_text="Новый текст", status="pending", created_at=datetime.now(UTC),
     )
+    suggestion.sources = [
+        Source(id=uuid.uuid4(), project_id=uuid.uuid4(), name="Политика безопасности", source_type="file"),
+        Source(id=uuid.uuid4(), project_id=uuid.uuid4(), name="Стандарт MFA", source_type="url", url="https://example.com/mfa"),
+    ]
 
-    suggestions = map_to_suggestions(
-        batch,
-        uuid.uuid4(),
-        uuid.uuid4(),
-        source_id=source_id,
-        document_text="Срок ответа — 10 дней.",
-        document_format="docx",
+    payload = SuggestionResponse.model_validate(suggestion)
+
+    assert [source.name for source in payload.sources] == ["Политика безопасности", "Стандарт MFA"]
+    assert payload.sources[1].url == "https://example.com/mfa"
+
+
+def test_suggestion_response_defaults_to_empty_sources() -> None:
+    suggestion = Suggestion(
+        id=uuid.uuid4(), document_id=uuid.uuid4(), analysis_job_id=uuid.uuid4(), seq=1,
+        section_ref="Раздел", change_type="insert", original_text="", suggested_text="Текст",
+        status="pending", created_at=datetime.now(UTC),
     )
+    suggestion.sources = []
 
-    assert len(suggestions) == 1
-    assert suggestions[0].source_id == source_id
+    payload = SuggestionResponse.model_validate(suggestion)
+
+    assert payload.sources == []
 
 
-def test_suggestion_source_response_includes_project_id() -> None:
-    from app.api.schemas.suggestion import SuggestionSourceResponse
+@pytest.mark.asyncio
+async def test_merge_duplicates_keeps_all_sources() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
 
-    project_id = uuid.uuid4()
-    payload = SuggestionSourceResponse(
-        id=uuid.uuid4(),
-        project_id=project_id,
-        name="Регламент безопасности",
-        type="url",
-        url="https://example.com/security-policy",
-    ).model_dump(mode="json")
+    from app.infrastructure.db.repositories.suggestion_repository import SuggestionRepository
 
-    assert payload["project_id"] == str(project_id)
+    first_source = SimpleNamespace(id=uuid.uuid4())
+    second_source = SimpleNamespace(id=uuid.uuid4())
+    common = dict(section_ref="Общие положения", change_type="replace", original_text="Старый текст", suggested_text="Новый текст", block_id=None, start_offset=None, end_offset=None)
+    first = SimpleNamespace(id=uuid.uuid4(), sources=[first_source], **common)
+    duplicate = SimpleNamespace(id=uuid.uuid4(), sources=[second_source], **common)
+    session = SimpleNamespace(delete=AsyncMock(), flush=AsyncMock())
+    repository = SuggestionRepository(session)
+    repository.list_by_analysis_job = AsyncMock(return_value=[first, duplicate])  # type: ignore[method-assign]
+
+    merged = await repository.merge_duplicates_by_analysis_job(uuid.uuid4())
+
+    assert merged == 1
+    assert [source.id for source in first.sources] == [first_source.id, second_source.id]
+    session.delete.assert_awaited_once_with(duplicate)
